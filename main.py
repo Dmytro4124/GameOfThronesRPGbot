@@ -9,6 +9,8 @@ import time
 import re
 import os
 from dotenv import load_dotenv
+from flask import Flask
+from threading import Thread
 
 # ================= КОНФІГУРАЦІЯ =================
 
@@ -1351,11 +1353,29 @@ def handle_game_turn(message):
     send_safe_message(chat_id, response, reply_to_message_id=message.message_id)
 
 
+# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is alive!"
+
+def run():
+    # Render автоматично дає порт через змінну оточення PORT
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+# -----------------------------
+
 # Запуск
 if __name__ == "__main__":
     print("🤖 Бот запущено! Valar Morghulis.")
 
     load_lore_data()
+
+    keep_alive()
 
     try:
         bot.infinity_polling()
