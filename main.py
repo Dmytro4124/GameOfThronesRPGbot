@@ -19,20 +19,14 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-# 1. КЛЮЧІ (ОБОВ'ЯЗКОВО ЗАМІНІТЬ НА СВОЇ!)
-#TELEGRAM_TOKEN = "8247809650:AAGNqZxLaNcQBTv62qitEgHWTpztV3W0JMA"
-#GEMINI_API_KEY = "AIzaSyBWeBk2b5WTe_Mlzx1vDuMLhVZGO5UPyv8"
 
-# 2. НАЛАШТУВАННЯ ТАБЛИЦІ (Тут тепер ID замість назви)
-#SPREADSHEET_ID = '1M139rSnlYcICayvp_7AojqHfmg2jBBrEI8JLWJVMyZI'
-
-# Назви аркушів (вкладок)
+# Назви аркушів в гугл таблицях
 TAB_HOUSES = 'Доми'  # Аркуш зі списком домів
 TAB_CHARACTER = 'CharacterSheet'  # Аркуш персонажа
 TAB_KNOWLEDGE = 'KnowledgeBase'
 TAB_USERS = 'Users_DB'
 
-# Назва файлу з ключами (перевірте, щоб файл лежав поруч і називався так само)
+# Файл з ключами
 CREDENTIALS_FILE = 'credentials.json'
 
 # ================= КОНТЕКСТ СВІТУ =================
@@ -49,9 +43,9 @@ GAME_ERA_CONTEXT = """
 
 2. ПРИХОВАНІ ЗАГРОЗИ (ТІЛЬКИ ДЛЯ GM - ГРАВЕЦЬ НЕ ПОВИНЕН ЦЬОГО ЗНАТИ):
    - Секрет: Діти королеви — бастарди від інцесту з Джейме (це найнебезпечніша таємниця світу).
-   - Секрет2: Джона Аррена отруїла Ліза Аррен за змовою з Петіром Бейлішем.
+   - Секрет 2: Джона Аррена отруїла Ліза Аррен за змовою з Петіром Бейлішем.
    - Північ: Нічна Варта слабка як ніколи. Розвідники зникають за Стіною. Старі лякають дітей казками про Інших, але лорди в це не вірять.
-   - Ессос: Візеріс Таргарієн продає сестру Данерис кхалу Дрого. Драконів ще немає (це поки що скам'янілі яйця).
+   - Ессос: Візеріс Таргарієн продає сестру Дейнеріс кхалу Дрого. Драконів ще немає (це поки що скам'янілі яйця).
 
 3. АТМОСФЕРА СВІТУ (GRIMDARK):
    - Економіка: Ціни на зерно ростуть. Селяни ховають запаси, боячись довгої Зими.
@@ -61,7 +55,6 @@ GAME_ERA_CONTEXT = """
 ВАЖЛИВО ДЛЯ СЮЖЕТУ:
 - Нед Старк ще живий і знаходиться у Вінтерфеллі, отримав звістку про дезертира з нічної варти.
 - Війна П'яти Королів ЩЕ НЕ ПОЧАЛАСЯ.
-- Тіріон Ланністер їде на Північ разом з королем, щоб "посцяти з краю світу" (побачити Стіну).
 """
 
 # ================= ІНІЦІАЛІЗАЦІЯ =================
@@ -69,17 +62,16 @@ GAME_ERA_CONTEXT = """
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
 genai.configure(api_key=GEMINI_API_KEY)
-# Використовуємо Flash для швидкості
 model = genai.GenerativeModel(
+    #Вибір моделі тут
     model_name='gemma-3-27b-it',
-    ##generation_config={"response_mime_type": "application/json"}
 )
 
-# Зберігання стану гравців у пам'яті
+# Збереження стану гравців у пам'яті
 user_sessions = {}
 
 def get_main_menu():
-    """Створює постійні кнопки для гравця"""
+    """Кнопки меню"""
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     btn_profile = types.KeyboardButton("📜 Профіль")
     btn_inv = types.KeyboardButton("🎒 Інвентар")
@@ -101,28 +93,29 @@ def apply_system_impacts(profile, ai_impacts):
     """
     logs = []
 
-    # === 1. ОБРОБКА ЧАСУ (Time Keeper) ===
+    # === 1. ОБРОБКА ЧАСУ ===
     # Формат часу в профілі: "Рік 298, Місяць 1, День 1, Ранок"
-    # Для простоти ми будемо просто рухати час вперед текстом, або реалізуємо простий лічильник
-    # Тут реалізуємо спрощену логіку зміни доби: Ранок -> День -> Вечір -> Ніч -> Ранок (+1 день)
-
+    # Логіка зміни доби: Ранок -> День -> Вечір -> Ніч -> Ранок (+1 день)
     time_str = profile.get("Ігровий час", "День 1, Ранок")
-    time_tag = ai_impacts.get("time_passed", "none")  # short, medium, long, sleep, days
-
+    time_tag = ai_impacts.get("time_passed", "none")
     times_of_day = ["Ранок", "День", "Вечір", "Ніч"]
 
     if time_tag != "none":
-        # Спрощена логіка зміни часу (можна ускладнити парсинг, якщо треба)
+        # Знаходимо поточну фазу
         current_phase = "День"
         for t in times_of_day:
-            if t in time_str: current_phase = t; break
+            if t in time_str:
+                current_phase = t
+                break
 
         new_phase = current_phase
         day_increment = 0
 
-        if time_tag == "short":  # Розмова (не змінює фазу, але проходить час)
-            pass
-        elif time_tag == "medium":  # Подорож по місту (зсув фази)
+        # Логіка зміни часу
+        if time_tag == "short":
+            pass  # Діалог, час майже не йде
+        elif time_tag == "medium":
+            # +1 фаза (Ранок -> День)
             try:
                 idx = times_of_day.index(current_phase)
                 if idx + 1 < len(times_of_day):
@@ -132,29 +125,39 @@ def apply_system_impacts(profile, ai_impacts):
                     day_increment = 1
             except:
                 pass
-        elif time_tag == "long" or time_tag == "sleep":  # Довга дія або сон
+        elif time_tag == "long":
+            # +2 фази (Ранок -> Вечір)
+            try:
+                idx = times_of_day.index(current_phase)
+                if idx + 2 < len(times_of_day):
+                    new_phase = times_of_day[idx + 2]
+                else:
+                    new_phase = "Ранок"
+                    day_increment = 1
+            except:
+                pass
+        elif time_tag == "sleep" or time_tag == "days":
             new_phase = "Ранок"
             day_increment = 1
 
-        # Оновлюємо рядок часу
+        # Оновлюємо день
         if day_increment > 0:
-            # Тут можна додати логіку парсингу "День 5" -> "День 6", поки просто пишемо +1 день
-            # Щоб не ускладнювати код парсингом, просто додаємо помітку
-            if "День" in time_str:
-                import re
-                d_match = re.search(r'День (\d+)', time_str)
-                if d_match:
-                    day_num = int(d_match.group(1)) + day_increment
-                    time_str = re.sub(r'День \d+', f'День {day_num}', time_str)
+            import re
+            d_match = re.search(r'День (\d+)', time_str)
+            if d_match:
+                day_num = int(d_match.group(1)) + day_increment
+                time_str = re.sub(r'День \d+', f'День {day_num}', time_str)
+            else:
+                # Якщо формат збився, додаємо вручну
+                time_str += f", День {1 + day_increment}"
 
-        # Заміна фази
-        for t in times_of_day:
-            time_str = time_str.replace(t, new_phase)
+        # Оновлюємо фазу в рядку
+        time_str = time_str.replace(current_phase, new_phase)
 
         profile["Ігровий час"] = time_str
-        logs.append(f"⏳ Час: {time_tag} -> {new_phase}")
+        logs.append(f"⏳ Час: {current_phase} -> {new_phase}")
 
-    # === 2. ОБРОБКА ЗДОРОВ'Я (Damage Calculator) ===
+    # === 2. ОБРОБКА ЗДОРОВ'Я ===
     damage_tag = ai_impacts.get("health_impact", "none")
     hp_change = 0
 
@@ -177,7 +180,7 @@ def apply_system_impacts(profile, ai_impacts):
         profile["Здоров'я"] = new_hp
         logs.append(f"❤️ Здоров'я: {hp_change:+}")
 
-    # === 3. ОБРОБКА ЗОЛОТА (Economy Balancer) ===
+    # === 3. ОБРОБКА ЗОЛОТА ===
     gold_tag = ai_impacts.get("gold_impact", "none")
     gold_change = 0
 
@@ -189,17 +192,52 @@ def apply_system_impacts(profile, ai_impacts):
     elif gold_tag == "spend_large":
         gold_change = -random.randint(300, 800)  # Коні, хабарі
     elif gold_tag == "earn_small":
-        gold_change = random.randint(10, 30)  # Дрібіток
+        gold_change = random.randint(10, 30)  # Підробіток
     elif gold_tag == "earn_medium":
         gold_change = random.randint(100, 300)  # Нагорода
     elif gold_tag == "earn_large":
-        gold_change = random.randint(1000, 2000)  # Скарб (ЛІМІТ!)
+        gold_change = random.randint(1000, 2000)  # Скарб
 
     if gold_change != 0:
         old_gold = safe_int(profile.get("Особисте Золото", 0))
         new_gold = max(0, old_gold + gold_change)
         profile["Особисте Золото"] = new_gold
         logs.append(f"💰 Золото: {gold_change:+}")
+
+        # === 4. ОБРОБКА ІНВЕНТАРЯ (ДОДАНО!) ===
+        # Отримуємо поточний інвентар як список
+        current_inv_str = str(profile.get("Інвентар", ""))
+        if current_inv_str == "-" or current_inv_str == "Пусто" or not current_inv_str:
+            inventory_list = []
+        else:
+            # Розбиваємо рядок "Меч, Яблуко" на список ["Меч", "Яблуко"]
+            inventory_list = [item.strip() for item in current_inv_str.split(',') if item.strip()]
+
+        # Додавання речей
+        new_items = ai_impacts.get("inventory_new")
+        if new_items:
+            if isinstance(new_items, str): new_items = [new_items]  # Захист від помилки формату
+            for item in new_items:
+                inventory_list.append(item)
+                logs.append(f"➕ Отримано: {item}")
+
+        # Видалення речей
+        lost_items = ai_impacts.get("inventory_lost")
+        if lost_items:
+            if isinstance(lost_items, str): lost_items = [lost_items]
+            for item in lost_items:
+                # Шукаємо предмет нечутливо до регістру
+                for existing_item in inventory_list:
+                    if item.lower() in existing_item.lower():
+                        inventory_list.remove(existing_item)
+                        logs.append(f"➖ Втрачено: {existing_item}")
+                        break
+
+                        # Збираємо назад у рядок
+        if not inventory_list:
+            profile["Інвентар"] = "Пусто"
+        else:
+            profile["Інвентар"] = ", ".join(inventory_list)
 
     return profile, logs
 
@@ -242,17 +280,17 @@ def clean_and_parse_json(text):
         return None
 
 
-# ================= РОБОТА З GOOGLE SHEETS (ETL) =================
+# ================= РОБОТА З GOOGLE SHEETS =================
 
 def get_client():
     """Підключення до Google API через змінні середовища"""
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 
-    # 1. Спробуємо знайти файл (для локального запуску)
+    # 1. Пробуємо знайти файл
     if os.path.exists(CREDENTIALS_FILE):
         creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
     else:
-        # 2. Якщо файлу немає, шукаємо змінну середовища (для сервера)
+        # 2. Якщо файлу немає, шукаємо змінну середовища
         json_creds = os.getenv("GOOGLE_CREDENTIALS_JSON")
         if not json_creds:
             raise Exception("❌ Не знайдено файл credentials.json і змінну GOOGLE_CREDENTIALS_JSON")
@@ -268,7 +306,6 @@ def get_client():
 def get_sheet(worksheet_name):
     """Відкриває конкретний аркуш за ID таблиці"""
     client = get_client()
-    # ВАЖЛИВА ЗМІНА: шукаємо за ID
     return client.open_by_key(SPREADSHEET_ID).worksheet(worksheet_name)
 
 
@@ -330,7 +367,7 @@ def send_safe_message(chat_id, text, reply_to_message_id=None):
             try:
                 bot.send_message(chat_id, text, reply_to_message_id=reply_to_message_id, parse_mode='Markdown')
             except:
-                # Якщо Markdown зламався (буває при спецсимволах), відправляємо без нього
+                # Якщо Markdown зламався тоді відправляємо без нього
                 bot.send_message(chat_id, text, reply_to_message_id=reply_to_message_id)
         else:
             try:
@@ -344,17 +381,15 @@ def send_safe_message(chat_id, text, reply_to_message_id=None):
             try:
                 bot.send_message(chat_id, part, parse_mode='Markdown')
             except:
-                # Якщо розріз припав на середину жирного шрифту (**), Markdown зламається
-                # Тому довгі шматки безпечніше слати без форматування
                 bot.send_message(chat_id, part)
-            time.sleep(0.5)  # Маленька пауза, щоб Telegram не заблокував за спам
+            time.sleep(0.5)  # Пауза, щоб Telegram не заблокував за спам
 
 def get_unique_regions():
     """Отримує список регіонів з таблиці 'Доми'"""
     try:
         sheet = get_sheet(TAB_HOUSES)
         records = sheet.get_all_records()
-        # Збираємо унікальні регіони
+        # Збираємо назви регіонів
         regions = set(row['Регіон'] for row in records if row.get('Регіон'))
         return sorted(list(regions))
     except Exception as e:
@@ -393,8 +428,7 @@ def get_user_data(user_id):
     try:
         sheet = get_sheet(TAB_USERS)
 
-        # Використовуємо findall замість find
-        # Це поверне список знайдених клітинок або пустий список []
+        # Повертаємо список знайдених клітинок або пустий список []
         cells = sheet.findall(str(user_id), in_column=1)
 
         if not cells:
@@ -459,7 +493,7 @@ def reset_and_fill_character_sheet(data_dict):
         return False
 
 
-# ================= ЛОГІКА AI (GEMINI) =================
+# ================= ЛОГІКА AI =================
 
 def ask_gemini(prompt):
     """
@@ -468,7 +502,6 @@ def ask_gemini(prompt):
     retries = 3
     delay = 2
 
-    # Додаємо сувору інструкцію для Gemma, щоб вона не писала зайвого
     strict_prompt = prompt + "\n\nВАЖЛИВО: Відповідай ТІЛЬКИ валідним JSON кодом. Без Markdown. Без слів 'Ось ваш JSON'."
 
     for attempt in range(retries):
@@ -488,7 +521,7 @@ def ask_gemini(prompt):
         except Exception as e:
             print(f"❌ Помилка API (спроба {attempt + 1}): {e}")
             time.sleep(delay)
-            delay += 2 # Збільшуємо час очікування
+            delay += 2
 
     print("❌ Не вдалося отримати JSON від AI.")
     return None
@@ -525,7 +558,7 @@ def get_canon_characters(house_name):
 
 
 def get_narrative_intro(profile):
-    """Генерує атмосферний вступ (Grimdark) на основі локації"""
+    """Генерує атмосферний вступ на основі локації"""
     print(f"📜 Пишу вступ для {profile.get("Ім'я")}...")
 
     # Перетворюємо весь профіль на текст для контексту
@@ -730,7 +763,7 @@ def validate_action(user_input, profile):
         return True, ""
 
 def process_game_turn(chat_id, user_input):
-    """Гібридний режим: Сюжет + Механіки + Час"""
+    """Обробка ходу гравця тут"""
     user_id = chat_id
 
     # 1. Завантаження даних
@@ -744,13 +777,21 @@ def process_game_turn(chat_id, user_input):
 
     # 2. Контекст
     history_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in history[-40:]])
+    mini_profile = {
+        "Name": profile.get("Ім'я"),
+        "Loc": profile.get("Поточне місцезнаходження"),
+        "HP": profile.get("Здоров'я"),
+        "Gold": profile.get("Особисте Золото"),
+        "Time": profile.get("Ігровий час"),  # ВАЖЛИВО: АІ має бачити час
+        "Inv": profile.get("Інвентар")  # ВАЖЛИВО: АІ має бачити інвентар
+    }
     profile_json = json.dumps(profile, ensure_ascii=False, indent=2)
     curr_loc = profile.get("Поточне місцезнаходження", "")
 
     # Знання з бази
     context_knowledge = get_relevant_context(user_input, curr_loc)
 
-    # --- ОБ'ЄДНАНИЙ ПРОМПТ ---
+    # --- ПРОМПТ ---
     prompt = f"""
     ТИ — Джордж Мартін (Автор Гри Престолів) що грає БЕЗЖАЛІСНОГО ГЕЙМ-МАЙСТЕРА (GM) У СВІТІ "ГРА ПРЕСТОЛІВ".
     Твоя задача: Вести гру, балансуючи між сюжетом, свободою гравця та ЧІТКИМИ МЕХАНІКАМИ, створити реалістичну, небезпечну та похмуру історію. Світ не крутиться навколо гравця.
@@ -861,14 +902,20 @@ def process_game_turn(chat_id, user_input):
     1. Опиши наслідки дії.
     2. Якщо гравець змінив тему — підтримай нову тему, забудь стару.
     3. Закінчи ПИТАННЯМ або ДИЛЕМОЮ.
+    4. Заповни JSON TAGS на основі дій гравця використовуючи ДОСТУПНІ ТЕГИ:
+       - Якщо гравець рухається/чекає/спить -> заповни Часу пройшло!
+       - Якщо гравець купує/знаходить речі -> заповни Новий інвентар!
+       - Якщо гравець їсть/продає/втрачає речі -> заповни Втрачений інвертар!
 
     ВІДПОВІДЬ (JSON):
     {{
         "story": "Тут напиши детальний художній опис реакції світу на дії гравця (мінімум 3-4 речення). Обов'язково закінчи питанням.",
         "updates": {{ 
-             "Ігровий час": "Новий час (напр. Вечір)",
+             "Часу пройшло": "...",
              "Здоров'я": 0,
              "Особисте Золото": 0
+             "Новий інвентар": [],
+             "Втрачений інвертар": [],
         }}
     }}
     """
@@ -951,8 +998,6 @@ def handle_region_selection(call):
     chat_id = call.message.chat.id
 
     try:
-        # 1. Розбираємо дані
-        # call.data виглядає як "region_Північ"
         parts = call.data.split("_")
         if len(parts) < 2:
             print("❌ Помилка: Невірний формат callback_data")
@@ -960,16 +1005,13 @@ def handle_region_selection(call):
 
         region_name = parts[1]
 
-        # 2. БЕЗПЕЧНА ІНІЦІАЛІЗАЦІЯ СЕСІЇ (Ось тут часто падає!)
+        # 2. ІНІЦІАЛІЗАЦІЯ СЕСІЇ
         if chat_id not in user_sessions:
             user_sessions[chat_id] = {}
 
-        # Зберігаємо вибір
         user_sessions[chat_id]['temp_region'] = region_name
 
         # 3. Отримуємо список домів
-        # Переконайтеся, що ця функція у вас існує і працює!
-        # Якщо ви берете з таблиці, це може зайняти час
         houses = get_houses_by_region(region_name)
 
         if not houses:
@@ -1353,7 +1395,6 @@ def handle_game_turn(message):
     send_safe_message(chat_id, response, reply_to_message_id=message.message_id)
 
 
-# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 app = Flask('')
 
 @app.route('/')
