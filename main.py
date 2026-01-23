@@ -978,10 +978,8 @@ def process_game_turn(chat_id, user_input):
         return story + change_log
 
         except Exception as e:
-           import traceback
-           traceback.print_exc()  # Це покаже в консолі точний рядок помилки
            print(f"❌ Помилка AI: {e}")
-           return f"Щось пішло не так... (Помилка: {str(e)})"  # Виведемо помилку гравцю, щоб ви її побачили
+           return "Щось пішло не так... (Системна помилка)"
 
 
 # ================= ОБРОБНИКИ ТЕЛЕГРАМ =================
@@ -1436,5 +1434,6 @@ if __name__ == "__main__":
         bot.infinity_polling()
     except Exception as e:
         print(f"❌ Помилка polling: {e}")
+
 
 
