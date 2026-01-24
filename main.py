@@ -63,12 +63,17 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel(
-    #Вибір моделі тут
+    # Вибір основної моделі тут
     model_name='gemma-3-27b-it',
+)
+model_worker = genai.GenerativeModel(
+    # Вибір технічної моделі тут
+    model_name='gemma-3-4b-it',
 )
 
 # Збереження стану гравців у пам'яті
 user_sessions = {}
+
 
 def get_main_menu():
     """Кнопки меню"""
@@ -241,6 +246,7 @@ def apply_system_impacts(profile, ai_impacts):
 
     return profile, logs
 
+
 def clean_and_parse_json(text):
     """
     Витягує JSON з тексту. Підтримує і словники {}, і списки [].
@@ -312,6 +318,7 @@ def get_sheet(worksheet_name):
 # Глобальна змінна для кешування знань (щоб не читати таблицю щосекунди)
 LORE_CACHE = []
 
+
 def load_lore_data():
     """Завантажує базу знань у пам'ять бота при старті"""
     global LORE_CACHE
@@ -352,6 +359,7 @@ def get_relevant_context(user_text, current_location):
     else:
         return "Немає особливих відомостей."
 
+
 # --- ЧИТАННЯ ДАНИХ ДЛЯ МЕНЮ ---
 
 def send_safe_message(chat_id, text, reply_to_message_id=None):
@@ -383,6 +391,7 @@ def send_safe_message(chat_id, text, reply_to_message_id=None):
             except:
                 bot.send_message(chat_id, part)
             time.sleep(0.5)  # Пауза, щоб Telegram не заблокував за спам
+
 
 def get_unique_regions():
     """Отримує список регіонів з таблиці 'Доми'"""
@@ -515,7 +524,7 @@ def ask_gemini(prompt):
             if result:
                 return result
             else:
-                print(f"⚠️ Спроба {attempt+1}: Отримано не JSON. Текст: {response.text[:50]}...")
+                print(f"⚠️ Спроба {attempt + 1}: Отримано не JSON. Текст: {response.text[:50]}...")
                 time.sleep(delay)
 
         except Exception as e:
@@ -586,31 +595,31 @@ def get_narrative_intro(profile):
     2. **Стиль:** Похмурий реалізм. Ніяких "привітних торговців". Якщо це Пентос — там пахне прянощами і рабством. Якщо Вінтерфелл — вовками і зимою.
     3. **Становище героя:** - Якщо це Вигнанець (як Джорах) — підкресли його тугу за домом або злидні.
        - Якщо це Лорд — підкресли тягар відповідальності та лицемірство двору.
-       
+
     4.**СЮЖЕТНИЙ ГАЧОК (INCITING INCIDENT) - КАНОН:**
        Ти мусиш прив'язати сцену до РЕАЛЬНИХ подій початку першої книги, залежно від локації:
-       
+
        - **ПІВНІЧ (Вінтерфелл):** * Головна подія: Лорд Еддард готується стратити дезертира з Нічної Варти (Гареда). 
          * Або: Отримано звістку, що величезний кортеж Короля Роберта їде сюди.
-         
+
        - **ЕССОС (Пентос):** * Головна подія: Ілліріо Мопатіс готує Дейнеріс до оглядин Кхалом Дрого.
          * Або: Візеріс нервує через затримку весілля.
-         
+
        - **КОРОЛІВСЬКА ГАВАНЬ:** * Головна подія: Двір у жалобі. Десниця Джон Аррен раптово помер. Чутки про отруту.
          * Або: Інтриги навколо того, хто стане новим Десницею.
-         
+
        - **СТІНА (Чорний Замок):** * Головна подія: Прибуття нових рекрутів (включно з Тіріоном як гостем).
          * Або: Розвідники зникли у Зачарованому Лісі. Знайдено дивні трупи.
 
        **ЯКЩО ЦЕ КАНОНІЧНИЙ ПЕРСОНАЖ ({profile.get("Ім'я")}):** Почни саме з тієї сцени, де ми вперше зустрічаємо його в книзі.
-       
+
        **ЯКЩО ЦЕ ВИГАДАНИЙ ПЕРСОНАЖ:**
        Впиши його в ці події як свідка або учасника (наприклад, він стоїть у натовпі під час страти або служить при дворі під час трауру).
 
     5. **ЗАБОРОНИ:**
        - НІКОЛИ не пиши дії за героя ("Ви взяли меч").
        - Зупини сцену рівно в той момент, коли герой має відреагувати.
-       
+
     === ФІНАЛ (КРИТИЧНО ВАЖЛИВО) ===
     Твоя відповідь ОБОВ'ЯЗКОВО має закінчуватися ПИТАННЯМ, яке ставить гравця перед конкретним вибором.
     - ПОГАНО: "Що ви робите?" (Занадто розмито).
@@ -627,6 +636,7 @@ def get_narrative_intro(profile):
     except Exception as e:
         print(f"❌ Помилка генерації вступу: {e}")
         return f"Ви прибули у {current_location}. Вітер дме в обличчя, а навколо чути гомін. Що ви робите?"
+
 
 def generate_initial_stats(char_name, house_name, house_data):
     """Генерує стартовий профіль, враховуючи КАНОНІЧНЕ місцезнаходження"""
@@ -717,51 +727,49 @@ def safe_int(value):
 def validate_action(user_input, profile):
     """
     Окрема функція-фільтр (Цензор).
-    Перевіряє, чи не намагається гравець зламати гру чітами або анахронізмами.
+    Перевіряє, чи не намагається гравець зламати гру чітами, анахронізмами чи діями за когось іншого.
     """
     char_name = profile.get("Ім'я", "Герой")
 
     prompt = f"""
-    Ти — Вартовий Реалізму (Lore Keeper) для гри "Гра Престолів" (Середньовічне фентезі).
+    You are the Lore Keeper for the game “Game of Thrones” (Medieval Fantasy).
 
-    Твоє завдання: Перевірити дію гравця на "легальність".
+    Your task: Check the player's action for “legality.”
 
-    ГРАВЕЦЬ: {char_name}
-    ДІЯ: "{user_input}"
-    
-    === ПРАВИЛА АГЕНТНОСТІ (ХТО КИМ КЕРУЄ) ===
-    1. Гравець керує ТІЛЬКИ персонажем {char_name}.
-    2. ЗАБОРОНЕНО писати дії за NPC (інших персонажів).
-       - ❌ НЕДОПУСТИМО: "Джорах Мормонт вихоплює меч і вбиває Короля Ночі." (Гравець керує Джорахом).
-       - ✅ ДОПУСТИМО: "Я кричу Джораху: 'Вбий його!'" (Гравець керує своїм голосом).
-       - ✅ ДОПУСТИМО: "Я наказую Джораху атакувати." (Гравець віддає наказ, а виконає його NPC чи ні — вирішить GM).
+    PLAYER: {char_name}
+    ACTION: “{user_input}”
 
-    3. ЗАБОРОНЕНО описувати НАСЛІДКИ своїх дій як факт.
-       - ❌ НЕДОПУСТИМО: "Я вдаряю стражника, і голова злітає з плечей." (Гравець вирішив результат).
-       - ✅ ДОПУСТИМО: "Я щосили б'ю стражника мечем у шию." (Гравець описує спробу, результат за GM).
+    === AGENCY RULES (WHO CONTROLS WHOM) ===
+    1. The player controls ONLY the character {char_name}.
+    2. It is FORBIDDEN to write actions for NPCs (other characters).
+       - ❌ NOT ALLOWED: “Jorah Mormont draws his sword and kills the Night King.” (The player controls Jorah).
+    - ✅ ALLOWED: “I shout to Jorah, ‘Kill him!’” (The player controls their voice).
+       - ✅ ACCEPTABLE: “I order Jorah to attack.” (The player gives the order, and the GM decides whether the NPC will carry it out or not).
 
-    === КРИТЕРІЇ ЗАБОРОНИ (ПОВЕРНИ is_valid: false) ===
-    1. **Анахронізми:** Згадка сучасних технологій (F-16, телефон, автомат, інтернет, НАТО, Байден).
-    2. **Чіт-коди:** Спроби змінити свої стати ("Дай мені 100000 золота", "Я стаю безсмертним", "Всі вороги помирають").
-    3. **Мета-геймінг:** Спроби керувати сюжетом як автор ("Я хочу, щоб зараз прилетів дракон і всіх врятував", "Пропустити гру до фіналу").
-    4. **Абсурд:** Дії, фізично неможливі для людини (якщо це не магія, доступна в лорі, наприклад, варги).
+    3. It is FORBIDDEN to describe the CONSEQUENCES of your actions as fact.
+       - ❌ NOT ALLOWED: “I hit the guard, and his head flies off his shoulders.” (The player decided the outcome).
+    - ✅ ALLOWED: “I hit the guard in the neck with my sword with all my strength.” (The player describes the attempt, the outcome is up to the GM).
 
-    === КРИТЕРІЇ ДОЗВОЛУ (ПОВЕРНИ is_valid: true) ===
-    1. Дозволяй ризиковані дії ("Я нападаю на короля" — це тупо, але легально. Головний GM його вб'є).
-    2. Дозволяй жарти та розмови.
-    3. Дозволяй будь-які дії, які можливі у фізичному світі Вестеросу.
+    === PROHIBITION CRITERIA (RETURN is_valid: false) ===
+    1. **Anachronisms:** Mention of modern technologies (F-16, telephone, automatic weapon, internet, NATO, Biden).
+    2. **Cheat codes:** Attempts to change your stats (“Give me 100,000 gold,” “I become immortal,” “All enemies die”).
+    3. **Meta-gaming:** Attempts to control the plot as an author (“I want a dragon to fly in and save everyone,” “Skip to the end of the game”).
+    4. **Absurdity:** Actions that are physically impossible for a human (unless it is magic available in the lore, e.g., wargs).
 
-    ВІДПОВІДЬ (JSON):
+    === PERMISSION CRITERIA (RETURN is_valid: true) ===
+    1. Allow risky actions (“I attack the king” is stupid, but legal. The head GM will kill him).
+    2. Allow jokes and conversations.
+    3. Allow any actions that are possible in the physical world of Westeros.
+
+    RESPONSE (JSON):
     {{
-        "is_valid": true або false,
-        "refusal_reason": "Короткий іронічний коментар українською, чому це неможливо (тільки якщо false). Наприклад: 'Боги не знають, що таке F-16'."
+        “is_valid”: true or false,
+        “refusal_reason”: “A short ironic comment in Ukrainian explaining why it is impossible (only if false). For example: ‘The gods don't know what an F-16 is.’”
     }}
     """
 
-    # Використовуємо ту саму модель (вона швидка)
-    # Можна зменшити max_tokens, бо відповідь коротка
     try:
-        response = model.generate_content(prompt)
+        response = model_worker.generate_content(prompt)
         result = clean_and_parse_json(response.text)
 
         # Якщо JSON не розпарсився, вважаємо дію допустимою (презумпція невинуватості),
@@ -774,6 +782,33 @@ def validate_action(user_input, profile):
     except Exception as e:
         print(f"⚠️ Помилка валідатора: {e}")
         return True, ""
+
+
+def summarize_turn(user_input, gm_response):
+    """
+    Стискає хід в одне речення для історії.
+    Використовує Gemma-4b.
+    """
+    # Беремо тільки текст відповіді (без системних логів)
+    clean_story = gm_response.split("📊")[0][:800]
+
+    prompt = f"""
+    Summarize this RPG turn into ONE short sentence (Ukrainian).
+    Keep names and outcomes.
+
+    Player: "{user_input}"
+    GM: "{clean_story}"
+
+    Output example: "Джон спробував вдарити вартового, але той ухилився."
+    """
+
+    try:
+        # Використовуємо WORKER (4b)
+        resp = model_worker.generate_content(prompt)
+        return resp.text.strip()
+    except:
+        return f"Гравець: {user_input}"
+
 
 def process_game_turn(chat_id, user_input):
     """Обробка ходу гравця тут"""
@@ -806,129 +841,129 @@ def process_game_turn(chat_id, user_input):
 
     # --- ПРОМПТ ---
     prompt = f"""
-    ТИ — Джордж Мартін (Автор Гри Престолів) що грає БЕЗЖАЛІСНОГО ГЕЙМ-МАЙСТЕРА (GM) У СВІТІ "ГРА ПРЕСТОЛІВ".
-    Твоя задача: Вести гру, балансуючи між сюжетом, свободою гравця та ЧІТКИМИ МЕХАНІКАМИ, створити реалістичну, небезпечну та похмуру історію. Світ не крутиться навколо гравця.
-    Уяви що гравець це один з персонажів якого ти задумав вбити
+    YOU — George Martin (author of Game of Thrones) playing the MERCILESS GAME MASTER (GM) IN THE WORLD OF “GAME OF THRONES.”
+    Your task: Run the game, balancing between the plot, player freedom, and CLEAR MECHANICS, to create a realistic, dangerous, and dark story. The world does not revolve around the player.
+    Imagine that the player is one of the characters you plan to kill.
 
-    === ГЕРОЙ ===
+    === HERO ===
     {profile_json}
 
-    === КОНТЕКСТ СВІТУ ===
+    === WORLD CONTEXT ===
     {GAME_ERA_CONTEXT}
     {context_knowledge}
-    
-    === ЗАВДАННЯ ===
-    1. Напиши художню відповідь на дію гравця.
-    2. Визнач КАТЕГОРІЇ наслідків (теги), а система сама порахує цифри.
 
-    === ДОСТУПНІ ТЕГИ (ВИБИРАЙ МУДРО) ===
-    1. **time_passed** (Скільки пройшло часу):
-       - "short" (кілька хвилин - діалог)
-       - "medium" (година-дві - прогулянка, дослідження)
-       - "long" (півдня - подорож, робота)
-       - "sleep" (ніч - відпочинок)
-    
-    2. **health_impact** (Наслідки для здоров'я):
-       - "none" (без змін)
-       - "dmg_light" (синець, подряпина)
-       - "dmg_medium" (поранення мечем, опік)
-       - "dmg_heavy" (критична травма, втрата свідомості)
-       - "dmg_fatal" (смерть)
-       - "heal_small" (відпочинок)
-    
-    3. **gold_impact** (Економіка):
-       - "none"
-       - "spend_small" (їжа, дрібниці)
-       - "spend_medium" (зброя, одяг)
-       - "spend_large" (коні, будинки)
-       - "earn_small" (знайшов монету)
-       - "earn_medium" (нагорода за квест)
-       - "earn_large" (грандіозний скарб - рідкість!)
-    
-    === КРИТИЧНІ ПРАВИЛА (СЮЖЕТ) ===
-    1. СЛУХАЙ ГРАВЦЯ: Якщо гравець пише "Я йду далі" або "Ігнорую" — ТИ ЗОБОВ'ЯЗАНИЙ змінити сцену.
-       - ЗАБОРОНЕНО описувати те саме тіло/місце, якщо гравець пішов.
-       - Опиши дорогу, нову загрозу або прибуття в таверну.
-    2. НЕ ГРАЙ ЗА ГРАВЦЯ: Не пиши "Ви вирішили оглянути...", якщо гравець не казав цього.   
-    
-    === АТМОСФЕРА ТА СКЛАДНІСТЬ (GRIMDARK) ===
-    1. **Смертність:** У цьому світі помирають усі. Гравець НЕ МАЄ "сюжетної броні" (Plot Armor).
-       - Якщо гравець, маючи слабкі навички, лізе в бій з лицарем — він має програти і отримати тяжкі поранення або померти.
-       - Якщо гравець ображає могутнього лорда — його страчують або кидають у темницю.
-       - Не бійся вбивати персонажа або робити його калікою, якщо це логічний наслідок його дурості.
-    2. **Жорстокість:** Описуй світ натуралістично. Бруд, кров, зрада, несправедливість. Не прикрашай дійсність.
-    3. **Наслідки:** Кожна дія має ціну. Перемога ніколи не буває чистою (ти переміг, але зламав руку / втратив друга / зіпсував репутацію).
-    
-    === ЗАБОРОНА АВТО-ДІЙ (КРИТИЧНО ВАЖЛИВО!!!) ===
-    1. НІКОЛИ не пиши дії за гравця. Ти керуєш світом, NPC і погодою. Гравець керує ТІЛЬКИ своїм персонажем.
-    2. ЗАБОРОНЕНО писати фрази типу: "Ви вирішили...", "Ви відповіли...", "Ви погодилися і пішли...".
-    3. ЗАБОРОНЕНО моделювати діалог за гравця. Не вигадуй його реплік.
-    4. ЗУПИНЯЙСЯ перед моментом вибору.
-       - ПОГАНО: "Ви підходите до вартового, даєте йому монету і він вас пропускає." (Ти вирішив за гравця, що він дав монету).
-       - ДОБРЕ: "Ви підходите до вартового. Він підозріло мружиться і перегороджує шлях списом. 'Вхід платний', - гаркає він. Що ви робите?"
-       
-    === ПРАВИЛА ДІАЛОГІВ (РЕЖИМ PING-PONG) — КРИТИЧНО! ===
-    1. Якщо гравець починає розмову ("Я підходжу до...", "Кажу йому..."):
-       - Напиши ТІЛЬКИ ПЕРШУ РЕАКЦІЮ або ВІДПОВІДЬ NPC.
-       - НІКОЛИ не пиши продовження діалогу за гравця.
-       - НІКОЛИ не підсумовуй розмову ("Ви поговорили про все і розійшлися").
-    2. Швидкість: Один хід гравця = Одна репліка NPC.
-    3. Характер NPC: Вони можуть брехати, перебивати, ігнорувати або йти геть, якщо гравець їм набрид. Не роби їх "довідковими бюро".
-    
+    === TASKS ===
+    1. Write a creative response to the player's action in Ukrainian.
+    2. Define the CATEGORIES of consequences (tags), and the system will calculate the numbers itself.
 
-    === ПРАВИЛА ПЕРЕВІРКИ НАВИЧОК ===
-    1. Не вирішуй успіх випадково. Дивись на стат гравця (0-100) за формулою: Стат + кидок кубика (0-30).
-       - < 60: Майже гарантована невдача.
-       - 60-89: Ризиковано, можливий провал.
-       - 90-110: Успіх у стандартних діях.
-       - > 110: Майстерне виконання.
-    2. **Бойові навички:** Використовуй для дуелей, турнірів чи інших боїв.
-    3. **Військові навички** Використовуй для розробки стратегії, тактики, командування загоном/армією. 
-    4. **Інтрига:** Використовуй, коли гравець бреше, намагається щось дізнатися, з кимось домовитись чи інтригувати.
-    5. **Управління:** Використовуй для торгівлі або командування людьми.
-    6. ЛІМІТИ: Стати не можуть бути менше 0 або більше 100.
-    
-    ВАЖЛИВО: Якщо гравець не має профільної навички для дії (наприклад, намагається битися мечем з навичкою 10) — він ГАРАНТОВАНО програє профісіоналу.
+    === AVAILABLE TAGS (CHOOSE WISELY) ===
+    1. **time_passed** (How much time has passed):
+       - “short” (a few minutes - dialogue)
+       - “medium” (an hour or two - walk, exploration)
+       - “long” (half a day - travel, work)
+       - “sleep” (night - rest)
 
-    === СЮЖЕТНИЙ РЕЖИМ ===
-    1. **Абсолютна Свобода:** Гравець може робити що завгодно. Не кажи "ні", кажи "ти спробував, і ось що сталося".
-    2. **Сюжетний Магніт:** Якщо дія гравця тривіальна ("йду гуляти"), підкинь подію, яка веде до головного сюжету (знайшов лист, побачив шпигуна, зустрів важливого NPC).
-    3. **Сайдквести:** Якщо гравець пропускає час ("чекаю", "далі") — згенеруй цікаву випадкову зустріч (Encounter), яка розкриває лор.
-    4. **Адаптація сюжету:** Якщо дії гравця ламають канон — адаптуй світ, створюй наслідки, але не забороняй дію. Якщо гравець ламає канон — світ реагує агресивно (оголошують у розшук, посилають вбивць).
-    5. **Невпинність сюжету:** Світ живе своїм життям. Війна  безперервно насувається.
-    6. **Покарання за бездіяльність:** Якщо гравець діє пасивно — світ карає його (його грабують, звинувачують у злочині, мобілізують на війну силою).
-    
-    === ФІНАЛ (КРИТИЧНО ВАЖЛИВО) ===
-    Твоя відповідь ОБОВ'ЯЗКОВО має закінчуватися ПИТАННЯМ, яке ставить гравця перед конкретним вибором.
-    - ПОГАНО: "Що ви робите?" (Занадто розмито).
-    - ДОБРЕ: "Вартовий підозріло мружиться, чекаючи пояснень. Ви покажете йому печатку Дому чи спробуєте підкупити?"
-    - ДОБРЕ: "Крики наближаються. Ви сховаєтеся в тіні чи вийдете назустріч небезпеці?"
-    
-    === ІСТОРІЯ ПОДІЙ (МИНУЛЕ) ===
+    2. **health_impact** (Health consequences):
+       - “none” (no change)
+       - “dmg_light” (bruise, scratch)
+       - “dmg_medium” (sword wound, burn)
+       - “dmg_heavy” (critical injury, loss of consciousness)
+       - “dmg_fatal” (death)
+       - “heal_small” (rest)
+
+    3. **gold_impact** (Economy):
+        - “none”
+        - “spend_small” (food, small items)
+        - “spend_medium” (weapons, clothing)
+        - “spend_large” (horses, houses)
+        - “earn_small” (found a coin)
+        - “earn_medium” (quest reward)
+        - “earn_large” (grand treasure - rare!)
+
+    === CRITICAL RULES (PLOT) ===
+    1. LISTEN TO THE PLAYER: If the player writes “I'm moving on” or “I'm ignoring this,” YOU MUST change the scene.
+       - It is FORBIDDEN to describe the same body/place if the player has left.
+       - Describe the road, a new threat, or arrival at the tavern.
+    2. DO NOT PLAY FOR THE PLAYER: Do not write “You decide to look at...” if the player did not say so.   
+
+    === ATMOSPHERE AND COMPLEXITY (GRIMDARK) ===
+    1. **Mortality:** Everyone dies in this world. The player does NOT have “plot armor.”
+    - If a player with weak skills engages in combat with a knight, they must lose and suffer serious injuries or die.
+       - If a player insults a powerful lord, they will be executed or thrown into a dungeon.
+       - Don't be afraid to kill a character or cripple them if it is a logical consequence of their stupidity.
+    2. **Cruelty:** Describe the world realistically. Dirt, blood, betrayal, injustice. Do not embellish reality.
+    3. **Consequences:** Every action has a price. Victory is never pure (you won, but broke your arm/lost a friend/ruined your reputation).
+
+    === PROHIBITION OF AUTO-ACTIONS (CRITICALLY IMPORTANT!!!) ===
+    1. NEVER write actions for the player. You control the world, NPCs, and weather. The player controls ONLY their character.
+    2. It is FORBIDDEN to write phrases such as: “You decided...”, “You replied...”, “You agreed and left...”.
+    3. It is FORBIDDEN to simulate dialogue for the player. Do not invent their lines.
+    4. STOP before the moment of choice.
+    - BAD: “You approach the guard, give him a coin, and he lets you pass.” (You decided for the player that they gave the coin).
+    - GOOD: “You approach the guard. He squints suspiciously and blocks your path with his spear. ‘There's an entrance fee,’ he growls. What do you do?”
+
+    === DIALOGUE RULES (PING-PONG MODE) — CRITICAL! ===
+    1. If the player starts a conversation (“I approach...”, “I say to him...”):
+       - Write ONLY THE FIRST REACTION or RESPONSE of the NPC.
+       - NEVER write the continuation of the dialogue for the player.
+       - NEVER summarize the conversation (“You talked about everything and went your separate ways”).
+    2. Speed: One player turn = One NPC line.
+    3. NPC character: They can lie, interrupt, ignore, or walk away if they get tired of the player. Don't make them “reference bureaus.”
+
+
+    === SKILL CHECK RULES ===
+    1. Don't decide success randomly. Look at the player's stat (0-100) using the formula: Stat + dice roll (0-30).
+       - < 60: Almost guaranteed failure.
+       - 60-89: Risky, possible failure.
+       - 90-110: Success in standard actions.
+       - > 110: Masterful execution.
+    2. **Combat skills:** Use for duels, tournaments, or other battles.
+    3. **Military skills:** Use for developing strategy, tactics, commanding a squad/army. 
+    4. **Intrigue:** Use when a player is lying, trying to find out something, negotiating with someone, or scheming.
+    5. **Management:** Use for trading or commanding people.
+    6. LIMITS: Stats cannot be less than 0 or more than 100.
+
+    IMPORTANT: If a player does not have the relevant skill for an action (for example, trying to fight with a sword with a skill of 10), they are GUARANTEED to lose to a professional.
+
+    === PLOT MODE ===
+    1. **Absolute Freedom:** The player can do anything. Don't say “no,” say “you tried, and this is what happened.”
+    2. **Story Magnet:** If the player's action is trivial (“going for a walk”), throw in an event that leads to the main story (found a letter, saw a spy, met an important NPC).
+    3. **Side Quests:** If the player is wasting time (“waiting,” “moving on”), generate an interesting random encounter that reveals lore.
+    4. **Plot adaptation:** If the player's actions break the canon, adapt the world, create consequences, but do not prohibit the action. If the player breaks the canon, the world reacts aggressively (they are put on the wanted list, assassins are sent after them).
+    5. **Continuity of the plot:** The world lives its own life. War is constantly looming.
+    6. **Punishment for inaction:** If the player acts passively, the world punishes them (they are robbed, accused of a crime, forcibly mobilized for war).
+
+    === FINAL (CRITICALLY IMPORTANT) ===
+    Your response MUST end with a QUESTION that presents the player with a specific choice.
+    - BAD: “What are you doing?” (Too vague).
+    - GOOD: “The guard squints suspiciously, waiting for an explanation. Will you show him the House seal or try to bribe him?”
+    - GOOD: “The screams are getting closer. Will you hide in the shadows or face the danger head-on?”
+
+    === HISTORY OF EVENTS (PAST) ===
     {history_text}
 
-    === ПОТОЧНИЙ ХІД (ТЕПЕРІШНЄ) ===
-    ГРАВЕЦЬ КАЖЕ/РОБИТЬ: "{user_input}"
+    === CURRENT TURN (PRESENT) ===
+    PLAYER SAYS/DOES: “{user_input}”
 
-    === ТВОЄ ЗАВДАННЯ (МАЙБУТНЄ) ===
-    Напиши продовження історії, реагуючи САМЕ НА ПОТОЧНИЙ ХІД ГРАВЦЯ.
-    1. Опиши наслідки дії.
-    2. Якщо гравець змінив тему — підтримай нову тему, забудь стару.
-    3. Закінчи ПИТАННЯМ або ДИЛЕМОЮ.
-    4. Заповни JSON TAGS на основі дій гравця використовуючи ДОСТУПНІ ТЕГИ:
-       - Якщо гравець рухається/чекає/спить -> заповни Часу пройшло!
-       - Якщо гравець купує/знаходить речі -> заповни Новий інвентар!
-       - Якщо гравець їсть/продає/втрачає речі -> заповни Втрачений інвертар!
+    === YOUR TASK (FUTURE) ===
+    Write the continuation of the story, responding ONLY TO THE PLAYER'S CURRENT ACTION.
+    1. Describe the consequences of the action.
+    2. If the player has changed the subject, follow the new subject and forget the old one.
+    3. End with a QUESTION or a DILEMMA.
+    4. Fill in the JSON TAGS based on the player's actions using the AVAILABLE TAGS:
+    - If the player is moving/waiting/sleeping -> fill in Time has passed!
+    - If the player buys/finds items -> fill in New inventory!
+    - If the player eats/sells/loses items -> fill in Lost inventory!
 
-    ВІДПОВІДЬ (JSON):
+    RESPONSE (JSON):
     {{
-        "story": "Тут напиши детальний художній опис реакції світу на дії гравця (мінімум 3-4 речення). Обов'язково закінчи питанням.",
-        "updates": {{ 
-             "Часу пройшло": "...",
-             "Здоров'я": 0,
-             "Особисте Золото": 0
-             "Новий інвентар": [],
-             "Втрачений інвертар": [],
+        “story”: "Write a detailed artistic description of the world's reaction to the player's actions here (minimum 3-4 sentences). Be sure to end with a question."
+        “updates”: {{ 
+             “Time passed”: “...”,
+             “Health”: 0,
+             “Personal Gold”: 0
+             “New Inventory”: [],
+             “Lost Inventory”: [],
         }}
     }}
     """
@@ -970,18 +1005,22 @@ def process_game_turn(chat_id, user_input):
 
         save_user_data(user_id, profile, profile.get("Ім'я"))
 
-        history.append({"role": "User", "content": user_input})
-        history.append({"role": "GM", "content": story})
+        short_turn_history = summarize_turn(user_input,story)
+        history.append(short_turn_history)
+        #history.append({"role": "User", "content": user_input})
+        #history.append({"role": "GM", "content": story})
         session['history'] = history[-30:]
 
         change_log = "\n\n📊 *Системні зміни:*\n" + "\n".join(logs) if logs else ""
         return story + change_log
 
+
     except Exception as e:
         import traceback
-        traceback.print_exc() # Це покаже в консолі точний рядок помилки
+        traceback.print_exc()  # Це покаже в консолі точний рядок помилки
         print(f"❌ Помилка AI: {e}")
-        return f"Щось пішло не так... (Помилка: {str(e)})" # Виведемо помилку гравцю, щоб ви її побачили
+        return f"Щось пішло не так... (Помилка: {str(e)})"  # Виведемо помилку гравцю, щоб ви її побачили
+
 
 
 # ================= ОБРОБНИКИ ТЕЛЕГРАМ =================
@@ -1062,6 +1101,7 @@ def handle_region_selection(call):
         import traceback
         traceback.print_exc()  # Покаже де саме впало
         bot.answer_callback_query(call.id, "Сталася помилка. Спробуйте /start")
+
 
 # 2. ОБРАНО ДІМ -> ПОКАЗАТИ ПЕРСОНАЖІВ
 @bot.callback_query_handler(func=lambda call: call.data.startswith("house_"))
@@ -1376,6 +1416,7 @@ def back_to_houses_handler(call):
         reply_markup=markup
     )
 
+
 # Обробка ігрових повідомлень
 # Обробка ігрових повідомлень
 @bot.message_handler(func=lambda m: user_sessions.get(m.chat.id, {}).get('state') == "GAME_ACTIVE")
@@ -1411,17 +1452,22 @@ def handle_game_turn(message):
 
 app = Flask('')
 
+
 @app.route('/')
 def home():
     return "Bot is alive!"
+
 
 def run():
     # Render автоматично дає порт через змінну оточення PORT
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
 
+
 def keep_alive():
     t = Thread(target=run)
     t.start()
+
+
 # -----------------------------
 
 # Запуск
@@ -1436,7 +1482,3 @@ if __name__ == "__main__":
         bot.infinity_polling()
     except Exception as e:
         print(f"❌ Помилка polling: {e}")
-
-
-
-
