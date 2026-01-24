@@ -557,10 +557,10 @@ def get_canon_characters(house_name):
 
     print(f"🔍 Запитую AI про персонажів дому {house_name}...")
     prompt = f"""
-    Write a list of the 4 most famous characters from House {house_name} (Game of Thrones).
+    Write a list in Ukrainian of the 4 most famous characters from House {house_name} (Game of Thrones) .
 Return ONLY a JSON array of strings.
 Example: [“Name 1”, “Name 2”]
-Write in Ukrainian language only
+
     """
     result = ask_gemini(prompt)
     # Якщо результат є - повертаємо, якщо ні - пустий список (щоб код не впав)
