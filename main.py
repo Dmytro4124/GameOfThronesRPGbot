@@ -106,61 +106,62 @@ def apply_system_impacts(profile, ai_impacts):
     times_of_day = ["Ранок", "День", "Вечір", "Ніч"]
 
     if time_tag != "none":
-        # Знаходимо поточну фазу
-        current_phase = "День"
+        # 1. Розбираємо поточний час
+        import re
+        day_match = re.search(r'День (\d+)', time_str)
+        if not day_match: day_match = re.search(r'(\d+)', time_str)
+        current_day = int(day_match.group(1)) if day_match else 1
+
+        current_phase = "Ранок"
         for t in times_of_day:
             if t in time_str:
                 current_phase = t
                 break
 
+        # 2. Логіка зміни (short взагалі ігноруємо)
         new_phase = current_phase
-        day_increment = 0
+        new_day = current_day
 
-        # Логіка зміни часу
         if time_tag == "short":
-            pass  # Діалог, час майже не йде
+            # Діалог = час стоїть на місці
+            pass
+
         elif time_tag == "medium":
-            # +1 фаза (Ранок -> День)
             try:
                 idx = times_of_day.index(current_phase)
                 if idx + 1 < len(times_of_day):
                     new_phase = times_of_day[idx + 1]
                 else:
                     new_phase = "Ранок"
-                    day_increment = 1
+                    new_day += 1
             except:
                 pass
+
         elif time_tag == "long":
-            # +2 фази (Ранок -> Вечір)
             try:
                 idx = times_of_day.index(current_phase)
                 if idx + 2 < len(times_of_day):
                     new_phase = times_of_day[idx + 2]
                 else:
                     new_phase = "Ранок"
-                    day_increment = 1
+                    new_day += 1
             except:
                 pass
+
         elif time_tag == "sleep" or time_tag == "days":
             new_phase = "Ранок"
-            day_increment = 1
+            new_day += 1
 
-        # Оновлюємо день
-        if day_increment > 0:
-            import re
-            d_match = re.search(r'День (\d+)', time_str)
-            if d_match:
-                day_num = int(d_match.group(1)) + day_increment
-                time_str = re.sub(r'День \d+', f'День {day_num}', time_str)
+        # 3. ЗАПИСУЄМО І ЛОГУЄМО ТІЛЬКИ ЯКЩО БУЛИ ЗМІНИ
+        # Якщо фаза та день ті самі - нічого не робимо і нічого не пишемо в чат
+        if new_phase != current_phase or new_day != current_day:
+            profile["Ігровий час"] = f"298 рік В.Е., 1-й місяць, День {new_day}, {new_phase}"
+
+            # Формуємо красивий лог
+            if new_day != current_day:
+                logs.append(f"⏳ Час: {current_phase} -> {new_phase} (Новий день!)")
             else:
-                # Якщо формат збився, додаємо вручну
-                time_str += f", День {1 + day_increment}"
-
-        # Оновлюємо фазу в рядку
-        time_str = time_str.replace(current_phase, new_phase)
-
-        profile["Ігровий час"] = time_str
-        logs.append(f"⏳ Час: {current_phase} -> {new_phase}")
+                logs.append(f"⏳ Час: {current_phase} -> {new_phase}")
 
     # === 2. ОБРОБКА ЗДОРОВ'Я ===
     damage_tag = ai_impacts.get("health_impact", "none")
@@ -857,7 +858,7 @@ def process_game_turn(chat_id, user_input):
 
     === TAGS GUIDE (USE THESE EXACT KEYS) ===
     1. **time_passed** (How much time has passed):
-       - “short” (a few minutes - dialogue)
+       - “short” (pure dialogue, thoughts, quick look - NO TIME ADVANCE)
        - “medium” (an hour or two - walk, exploration)
        - “long” (half a day - travel, work)
        - “sleep” (night - rest)
