@@ -626,7 +626,7 @@ def get_narrative_intro(profile):
 - GOOD: "The guard squints suspiciously, waiting for an explanation. Will you show him the House seal or try to bribe him?"
 - GOOD: “The screams are getting closer. Will you hide in the shadows or face the danger?”
 
-Write a creative text (3 paragraphs). In Ukrainian.
+Write a creative text (3 paragraphs), Ukrainian language only.
     """
 
     try:
@@ -663,12 +663,12 @@ def generate_initial_stats(char_name, house_name, house_data):
     1. Jorah Mormont -> House from the North, but starting in Essos (Pentos).
     2. Theon Greyjoy -> House from the Iron Islands, but starting in Winterfell (foster child).
     3. Jaime Lannister -> House from the Westerlands, but started in King's Landing.
-4. Daenerys Targaryen -> Started in Pentos (Essos).
-5. Stannis Baratheon -> Started on Dragonstone.
+    4. Daenerys Targaryen -> Started in Pentos (Essos).
+    5. Stannis Baratheon -> Started on Dragonstone.
 
     If a character does not have a specific canonical location (or is a fictional character), use the region of origin ({origin_region}).
 
-    Fill in the JSON (keys in Ukrainian!):
+    Заповни JSON Українською:
     {{
         "Ім'я": "{char_name}",
         "Дім": "{house_name}",
