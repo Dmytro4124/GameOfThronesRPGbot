@@ -795,8 +795,6 @@ def summarize_turn(user_input, gm_response):
     prompt = f"""
     Summarize this RPG turn into ONE short sentence (Ukrainian).
     Keep names and outcomes.
-
-    Player: "{user_input}"
     GM: "{clean_story}"
 
     Output example: "Джон спробував вдарити вартового, але той ухилився."
@@ -1006,8 +1004,8 @@ def process_game_turn(chat_id, user_input):
         save_user_data(user_id, profile, profile.get("Ім'я"))
 
         short_turn_history = summarize_turn(user_input,story)
-        history.append(short_turn_history)
-        #history.append({"role": "User", "content": user_input})
+        history.append({"role": "User", "content": user_input})
+        history.append({"role": "GM", "content": short_turn_history})
         #history.append({"role": "GM", "content": story})
         session['history'] = history[-30:]
 
