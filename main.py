@@ -157,7 +157,7 @@ def apply_system_impacts(profile, ai_impacts):
         if new_phase != current_phase or new_day != current_day:
             profile["Ігровий час"] = f"298 рік В.Е., 1-й місяць, День {new_day}, {new_phase}"
 
-            # Формуємо красивий лог
+            # Формуємо лог
             if new_day != current_day:
                 logs.append(f"⏳ Час: {current_phase} -> {new_phase} (Новий день!)")
             else:
@@ -843,7 +843,8 @@ def process_game_turn(chat_id, user_input):
     prompt = f"""
     YOU — George Martin (author of Game of Thrones) playing the MERCILESS GAME MASTER (GM) IN THE WORLD OF “GAME OF THRONES.”
     Your task: Run the game, balancing between the plot, player freedom, and CLEAR MECHANICS, to create a realistic, dangerous, and dark story. The world does not revolve around the player.
-    Imagine that the player is one of the characters you plan to kill.
+    YOU ARE NOT A FRIEND. YOU ARE A SIMULATOR OF A CRUEL REALITY (Game of Thrones).
+    Your goal is NOT to tell a heroic story, but to honestly simulate the consequences of stupidity, arrogance, and physics.
 
     === HERO ===
     {profile_json}
@@ -883,6 +884,25 @@ def process_game_turn(chat_id, user_input):
     4. **inventory**   
         - "inventory_new": ["Item Name"] (If obtained).
         - "inventory_lost": ["Item Name"] (If lost/eaten). 
+        
+    === DOCTRINE OF RESISTANCE (CRITICAL RULES) ===
+    1. **NO "YES-MAN":** Do not agree with the player just to move the plot. If they try to repair a ship in one night, say NO. It takes weeks. If they try to intimidate a powerful Lord with no army, the Lord must laugh and throw them out.
+    2. **NPC POWER:** Illyrio Mopatis, Tywin Lannister, and Iron Bank envoys are SMARTER and MORE POWERFUL than the player.
+       - Illyrio is not a servant. He owns the player. If the player is rude, Illyrio cuts off funding or locks the door.
+       - Merchants have guards. You cannot just rob a port without the City Watch (2000 spears) reacting.
+    3. **PHYSICS & TIME:** - Repairing a ship = Weeks.
+       - Gathering an army = Months.
+       - Traveling = Days.
+       - If the player ignores time ("I do it quickly"), FORCE a "time_passed": "long" tag and describe the weeks lost.
+    4. **CONSEQUENCES:** If the player commits a crime (murder, theft) in a Free City, the Magisters WILL send the City Watch. The player is not invisible.
+    
+    === DIFFICULTY CHECK ===
+    Analyze the action. Is it difficult?
+    - **Impossible:** Asking a King to give up the throne -> FAIL immediately.
+    - **Hard:** Capturing a ship alone -> FAIL with injury ("dmg_medium").
+    - **Medium:** Bribing a guard with little gold -> FAIL or High Cost.
+    
+    **IF THE PLAYER FAILS:** Describe the failure painfully. Do not give them what they want. Make them suffer the consequences.
 
     === CRITICAL RULES (PLOT) ===
     1. LISTEN TO THE PLAYER: If the player writes “I'm moving on” or “I'm ignoring this,” YOU MUST change the scene.
