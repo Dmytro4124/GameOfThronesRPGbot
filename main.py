@@ -168,15 +168,15 @@ def apply_system_impacts(profile, ai_impacts):
     hp_change = 0
 
     if damage_tag == "heal_small":
-        hp_change = random.randint(5, 10)
+        hp_change = random.randint(5, 25)
     elif damage_tag == "heal_full":
         hp_change = 100
     elif damage_tag == "dmg_light":
-        hp_change = -random.randint(1, 10)  # Подряпина
+        hp_change = -random.randint(1, 5)  # Подряпина
     elif damage_tag == "dmg_medium":
-        hp_change = -random.randint(15, 30)  # Поранення
+        hp_change = -random.randint(5, 25)  # Поранення
     elif damage_tag == "dmg_heavy":
-        hp_change = -random.randint(40, 70)  # Критичний удар
+        hp_change = -random.randint(25, 50)  # Критичний удар
     elif damage_tag == "dmg_fatal":
         hp_change = -100  # Смерть
 
@@ -184,7 +184,7 @@ def apply_system_impacts(profile, ai_impacts):
         old_hp = safe_int(profile.get("Здоров'я", 100))
         new_hp = max(0, min(100, old_hp + hp_change))
         profile["Здоров'я"] = new_hp
-        logs.append(f"❤️ Здоров'я: {hp_change:+}")
+        logs.append(f"❤️ Здоров'я: {old_hp} -> {new_hp}")
 
     # === 3. ОБРОБКА ЗОЛОТА ===
     gold_tag = ai_impacts.get("gold_impact", "none")
@@ -741,16 +741,34 @@ def validate_action(user_input, profile):
     PLAYER: {char_name}
     ACTION: “{user_input}”
 
-    === AGENCY RULES (WHO CONTROLS WHOM) ===
-    1. The player controls ONLY the character {char_name}.
-    2. It is FORBIDDEN to write actions for NPCs (other characters).
-       - ❌ NOT ALLOWED: “Jorah Mormont draws his sword and kills the Night King.” (The player controls Jorah).
-    - ✅ ALLOWED: “I shout to Jorah, ‘Kill him!’” (The player controls their voice).
-       - ✅ ACCEPTABLE: “I order Jorah to attack.” (The player gives the order, and the GM decides whether the NPC will carry it out or not).
+    === THE GOLDEN RULE: INTENT ONLY ===
+    The player is allowed to describe ONLY what they TRY to do.
+    The player is FORBIDDEN from describing the RESULT of their action.
+    The result is determined by the Game Master, not the player.
 
-    3. It is FORBIDDEN to describe the CONSEQUENCES of your actions as fact.
-       - ❌ NOT ALLOWED: “I hit the guard, and his head flies off his shoulders.” (The player decided the outcome).
-    - ✅ ALLOWED: “I hit the guard in the neck with my sword with all my strength.” (The player describes the attempt, the outcome is up to the GM).
+    === EXAMPLES OF VIOLATIONS (RETURN is_valid: false) ===
+    1. **Deciding the hit:**
+       - ❌ "I cut off his head." (Player decided the hit landed and killed).
+       - ❌ "I shoot him in the eye." (Too specific result).
+       - ✅ CORRECT: "I swing my sword at his neck." / "I aim for his eye."
+    
+    2. **Deciding the social outcome:**
+       - ❌ "I convince him to give me the keys." (Player decided success).
+       - ❌ "I scare him and he runs away." (Player controlled the NPC's reaction).
+       - ✅ CORRECT: "I demand the keys persuasively." / "I scream to scare him."
+
+    3. **Deciding the world state:**
+       - ❌ "I find a secret door." (Player decided there is a door).
+       - ✅ CORRECT: "I search the room for secrets."
+       
+    4. It is FORBIDDEN to write actions for NPCs (other characters).
+        - ❌ NOT ALLOWED: “Jorah Mormont draws his sword and kills the Night King.” (The player controls Jorah).
+        - ✅ ALLOWED: “I shout to Jorah, ‘Kill him!’” (The player controls their voice).
+        - ✅ ACCEPTABLE: “I order Jorah to attack.” (The player gives the order, and the GM decides whether the NPC will carry it out or not).
+
+    5. It is FORBIDDEN to describe the CONSEQUENCES of your actions as fact.
+        - ❌ NOT ALLOWED: “I hit the guard, and his head flies off his shoulders.” (The player decided the outcome).
+        - ✅ ALLOWED: “I hit the guard in the neck with my sword with all my strength.” (The player describes the attempt, the outcome is up to the GM).
 
     === PROHIBITION CRITERIA (RETURN is_valid: false) ===
     1. **Anachronisms:** Mention of modern technologies (F-16, telephone, automatic weapon, internet, NATO, Biden).
@@ -762,6 +780,12 @@ def validate_action(user_input, profile):
     1. Allow risky actions (“I attack the king” is stupid, but legal. The head GM will kill him).
     2. Allow jokes and conversations.
     3. Allow any actions that are possible in the physical world of Westeros.
+    
+    === YOUR VERDICT ===
+    If the player describes the RESULT, reject the action.
+    
+    === FORBID TO PLAY AFTER DEATH ===
+    If {profile.get("Здоров'я", 100) < 0 } Game is ended and player can not continue.
 
     RESPONSE (JSON):
     {{
@@ -895,6 +919,9 @@ def process_game_turn(chat_id, user_input):
        - Traveling = Days.
        - If the player ignores time ("I do it quickly"), FORCE a "time_passed": "long" tag and describe the weeks lost.
     4. **CONSEQUENCES:** If the player commits a crime (murder, theft) in a Free City, the Magisters WILL send the City Watch. The player is not invisible.
+    5. **PAUSE RULE:** Do NOT describe a long chain of actions for NPCs.
+       - BAD: "Drogo laughs, grabs you, beats you, and throws you out." (Player had no chance to react).
+       - GOOD: "Drogo laughs and reaches for your throat. What do you do?" (Stops for player reaction).
     
     === DIFFICULTY CHECK ===
     Analyze the action. Is it difficult?
