@@ -855,7 +855,7 @@ def process_game_turn(chat_id, user_input):
     1. Write a creative response to the player's action in Ukrainian.
     2. Define the CATEGORIES of consequences (tags), and the system will calculate the numbers itself.
 
-    === AVAILABLE TAGS (CHOOSE WISELY) ===
+    === TAGS GUIDE (USE THESE EXACT KEYS) ===
     1. **time_passed** (How much time has passed):
        - “short” (a few minutes - dialogue)
        - “medium” (an hour or two - walk, exploration)
@@ -878,6 +878,10 @@ def process_game_turn(chat_id, user_input):
         - “earn_small” (found a coin)
         - “earn_medium” (quest reward)
         - “earn_large” (grand treasure - rare!)
+    
+    4. **inventory**   
+        - "inventory_new": ["Item Name"] (If obtained).
+        - "inventory_lost": ["Item Name"] (If lost/eaten). 
 
     === CRITICAL RULES (PLOT) ===
     1. LISTEN TO THE PLAYER: If the player writes “I'm moving on” or “I'm ignoring this,” YOU MUST change the scene.
@@ -948,21 +952,21 @@ def process_game_turn(chat_id, user_input):
     Write the continuation of the story, responding ONLY TO THE PLAYER'S CURRENT ACTION.
     1. Describe the consequences of the action.
     2. If the player has changed the subject, follow the new subject and forget the old one.
-    3. End with a QUESTION or a DILEMMA.
+    3. End with a QUESTION or a DILEMMA to which the player must respond.
     4. Fill in the JSON TAGS based on the player's actions using the AVAILABLE TAGS:
     - If the player is moving/waiting/sleeping -> fill in Time has passed!
     - If the player buys/finds items -> fill in New inventory!
     - If the player eats/sells/loses items -> fill in Lost inventory!
 
-    RESPONSE (JSON):
+    RESPONSE FORMAT (JSON ONLY):
     {{
-        “story”: "Write a detailed artistic description of the world's reaction to the player's actions here (minimum 3-4 sentences). Be sure to end with a question."
-        “updates”: {{ 
-             “Time passed”: “...”,
-             “Health”: 0,
-             “Personal Gold”: 0
-             “New Inventory”: [],
-             “Lost Inventory”: [],
+        "story": "Your story text here...",
+        "updates": {{ 
+             "time_passed": "...",
+             "health_impact": "...",
+             "gold_impact": "...",
+             "inventory_new": [],
+             "inventory_lost": []
         }}
     }}
     """
@@ -992,7 +996,7 @@ def process_game_turn(chat_id, user_input):
                 f"Ти GM. Гравець: {user_input}. Опиши наслідки художньо. Закінчи питанням.")
             story = fix_resp.text
 
-        impacts = ai_data.get("impacts", {})
+        impacts = ai_data.get("updates", {})
 
         # --- PYTHON-МЕНЕДЖЕР ---
         profile, logs = apply_system_impacts(profile, impacts)
@@ -1011,6 +1015,8 @@ def process_game_turn(chat_id, user_input):
         session['history'] = history[-30:]
 
         change_log = "\n\n📊 *Системні зміни:*\n" + "\n".join(logs) if logs else ""
+        if logs:
+            change_log = "\n\n📊 " + " | ".join(logs)
         return story + change_log
 
 
