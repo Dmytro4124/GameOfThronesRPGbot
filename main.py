@@ -32,29 +32,29 @@ CREDENTIALS_FILE = 'credentials.json'
 # ================= КОНТЕКСТ СВІТУ =================
 
 GAME_ERA_CONTEXT = """
-=== ЧАСОВА ЛІНІЯ: 298 рік від В.Е. (Кінець Довгого Літа) ===
-Світ завмер в очікуванні катастрофи. "Зима Близько", і це відчувається у повітрі.
+=== TIMELINE: year 298 (End of the Long Summer) ===
+The world stands still in anticipation of disaster. “Winter is coming,” and you can feel it in the air.
 
-1. ПОЛІТИЧНА СИТУАЦІЯ (ПОРОХОВА БОЧКА):
-   - Залізний Трон: Роберт Баратеон. Колишній "Демон Тризубця" якого боялися всі тепер жирний,  вічно п'яний і байдужий до правління. Всією душею ненавидить Таргарієнів. Країна в боргах перед Ланністерами, Залізним Банком та іншими.
-   - Королева: Серсея Ланністер. Вона оточує двір своїми людьми. Ланністери поводяться так, ніби вже правлять.
-   - Десниця Короля: Джон Аррен помер від гарячки. Тепер королю потрібна заміна.
-   - Поточна Головна Подія: Величезний королівський кортеж повільно повзе Королівським Трактом на Північ, до Вінтерфеллу і прибуде через кілька днів.
+1. POLITICAL SITUATION (POWDER KEG):
+- Iron Throne: Robert Baratheon. The former “Demon of the Trident” who was feared by all is now fat,  perpetually drunk, and indifferent to ruling. He hates the Targaryens with all his heart. The country is in debt to the Lannisters, the Iron Bank, and others.
+- Queen: Cersei Lannister. She surrounds the court with her people. The Lannisters behave as if they are already in power.
+- Hand of the King: Jon Arryn died of a fever. Now the king needs a replacement.
+- Current Main Event: A huge royal procession is slowly crawling along the King's Road to the North, to Winterfell, and will arrive in a few days.
 
-2. ПРИХОВАНІ ЗАГРОЗИ (ТІЛЬКИ ДЛЯ GM - ГРАВЕЦЬ НЕ ПОВИНЕН ЦЬОГО ЗНАТИ):
-   - Секрет: Діти королеви — бастарди від інцесту з Джейме (це найнебезпечніша таємниця світу).
-   - Секрет 2: Джона Аррена отруїла Ліза Аррен за змовою з Петіром Бейлішем.
-   - Північ: Нічна Варта слабка як ніколи. Розвідники зникають за Стіною. Старі лякають дітей казками про Інших, але лорди в це не вірять.
-   - Ессос: Візеріс Таргарієн продає сестру Дейнеріс кхалу Дрого. Драконів ще немає (це поки що скам'янілі яйця).
+2. HIDDEN THREATS (FOR GM ONLY - PLAYERS SHOULD NOT KNOW THIS):
+- Secret: The queen's children are bastards from incest with Jaime (this is the most dangerous secret in the world).
+- Secret 2: Jon Arryn was poisoned by Lysa Arryn in collusion with Petyr Baelish.
+- North: The Night's Watch is weaker than ever. Scouts are disappearing beyond the Wall. Old people scare children with tales of the Others, but the lords do not believe it.
+- Essos: Viserys Targaryen sells his sister Daenerys to Khal Drogo. There are no dragons yet (they are still petrified eggs).
 
-3. АТМОСФЕРА СВІТУ (GRIMDARK):
-   - Економіка: Ціни на зерно ростуть. Селяни ховають запаси, боячись довгої Зими.
-   - Закон: На дорогах небезпечно. "Розбійники ховаються за кожним кущем". Лицарі часто не кращі за розбійників.
-   - Настрій: Тривога. У повітрі пахне війною, хоча мечі ще у піхвах.
+3. WORLD ATMOSPHERE (GRIMDARK):
+- Economy: Grain prices are rising. Peasants are hoarding supplies, fearing a long winter.
+- Law: The roads are dangerous. “Bandits lurk behind every bush.” Knights are often no better than bandits.
+- Mood: Anxiety. There is a smell of war in the air, although the swords are still in their sheaths.
 
-ВАЖЛИВО ДЛЯ СЮЖЕТУ:
-- Нед Старк ще живий і знаходиться у Вінтерфеллі, отримав звістку про дезертира з нічної варти.
-- Війна П'яти Королів ЩЕ НЕ ПОЧАЛАСЯ.
+IMPORTANT FOR THE PLOT:
+- Ned Stark is still alive and is in Winterfell, having received news of a deserter from the night watch.
+- The War of the Five Kings HAS NOT YET BEGUN.
 """
 
 # ================= ІНІЦІАЛІЗАЦІЯ =================
@@ -433,7 +433,7 @@ def get_house_stats_data(house_name):
 # ================= РОБОТА З БАЗОЮ ГРАВЦІВ (Users_DB) =================
 
 def get_user_data(user_id):
-    """Знаходить дані конкретного гравця за його Telegram ID (Безпечний метод)"""
+    """Знаходить дані конкретного гравця за його Telegram ID """
     try:
         sheet = get_sheet(TAB_USERS)
 
@@ -459,7 +459,7 @@ def get_user_data(user_id):
 
 
 def save_user_data(user_id, profile_data, char_name="Unknown"):
-    """Зберігає або оновлює дані гравця (Безпечний метод)"""
+    """Зберігає або оновлює дані гравця """
     try:
         sheet = get_sheet(TAB_USERS)
         json_str = json.dumps(profile_data, ensure_ascii=False)
@@ -542,7 +542,7 @@ def get_canon_characters(house_name):
         "Старк": ["Еддард Старк", "Кейтлін Старк", "Робб Старк", "Джон Сноу", "Арія Старк"],
         "Ланністер": ["Тайвін Ланністер", "Джейме Ланністер", "Серсея Ланністер", "Тіріон Ланністер"],
         "Баратеон": ["Роберт Баратеон", "Станніс Баратеон", "Ренлі Баратеон", "Джоффрі Баратеон"],
-        "Таргарієн": ["Данерис Таргарієн", "Візеріс Таргарієн", "Еймон Таргарієн"],
+        "Таргарієн": ["Данерис Таргарієн", "Візеріс Таргарієн"],
         "Грейджой": ["Бейлон Грейджой", "Теон Грейджой", "Аша Грейджой", "Еурон Грейджой"],
         "Тірелл": ["Мейс Тірелл", "Оленна Тірелл", "Маргері Тірелл", "Лорас Тірелл"],
         "Мартелл": ["Доран Мартелл", "Оберін Мартелл", "Аріанна Мартелл"],
@@ -557,9 +557,9 @@ def get_canon_characters(house_name):
 
     print(f"🔍 Запитую AI про персонажів дому {house_name}...")
     prompt = f"""
-    Напиши список 4 найвідоміших персонажів з Дому {house_name} (Гра Престолів).
-    Поверни ТІЛЬКИ JSON масив рядків.
-    Приклад: ["Ім'я 1", "Ім'я 2"]
+    Write a list of the 4 most famous characters from House {house_name} (Game of Thrones).
+Return ONLY a JSON array of strings.
+Example: [“Name 1”, “Name 2”]
     """
     result = ask_gemini(prompt)
     # Якщо результат є - повертаємо, якщо ні - пустий список (щоб код не впав)
@@ -577,56 +577,56 @@ def get_narrative_intro(profile):
     current_location = profile.get("Поточне місцезнаходження", "Вестерос")
 
     prompt = f"""
-    ТИ — АВТОР РОМАНУ "ГРА ПРЕСТОЛІВ" (ДЖОРДЖ МАРТІН).
-    Твоя мета: Написати першу сцену для персонажа (Пролог).
+    YOU ARE THE AUTHOR OF THE NOVEL “A GAME OF THRONES” (GEORGE MARTIN).
+    Your goal: Write the first scene for the character (Prologue).
 
-    === ГЕРОЙ ===
+    === HERO ===
     {profile_json}
 
-    === ЛОКАЦІЯ СТАРТУ ===
+    === START LOCATION ===
     {current_location}
-    (Опиши цю локацію максимально атмосферно, використовуючи канон 298 року В.Е.)
+    (Describe this location as atmospherically as possible, using the canon of 298 B.E.)
 
-    === КОНТЕКСТ ЧАСУ ===
+    === TIME CONTEXT ===
     {GAME_ERA_CONTEXT}
 
-    === ВИМОГИ ДО ТЕКСТУ (GRIMDARK INTRO) ===
-    1. **Атмосфера:** Почни з сенсорних деталей. Запах (море, гній, пахощі, сталь), температура (холод Півночі чи спека Ессосу), звуки.
-    2. **Стиль:** Похмурий реалізм. Ніяких "привітних торговців". Якщо це Пентос — там пахне прянощами і рабством. Якщо Вінтерфелл — вовками і зимою.
-    3. **Становище героя:** - Якщо це Вигнанець (як Джорах) — підкресли його тугу за домом або злидні.
-       - Якщо це Лорд — підкресли тягар відповідальності та лицемірство двору.
+    === TEXT REQUIREMENTS (GRIMDARK INTRO) ===
+    1. **Atmosphere:** Start with sensory details. Smell (sea, manure, incense, steel), temperature (the cold of the North or the heat of Essos), sounds.
+    2. **Style:** Gloomy realism. No “friendly merchants.” If it's Pentos, it smells of spices and slavery. If it's Winterfell, it smells of wolves and winter.
+    3. **The character's situation:** - If it's an outcast (like Jorah), emphasize their longing for home or poverty.
+- If it's a lord, emphasize the burden of responsibility and the hypocrisy of the court.
 
-    4.**СЮЖЕТНИЙ ГАЧОК (INCITING INCIDENT) - КАНОН:**
-       Ти мусиш прив'язати сцену до РЕАЛЬНИХ подій початку першої книги, залежно від локації:
+4. **PLOT HOOK (INCITING INCIDENT) - CANON:**
+       You must tie the scene to REAL events from the beginning of the first book, depending on the location:
 
-       - **ПІВНІЧ (Вінтерфелл):** * Головна подія: Лорд Еддард готується стратити дезертира з Нічної Варти (Гареда). 
-         * Або: Отримано звістку, що величезний кортеж Короля Роберта їде сюди.
+- **NORTH (WINTERFELL):** * Main event: Lord Eddard prepares to execute a deserter from the Night's Watch (Gareth). 
+         * Or: News arrives that King Robert's huge procession is on its way.
 
-       - **ЕССОС (Пентос):** * Головна подія: Ілліріо Мопатіс готує Дейнеріс до оглядин Кхалом Дрого.
-         * Або: Візеріс нервує через затримку весілля.
+       - **ESSOS (Pentos):** * Main event: Illyrio Mopatis prepares Daenerys for her viewing by Khal Drogo.
+         * Or: Viserys is nervous about the delay of the wedding.
 
-       - **КОРОЛІВСЬКА ГАВАНЬ:** * Головна подія: Двір у жалобі. Десниця Джон Аррен раптово помер. Чутки про отруту.
-         * Або: Інтриги навколо того, хто стане новим Десницею.
+- **KING'S LANDING:** * Main event: The court is in mourning. Hand of the King Jon Arryn has died suddenly. Rumors of poison.
+         * Or: Intrigue over who will become the new Hand of the King.
 
-       - **СТІНА (Чорний Замок):** * Головна подія: Прибуття нових рекрутів (включно з Тіріоном як гостем).
-         * Або: Розвідники зникли у Зачарованому Лісі. Знайдено дивні трупи.
+       - **THE WALL (Black Castle):** * Main event: Arrival of new recruits (including Tyrion as a guest).
+         * Or: Scouts have disappeared in the Haunted Forest. Strange corpses have been found.
 
-       **ЯКЩО ЦЕ КАНОНІЧНИЙ ПЕРСОНАЖ ({profile.get("Ім'я")}):** Почни саме з тієї сцени, де ми вперше зустрічаємо його в книзі.
+       **IF THIS IS A CANON CHARACTER ({profile.get("Ім'я")}):** Start with the scene where we first meet him in the book.
 
-       **ЯКЩО ЦЕ ВИГАДАНИЙ ПЕРСОНАЖ:**
-       Впиши його в ці події як свідка або учасника (наприклад, він стоїть у натовпі під час страти або служить при дворі під час трауру).
+       **IF IT IS A FICTIONAL CHARACTER:**
+       Include him in these events as a witness or participant (for example, he stands in the crowd during the execution or serves at court during the mourning).
 
-    5. **ЗАБОРОНИ:**
-       - НІКОЛИ не пиши дії за героя ("Ви взяли меч").
-       - Зупини сцену рівно в той момент, коли герой має відреагувати.
+    5. **DON'TS:**
+       - NEVER write actions for the character (“You took the sword”).
+       - Stop the scene at the exact moment when the character has to react.
 
-    === ФІНАЛ (КРИТИЧНО ВАЖЛИВО) ===
-    Твоя відповідь ОБОВ'ЯЗКОВО має закінчуватися ПИТАННЯМ, яке ставить гравця перед конкретним вибором.
-    - ПОГАНО: "Що ви робите?" (Занадто розмито).
-    - ДОБРЕ: "Вартовий підозріло мружиться, чекаючи пояснень. Ви покажете йому печатку Дому чи спробуєте підкупити?"
-    - ДОБРЕ: "Крики наближаються. Ви сховаєтеся в тіні чи вийдете назустріч небезпеці?"
+    === FINALE (CRITICALLY IMPORTANT) ===
+    Your response MUST end with a QUESTION that presents the player with a specific choice.
+- BAD: “What do you do?” (Too vague).
+- GOOD: "The guard squints suspiciously, waiting for an explanation. Will you show him the House seal or try to bribe him?"
+- GOOD: “The screams are getting closer. Will you hide in the shadows or face the danger?”
 
-    Напиши художній текст (3-4 абзаци). Українською мовою.
+Write a creative text (3 paragraphs). In Ukrainian.
     """
 
     try:
@@ -649,26 +649,26 @@ def generate_initial_stats(char_name, house_name, house_data):
     context = GAME_ERA_CONTEXT if 'GAME_ERA_CONTEXT' in globals() else "Час: Початок Гри Престолів."
 
     prompt = f"""
-    Створи стартовий профіль для RPG "Гра Престолів".
+    Create a starting profile for the RPG “Game of Thrones.”
 
-    КОНТЕКСТ ЧАСУ:
+    TIME CONTEXT:
     {context}
 
-    ПЕРСОНАЖ: {char_name}
-    ДІМ: {house_name} (Походження: {origin_region})
+    CHARACTER: {char_name}
+    HOUSE: {house_name} (Origin: {origin_region})
 
-    === ПРАВИЛА ЛОКАЦІЇ (КРИТИЧНО) ===
-    Визнач "Поточне місцезнаходження" на основі КАНОНУ першої книги (298 р. В.Е.), а не регіону походження.
-    Приклади винятків:
-    1. Джорах Мормонт -> Дім з Півночі, але старт в Ессосі (Пентос).
-    2. Теон Грейджой -> Дім з Залізних Островів, але старт у Вінтерфеллі (вихованець).
-    3. Джейме Ланністер -> Дім із Західних Земель, але старт у Королівській Гавані.
-    4. Дейнеріс Таргарієн -> Старт у Пентосі (Ессос).
-    5. Станніс Баратеон -> Старт на Драконячому камені.
+    === LOCATION RULES (CRITICAL) ===
+    Determine “Current Location” based on the CANON of the first book (298 CE), not the region of origin.
+    Examples of exceptions:
+    1. Jorah Mormont -> House from the North, but starting in Essos (Pentos).
+    2. Theon Greyjoy -> House from the Iron Islands, but starting in Winterfell (foster child).
+    3. Jaime Lannister -> House from the Westerlands, but started in King's Landing.
+4. Daenerys Targaryen -> Started in Pentos (Essos).
+5. Stannis Baratheon -> Started on Dragonstone.
 
-    Якщо персонаж не має специфічного канонічного місця (або це вигаданий персонаж), використовуй регіон походження ({origin_region}).
+    If a character does not have a specific canonical location (or is a fictional character), use the region of origin ({origin_region}).
 
-    Заповни JSON (ключі українською!):
+    Fill in the JSON (keys in Ukrainian!):
     {{
         "Ім'я": "{char_name}",
         "Дім": "{house_name}",
