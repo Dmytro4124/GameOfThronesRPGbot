@@ -1331,6 +1331,7 @@ def process_game_turn(chat_id, user_input):
 
         total_time = time.time() - global_start
         debug_log += "\n🏁 [TOTAL] Загальний час ходу: {total_time:.2f}s\n-------------------"
+        print(debug_log)
 
         # Зберігаємо лог для кнопки (якщо ви її зробите)
         debug_msg = "\n".join(timing_details) + f"\n🏁 Всього: {total_time:.2f}s"
@@ -1615,7 +1616,7 @@ def show_inventory_handler(message):
         bot.send_message(chat_id, text, parse_mode='Markdown')
 
 
-@bot.message_handler(func=lambda m: m.text == "🎲 Логи часу")
+@bot.message_handler(func=lambda m: m.text == "🎲 Кинути кубик")
 def roll_dice_handler(message):
     chat_id = message.chat.id
 
