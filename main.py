@@ -70,7 +70,7 @@ model = genai.GenerativeModel(
 )
 model_worker = genai.GenerativeModel(
     # Вибір технічної моделі тут
-    model_name='gemma-3-4b-it',
+    model_name='gemma-3-12b-it',
 )
 
 # Збереження стану гравців у пам'яті
