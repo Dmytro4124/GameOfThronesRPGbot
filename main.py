@@ -765,7 +765,7 @@ def validate_action(user_input, profile):
     ACTION: “{user_input}”
 
     === THE GOLDEN RULE: INTENT ONLY ===
-    The player is allowed to describe ONLY what they TRY to do.
+    The player is allowed to describe ONLY what they TRY to do, player controls ONLY their own body and voice.
     The player is FORBIDDEN from describing the RESULT of their action.
     The result is determined by the Game Master, not the player.
 
@@ -792,6 +792,16 @@ def validate_action(user_input, profile):
     5. It is FORBIDDEN to describe the CONSEQUENCES of your actions as fact.
         - ❌ NOT ALLOWED: “I hit the guard, and his head flies off his shoulders.” (The player decided the outcome).
         - ✅ ALLOWED: “I hit the guard in the neck with my sword with all my strength.” (The player describes the attempt, the outcome is up to the GM).
+        
+    6. **NPC as Subject:** The sentence describes what an NPC does.
+       - ❌ "Drogo laughs." (Player decided Drogo laughs).
+       - ❌ "The guard lets me pass." (Player decided the guard's action).
+       - ❌ "Everyone cheers for me."
+       
+    7. **Forced Compliance:** The player writes the result of their command.
+       - ❌ "I tell him to leave and he does." ("...and he does" is the violation).
+       - ✅ CORRECT: "I tell him to leave." (Stop there).
+       
 
     === PROHIBITION CRITERIA (RETURN is_valid: false) ===
     1. **Anachronisms:** Mention of modern technologies (F-16, telephone, automatic weapon, internet, NATO, Biden).
@@ -1095,11 +1105,13 @@ def process_game_turn(chat_id, user_input):
 
     2. **health_impact** (Health consequences):
        - “none” (no change)
+       - “heal_small” (rest)
+       --- ONLY if the enemy successfully hit the player in the text ---
        - “dmg_light” (bruise, scratch)
        - “dmg_medium” (sword wound, burn)
        - “dmg_heavy” (critical injury, loss of consciousness)
        - “dmg_fatal” (death)
-       - “heal_small” (rest)
+       
 
     3. **gold_impact** (Economy):
         - “none”
@@ -1139,6 +1151,10 @@ def process_game_turn(chat_id, user_input):
     6. **THE STOP SIGNAL:** You MUST stop writing immediately after the NPC reacts or the event happens.
        - BAD: "The guard attacks, you dodge, and then you kill him." (You played the whole fight).
        - GOOD: "The guard swings his sword at your head! What do you do?" (Stops for reaction).
+       
+    7. **TARGET LOCK:** Listen carefully to WHO the player is attacking.
+       - If Player attacks "The Guard", DO NOT describe damage to "The King".
+       - Stick to the specific target named by the player.
     
     === DOCTRINE OF RESISTANCE (CRITICAL RULES) ===
     1. **NO "YES-MAN":** Do not agree with the player just to move the plot. If they try to repair a ship in one night, say NO. It takes weeks. If they try to intimidate a powerful Lord with no army, the Lord must laugh and throw them out.
