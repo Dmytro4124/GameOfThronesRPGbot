@@ -911,8 +911,8 @@ def check_skill_mechanics(user_input, profile):
         if player_stat == 0: player_stat = safe_int(profile.get(skill_name, 10))
 
         import random
-        dice_roll = random.randint(1, 40)
-        total_score = player_stat + (dice_roll // 2)  # Формула: Стат + d100/2
+        dice_roll = random.randint(1, 30)
+        total_score = player_stat + dice_roll  # Формула: Стат + кубик
 
         # 3. Визначаємо результат
         if total_score >= difficulty:
