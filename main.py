@@ -247,6 +247,27 @@ def apply_system_impacts(profile, ai_impacts):
         else:
             profile["Інвентар"] = ", ".join(inventory_list)
 
+            # === 5. ОБРОБКА НАВИЧОК (НОВЕ) ===
+            skill_updates = ai_impacts.get("skill_impact", {})
+            # Очікуємо формат: {"Бойові": 2, "Інтрига": 1}
+
+            if skill_updates:
+                for skill_name, val in skill_updates.items():
+                    # Шукаємо правильну назву ключа в профілі
+                    # (Бо в профілі може бути "Бойові навички" або просто "Бойові")
+                    target_key = None
+                    for key in profile.keys():
+                        if skill_name in key:
+                            target_key = key
+                            break
+
+                    if target_key:
+                        old_val = safe_int(profile[target_key])
+                        # Ліміт 100
+                        new_val = min(100, old_val + val)
+                        profile[target_key] = new_val
+                        logs.append(f"📈 {skill_name}: +{val} (Стало {new_val})")
+
     return profile, logs
 
 
@@ -891,6 +912,23 @@ def check_skill_mechanics(user_input, profile):
             outcome = "FAILURE"
             details = "Action fails. Player gets hurt or rejected."
 
+        stat_increase_msg = ""
+
+        if difficulty >= 50 and dice_roll >= 95:
+            # Гравець перевершив себе!
+            new_stat = min(100, player_stat + 1)
+
+            # Оновлюємо профіль прямо тут (або повертаємо інструкцію для оновлення)
+            # Для надійності краще повернути інструкцію, яку обробить apply_system_impacts,
+            # але оскільки ця функція лише читає, ми додамо спец-тег у вивід.
+            stat_increase_msg = f"BONUS: CRITICAL INSIGHT! {skill_name} increased by +1!"
+
+            # ХАК: Ми можемо записати це в глобальну змінну або передати наверх,
+            # але найпростіше - додати це в текст VERDICT, щоб main-модель це описала,
+            # а apply_system_impacts ми навчимо ловити це.
+
+        # ... (формування outcome SUCCESS/FAILURE) ...
+
         # Формуємо рядок, який піде в Промпт Сюжетника
         return f"""
         MECHANICAL VERDICT:
@@ -899,11 +937,78 @@ def check_skill_mechanics(user_input, profile):
         - Dice Roll: {dice_roll}
         - FINAL RESULT: {outcome.upper()}!
         - INSTRUCTION: You MUST describe a {outcome} scenario. {details}
+        {stat_increase_msg}
         """
 
     except Exception as e:
         print(f"Skill Check Error: {e}")
         return "RESULT: UNKNOWN (Proceed with logic)"
+
+
+def process_training_request(user_input, profile):
+    """
+    Перевіряє, чи хоче гравець тренуватись.
+    Повертає JSON з оновленнями (ціна, час, стат) або None.
+    """
+    # Список ключових слів (можна розширити)
+    training_keywords = ["тренув", "вчив", "практив", "train", "practice", "study"]
+    if not any(word in user_input.lower() for word in training_keywords):
+        return None
+
+    # Промпт для Worker-моделі, щоб розібрати деталі
+    prompt = f"""
+    User Input: "{user_input}"
+    Current Stats: {json.dumps(profile, ensure_ascii=False)}
+
+    Task: Is the user trying to improve a skill?
+    Rules for Training:
+    1. Requires a teacher or books (in context).
+    2. Takes TIME (days/weeks).
+    3. Costs GOLD (payment to teacher).
+
+    Determine:
+    - Which skill? ("Бойові", "Військові", "Інтрига", "Управління")
+    - Is it possible in current context?
+
+    Return JSON: {{ "is_training": true, "skill": "...", "reason": "..." }} OR {{ "is_training": false }}
+    """
+
+    try:
+        resp = model_worker.generate_content(prompt)
+        data = clean_and_parse_json(resp.text)
+
+        if not data or not data.get("is_training"): return None
+
+        skill_target = data.get("skill")
+        current_val = safe_int(profile.get(f"{skill_target} навички", 0))
+        if current_val == 0: current_val = safe_int(profile.get(skill_target, 10))
+
+        # === МАТЕМАТИКА БАЛАНСУ (HARDCORE) ===
+        # Чим вищий рівень, тим дорожче і довше
+        # Формула ціни: Поточний рівень * 5 золотих
+        cost_gold = current_val * 5
+        # Формула часу: Мінімум 3 дні + (Рівень / 20)
+        cost_time_days = 3 + int(current_val / 20)
+
+        user_gold = safe_int(profile.get("Особисте Золото", 0))
+
+        if user_gold < cost_gold:
+            return {
+                "error": f"Не вистачає золота. Потрібно {cost_gold}, а є {user_gold}."
+            }
+
+        # Успішне тренування
+        return {
+            "success": True,
+            "skill": skill_target,
+            "cost_gold": cost_gold,
+            "cost_time": cost_time_days,
+            "stat_gain": 2,  # +2 пункти за сесію тренування
+            "story_prompt": f"SYSTEM: Player spends {cost_time_days} days and {cost_gold} gold training {skill_target}. Describe the grueling process."
+        }
+
+    except:
+        return None
 
 def process_game_turn(chat_id, user_input):
     """Обробка ходу гравця тут"""
@@ -935,6 +1040,36 @@ def process_game_turn(chat_id, user_input):
     context_knowledge = get_relevant_context(user_input, curr_loc)
 
     mechanics_instruction = check_skill_mechanics(user_input, profile)
+
+    # 1. ПЕРЕВІРКА НА ТРЕНУВАННЯ (Explicit Training)
+    training_result = process_training_request(user_input, profile)
+
+    mechanics_note = ""
+    extra_updates = {}
+
+    if training_result:
+        if "error" in training_result:
+            # Якщо не вистачає грошей - кажемо АІ про це
+            mechanics_note = f"SYSTEM: Player tried to train but FAILED. Reason: {training_result['error']}. Describe their disappointment."
+        else:
+            # Якщо успіх - готуємо дані для АІ і Профілю
+            mechanics_note = training_result['story_prompt']
+            # Примусові оновлення, які ми передамо в apply_system_impacts
+            extra_updates = {
+                "gold_impact": f"spend_{training_result['cost_gold']}",
+                # Це треба адаптувати під вашу логіку або просто відняти вручну
+                "skill_impact": {training_result['skill']: training_result['stat_gain']},
+                "time_passed": "days"  # Примусовий пропуск часу
+            }
+            # ХАК: Віднімаємо золото і час вручну, щоб не плутати АІ тегами
+            # (Або можна довіритись АІ, але вручну надійніше)
+            current_gold = safe_int(profile.get("Особисте Золото", 0))
+            profile["Особисте Золото"] = max(0, current_gold - training_result['cost_gold'])
+            # Час оновиться через тег "days"
+
+    else:
+        # 2. ЯКЩО НЕ ТРЕНУВАННЯ - ЗВИЧАЙНА ПЕРЕВІРКА (Skill Check)
+        mechanics_note = check_skill_mechanics(user_input, profile)
 
     # --- ПРОМПТ ---
     prompt = f"""
@@ -1050,6 +1185,7 @@ def process_game_turn(chat_id, user_input):
 
     === SYSTEM VERDICT (MANDATORY TO FOLLOW) ===
     {mechanics_instruction}
+    {mechanics_note}
     (IF RESULT is FAILURE -> Describe how the hero fails painfully. Do NOT let them win.
      IF RESULT is SUCCESS -> Describe a triumph.)
     
@@ -1127,6 +1263,17 @@ def process_game_turn(chat_id, user_input):
         # --- PYTHON-МЕНЕДЖЕР ---
         profile, logs = apply_system_impacts(profile, impacts)
         # ----------------------------------
+
+        final_updates = ai_data.get("updates", {})
+        if extra_updates:
+            # Зливаємо словники
+            # Увага: тут треба обережно, щоб не затерти теги АІ, але наші важливіші
+            # Для простоти передамо skill_impact окремо, бо АІ його сам не згенерує
+            final_updates["skill_impact"] = extra_updates.get("skill_impact")
+            if "time_passed" in extra_updates: final_updates["time_passed"] = "days"
+
+        profile, logs = apply_system_impacts(profile, final_updates)
+
 
         # Перевірка на смерть
         if safe_int(profile.get("Здоров'я", 100)) <= 0:
