@@ -1022,9 +1022,17 @@ def process_training_request(user_input, profile):
 
 def process_game_turn(chat_id, user_input):
     """Обробка ходу гравця тут"""
+    debug_log = ""
+    global_start = time.time()
+    debug_log += "🚀 [START] Хід гравця {chat_id}..."
+
     user_id = chat_id
 
-    # 1. Завантаження даних
+    timing_details = []
+
+    # === ЕТАП 1: ЗАВАНТАЖЕННЯ ДАНИХ ===
+    t_start = time.time()
+
     profile, row_id = get_user_data(user_id)
     if not profile: return "❌ Профіль не знайдено."
 
@@ -1048,6 +1056,11 @@ def process_game_turn(chat_id, user_input):
 
     # Знання з бази
     context_knowledge = get_relevant_context(user_input, curr_loc)
+    duration = time.time() - t_start
+    debug_log += f"\n⏱️ [DATA LOAD] зайняло: {duration:.2f}s"
+    timing_details.append(f"📚 Data: {duration:.2f}s")
+
+    t_start = time.time()
 
     mechanics_instruction = check_skill_mechanics(user_input, profile)
 
@@ -1074,14 +1087,20 @@ def process_game_turn(chat_id, user_input):
             # ХАК: Віднімаємо золото і час вручну, щоб не плутати АІ тегами
             # (Або можна довіритись АІ, але вручну надійніше)
             current_gold = safe_int(profile.get("Особисте Золото", 0))
-            profile["Особисте Золото"] = max(0, current_gold - training_result['cost_gold'])
+            profile["Особисте Золото"] = max(0, current_gold - int(training_result['cost_gold']))
             # Час оновиться через тег "days"
 
     else:
         # 2. ЯКЩО НЕ ТРЕНУВАННЯ - ЗВИЧАЙНА ПЕРЕВІРКА (Skill Check)
         mechanics_note = check_skill_mechanics(user_input, profile)
 
+    duration = time.time() - t_start
+    debug_log += f"\n⏱️ [WORKER AI] зайняло: {duration:.2f}s"
+    timing_details.append(f"🤖 Worker: {duration:.2f}s")
+
     # --- ПРОМПТ ---
+    t_start = time.time()
+
     prompt = f"""
     YOU — MERCILESS GAME MASTER (GM) IN THE WORLD OF “GAME OF THRONES.” NOT A NOVELIST. DO NOT WRITE A BOOK. RUN A GAME.
     Your task: Run the game, balancing between the plot, player freedom, and CLEAR MECHANICS, to create a realistic, dangerous, and dark story. The world does not revolve around the player.
@@ -1271,6 +1290,11 @@ def process_game_turn(chat_id, user_input):
                 f"Ти GM. Гравець: {user_input}. Опиши наслідки художньо. Закінчи питанням.")
             story = fix_resp.text
 
+        duration = time.time() - t_start
+        debug_log += f"\n⏱️ [MAIN AI] зайняло: {duration:.2f}s"
+        timing_details.append(f"✍️ Story: {duration:.2f}s")
+
+        t_start = time.time()
         impacts = ai_data.get("updates", {})
 
         # --- PYTHON-МЕНЕДЖЕР ---
@@ -1300,6 +1324,23 @@ def process_game_turn(chat_id, user_input):
         history.append({"role": "GM", "content": short_turn_history})
         #history.append({"role": "GM", "content": story})
         session['history'] = history[-30:]
+
+        duration = time.time() - t_start
+        debug_log += f"\n⏱️ [SAVE & LOG] зайняло: {duration:.2f}s"
+        timing_details.append(f"💾 Save: {duration:.2f}s")
+
+        total_time = time.time() - global_start
+        debug_log += "\n🏁 [TOTAL] Загальний час ходу: {total_time:.2f}s\n-------------------"
+
+        # Зберігаємо лог для кнопки (якщо ви її зробите)
+        debug_msg = "\n".join(timing_details) + f"\n🏁 Всього: {total_time:.2f}s"
+        debug_msg = "⏱️ *ТЕХНІЧНИЙ ЗВІТ ХОДУ:*\n━━━━━━━━━━━━━━━━\n"
+        debug_msg += "\n".join(timing_details)
+        debug_msg += "\n━━━━━━━━━━━━━━━━"
+        debug_msg += f"\n🏁 *ВСЬОГО:* `{total_time:.2f}s`"
+
+        # Зберігаємо в сесію, щоб кнопка могла це прочитати
+        user_sessions[chat_id]['last_debug_time'] = debug_msg
 
         change_log = "\n\n📊 *Системні зміни:*\n" + "\n".join(logs) if logs else ""
         if logs:
@@ -1574,9 +1615,17 @@ def show_inventory_handler(message):
         bot.send_message(chat_id, text, parse_mode='Markdown')
 
 
-@bot.message_handler(func=lambda m: m.text == "🎲 Кинути кубик")
+@bot.message_handler(func=lambda m: m.text == "🎲 Логи часу")
 def roll_dice_handler(message):
-    import random
+    chat_id = message.chat.id
+
+    # Перевіряємо, чи є дані про останній хід
+    session = user_sessions.get(chat_id, {})
+    log_text = session.get('last_debug_time', "❌ Ще не було зроблено жодного ходу.")
+
+    # Відправляємо лог
+    bot.send_message(chat_id, log_text, parse_mode='Markdown')
+    '''import random
     result = random.randint(1, 100)
 
     # Інтерпретація результату
@@ -1602,7 +1651,9 @@ def roll_dice_handler(message):
     session = user_sessions.get(message.chat.id)
     if session and 'history' in session:
         session['history'].append(
-            {"role": "User", "content": f"[СИСТЕМА]: Гравець кинув кубик і випало {result} ({outcome})."})
+            {"role": "User", "content": f"[СИСТЕМА]: Гравець кинув кубик і випало {result} ({outcome})."})'''
+
+
 
 
 @bot.message_handler(func=lambda m: m.text == "🆘 Допомога")
