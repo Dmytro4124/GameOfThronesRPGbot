@@ -55,6 +55,8 @@ The world stands still in anticipation of disaster. “Winter is coming,” and 
 IMPORTANT FOR THE PLOT:
 - Ned Stark is still alive and is in Winterfell, having received news of a deserter from the night watch.
 - The War of the Five Kings HAS NOT YET BEGUN.
+- DRAGONS: Extinct. Illyrio currently holds three STONE EGGS. They are fossils. They cannot move, hatch, or hiss.
+- MAGIC: Extremely rare and subtle. No fireballs, no resurrection (yet).
 """
 
 # ================= ІНІЦІАЛІЗАЦІЯ =================
@@ -810,7 +812,7 @@ def validate_action(user_input, profile):
         return True, ""
 
 
-def summarize_turn(user_input, gm_response):
+def summarize_turn(gm_response):
     """
     Стискає хід в одне речення для історії.
     Використовує Gemma-4b.
@@ -831,8 +833,77 @@ def summarize_turn(user_input, gm_response):
         resp = model_worker.generate_content(prompt)
         return resp.text.strip()
     except:
-        return f"Гравець: {user_input}"
+        return f"Гравець: "
 
+
+def check_skill_mechanics(user_input, profile):
+    """
+    Визначає складність дії та проводить перевірку навичок (Dice Roll) у Python.
+    Повертає текстову інструкцію для Сюжетної Моделі.
+    """
+    # 1. Запитуємо Worker: Що це за дія?
+    prompt = f"""
+    Analyze player action: "{user_input}"
+    Hero Stats: {json.dumps(profile, ensure_ascii=False)}
+
+    Task: Determine the Skill needed and Difficulty (0-100).
+
+    Difficulty Guide:
+    0 = Talking, walking, looking (No check needed).
+    20 = Easy (Slapping a drunkard).
+    60 = Medium (Fighting a guard, lying to a merchant).
+    90 = Hard (Fighting a knight, lying to a King).
+    110 = Impossible (Flying, killing a dragon with bare hands).
+
+    Skills: "Бойові", "Військові", "Інтрига", "Управління", "None".
+
+    Return JSON: {{ "skill": "...", "difficulty": 0-100, "reason": "..." }}
+    """
+
+    try:
+        # Використовуємо маленьку модель для швидкості
+        resp = model_worker.generate_content(prompt)
+        data = clean_and_parse_json(resp.text)
+
+        if not data: return "RESULT: AUTO_SUCCESS (Simple Action)"
+
+        difficulty = data.get("difficulty", 0)
+        skill_name = data.get("skill", "None")
+
+        # Якщо складність 0 - кидати кубик не треба
+        if difficulty == 0:
+            return "RESULT: NARRATIVE_CHOICE (No mechanics needed)"
+
+        # 2. Математика в Python (Чесна гра)
+        player_stat = safe_int(profile.get(f"{skill_name} навички", 0))
+        # Якщо ключа немає (напр "Інтрига"), спробуємо прямий збіг
+        if player_stat == 0: player_stat = safe_int(profile.get(skill_name, 10))
+
+        import random
+        dice_roll = random.randint(1, 40)
+        total_score = player_stat + (dice_roll // 2)  # Формула: Стат + d100/2
+
+        # 3. Визначаємо результат
+        if total_score >= difficulty:
+            outcome = "SUCCESS"
+            details = "Action succeeds."
+        else:
+            outcome = "FAILURE"
+            details = "Action fails. Player gets hurt or rejected."
+
+        # Формуємо рядок, який піде в Промпт Сюжетника
+        return f"""
+        MECHANICAL VERDICT:
+        - Action Difficulty: {difficulty}
+        - Player Skill ({skill_name}): {player_stat}
+        - Dice Roll: {dice_roll}
+        - FINAL RESULT: {outcome.upper()}!
+        - INSTRUCTION: You MUST describe a {outcome} scenario. {details}
+        """
+
+    except Exception as e:
+        print(f"Skill Check Error: {e}")
+        return "RESULT: UNKNOWN (Proceed with logic)"
 
 def process_game_turn(chat_id, user_input):
     """Обробка ходу гравця тут"""
@@ -863,6 +934,8 @@ def process_game_turn(chat_id, user_input):
     # Знання з бази
     context_knowledge = get_relevant_context(user_input, curr_loc)
 
+    mechanics_instruction = check_skill_mechanics(user_input, profile)
+
     # --- ПРОМПТ ---
     prompt = f"""
     YOU — MERCILESS GAME MASTER (GM) IN THE WORLD OF “GAME OF THRONES.” NOT A NOVELIST. DO NOT WRITE A BOOK. RUN A GAME.
@@ -872,17 +945,13 @@ def process_game_turn(chat_id, user_input):
 
     === HERO ===
     {profile_json}
+    (GM NOTE: Player currently has {profile.get("Особисте Золото")} gold. Use this to limit their purchases).
 
     === WORLD CONTEXT ===
     {GAME_ERA_CONTEXT}
     {context_knowledge}
-
-    === TASKS ===
-    1. Write a creative response to the player's action in Ukrainian.
-    2. Keep it focused on the IMMEDIATE reaction of the world.
-    3. Define the CATEGORIES of consequences (tags), and the system will calculate the numbers itself.
-
-    === TAGS GUIDE (USE THESE EXACT KEYS) ===
+    
+    === TAGS GUIDE ===
     1. **time_passed** (How much time has passed):
        - “short” (pure dialogue, thoughts, quick look - NO TIME ADVANCE)
        - “medium” (an hour or two - walk, exploration)
@@ -928,6 +997,13 @@ def process_game_turn(chat_id, user_input):
     4. **ANTI-RAILROADING:**
        - If the player leaves ("I walk away"), the scene MUST end. Do not make the NPC continue talking to a wall.
        - Describe the new location (Street/Corridor).
+       
+    5. **INTENT vs RESULT:** The player describes their INTENT ("I try to kill him"). YOU determine the RESULT based on logic.
+       - If the player tries something impossible -> Describe the failure.
+    
+    6. **THE STOP SIGNAL:** You MUST stop writing immediately after the NPC reacts or the event happens.
+       - BAD: "The guard attacks, you dodge, and then you kill him." (You played the whole fight).
+       - GOOD: "The guard swings his sword at your head! What do you do?" (Stops for reaction).
     
     === DOCTRINE OF RESISTANCE (CRITICAL RULES) ===
     1. **NO "YES-MAN":** Do not agree with the player just to move the plot. If they try to repair a ship in one night, say NO. It takes weeks. If they try to intimidate a powerful Lord with no army, the Lord must laugh and throw them out.
@@ -943,35 +1019,25 @@ def process_game_turn(chat_id, user_input):
        - BAD: "Drogo laughs, grabs you, beats you, and throws you out." (Player had no chance to react).
        - GOOD: "Drogo laughs and reaches for your throat. What do you do?" (Stops for player reaction).
     
-    === DIFFICULTY CHECK ===
-    Analyze the action. Is it difficult?
-    - **Impossible:** Asking a King to give up the throne -> FAIL immediately.
-    - **Hard:** Capturing a ship alone -> FAIL with injury ("dmg_medium").
-    - **Medium:** Bribing a guard with little gold -> FAIL or High Cost.
-    
     **IF THE PLAYER FAILS:** Describe the failure painfully. Do not give them what they want. Make them suffer the consequences.
 
-    === CRITICAL RULES (PLOT) ===
+    === PLOT RULES ===
     1. LISTEN TO THE PLAYER: If the player writes “I'm moving on” or “I'm ignoring this,” YOU MUST change the scene.
        - It is FORBIDDEN to describe the same body/place if the player has left.
-       - Describe the road, a new threat, or arrival at the tavern.
-    2. DO NOT PLAY FOR THE PLAYER: Do not write “You decide to look at...” if the player did not say so.   
+       - Describe the road, a new threat, or arrival at the tavern.  
 
     === ATMOSPHERE AND COMPLEXITY (GRIMDARK) ===
     1. **Mortality:** Everyone dies in this world. The player does NOT have “plot armor.”
     - If a player with weak skills engages in combat with a knight, they must lose and suffer serious injuries or die.
-       - If a player insults a powerful lord, they will be executed or thrown into a dungeon.
-       - Don't be afraid to kill a character or cripple them if it is a logical consequence of their stupidity.
+    - If a player insults a powerful lord, they will be executed or thrown into a dungeon.
+    - Don't be afraid to kill a character or cripple them if it is a logical consequence of their stupidity.
     2. **Cruelty:** Describe the world realistically. Dirt, blood, betrayal, injustice. Do not embellish reality.
     3. **Consequences:** Every action has a price. Victory is never pure (you won, but broke your arm/lost a friend/ruined your reputation).
-
-    === PROHIBITION OF AUTO-ACTIONS (CRITICALLY IMPORTANT!!!) ===
-    1. NEVER write actions for the player. You control the world, NPCs, and weather. The player controls ONLY their character.
-    2. It is FORBIDDEN to write phrases such as: “You decided...”, “You replied...”, “You agreed and left...”.
-    3. It is FORBIDDEN to simulate dialogue for the player. Do not invent their lines.
-    4. STOP before the moment of choice.
-    - BAD: “You approach the guard, give him a coin, and he lets you pass.” (You decided for the player that they gave the coin).
-    - GOOD: “You approach the guard. He squints suspiciously and blocks your path with his spear. ‘There's an entrance fee,’ he growls. What do you do?”
+    4. **DIFFICULTY CHECK** Analyze the action. Is it difficult?
+    - **Impossible:** Asking a King to give up the throne -> FAIL immediately.
+    - **Hard:** Capturing a ship alone -> FAIL with injury ("dmg_medium").
+    - **Medium:** Bribing a guard with little gold -> FAIL or High Cost.
+    **IF THE PLAYER FAILS:** Describe the failure painfully. Do not give them what they want. Make them suffer the consequences.
 
     === DIALOGUE RULES (PING-PONG MODE) — CRITICAL! ===
     1. If the player starts a conversation (“I approach...”, “I say to him...”):
@@ -982,24 +1048,15 @@ def process_game_turn(chat_id, user_input):
     3. NPC character: They can lie, interrupt, ignore, or walk away if they get tired of the player. Don't make them “reference bureaus.”
 
 
-    === SKILL CHECK RULES ===
-    1. Don't decide success randomly. Look at the player's stat (0-100) using the formula: Stat + dice roll (0-30).
-       - < 60: Almost guaranteed failure.
-       - 60-89: Risky, possible failure.
-       - 90-110: Success in standard actions.
-       - > 110: Masterful execution.
-    2. **Combat skills:** Use for duels, tournaments, or other battles.
-    3. **Military skills:** Use for developing strategy, tactics, commanding a squad/army. 
-    4. **Intrigue:** Use when a player is lying, trying to find out something, negotiating with someone, or scheming.
-    5. **Management:** Use for trading or commanding people.
-    6. LIMITS: Stats cannot be less than 0 or more than 100.
-
-    IMPORTANT: If a player does not have the relevant skill for an action (for example, trying to fight with a sword with a skill of 10), they are GUARANTEED to lose to a professional.
-
+    === SYSTEM VERDICT (MANDATORY TO FOLLOW) ===
+    {mechanics_instruction}
+    (IF RESULT is FAILURE -> Describe how the hero fails painfully. Do NOT let them win.
+     IF RESULT is SUCCESS -> Describe a triumph.)
+    
     === PLOT MODE ===
-    1. **Absolute Freedom:** The player can do anything. Don't say “no,” say “you tried, and this is what happened.”
+    1. **Freedom of Action, but Realistic Consequences** The player can do anything. Don't say “no,” say “you tried, and this is what happened.”
     2. **Story Magnet:** If the player's action is trivial (“going for a walk”), throw in an event that leads to the main story (found a letter, saw a spy, met an important NPC).
-    3. **Side Quests:** If the player is wasting time (“waiting,” “moving on”), generate an interesting random encounter that reveals lore.
+    3. **Side Quests:** Only if the player is wasting time (“waiting,” “moving on”), generate an interesting random encounter that reveals lore.
     4. **Plot adaptation:** If the player's actions break the canon, adapt the world, create consequences, but do not prohibit the action. If the player breaks the canon, the world reacts aggressively (they are put on the wanted list, assassins are sent after them).
     5. **Continuity of the plot:** The world lives its own life. War is constantly looming.
     6. **Punishment for inaction:** If the player acts passively, the world punishes them (they are robbed, accused of a crime, forcibly mobilized for war).
@@ -1017,14 +1074,15 @@ def process_game_turn(chat_id, user_input):
     PLAYER SAYS/DOES: “{user_input}”
 
     === YOUR TASK (FUTURE) ===
-    Write the continuation of the story, responding ONLY TO THE PLAYER'S CURRENT ACTION.
-    1. Describe the consequences of the action.
+    Write a creative continuation of the story, responding ONLY TO THE PLAYER'S CURRENT ACTION in Ukrainian.
+    1. Describe the consequences of the action, keep it focused on the IMMEDIATE reaction of the world.
     2. If the player has changed the subject, follow the new subject and forget the old one.
     3. End with a QUESTION or a DILEMMA to which the player must respond.
-    4. Fill in the JSON TAGS based on the player's actions using the AVAILABLE TAGS:
+    4. Fill in the JSON TAGS based on the player's actions using the AVAILABLE TAGS form === TAGS GUIDE ===:
     - If the player is moving/waiting/sleeping -> fill in Time has passed!
     - If the player buys/finds items -> fill in New inventory!
     - If the player eats/sells/loses items -> fill in Lost inventory!
+
 
     RESPONSE FORMAT (JSON ONLY):
     {{
@@ -1076,8 +1134,9 @@ def process_game_turn(chat_id, user_input):
 
         save_user_data(user_id, profile, profile.get("Ім'я"))
 
-        short_turn_history = summarize_turn(user_input,story)
-        history.append({"role": "User", "content": user_input})
+        short_turn_history = summarize_turn(story)
+        short_user_input = summarize_turn(user_input)
+        history.append({"role": "User", "content": short_user_input})
         history.append({"role": "GM", "content": short_turn_history})
         #history.append({"role": "GM", "content": story})
         session['history'] = history[-30:]
