@@ -1135,11 +1135,12 @@ def process_game_turn(chat_id, user_input):
        - ❌ BAD: "You realized he was lying." / "You felt fear."
        - ✅ GOOD: "His eyes dart nervously." / "His hand trembles on the hilt." (Show, don't tell).
 
-    3. **COMBAT PACING (EXCHANGE, NOT MOVIE):**
-       - Do NOT resolve the whole fight in one turn.
-       - Describe ONE exchange. If the player attacks -> Describe the enemy's defense/counter-attack -> STOP.
-       - ❌ BAD: "You cut his throat and then killed his two guards."
-       - ✅ GOOD: "You lunge at his throat. He barely parries, stepping back, and calls for help. Two guards appear. Action?"
+    3. **COMBAT PACING & CONSISTENCY (CRITICAL):**
+        - **TARGET LOCK:** Track who is fighting whom.
+        - If Player fights a MINION, the BOSS (e.g., Drogo) is SAFE watching from the side.
+        - DO NOT let the player kill the Boss if they are physically fighting the Bodyguard.
+        - **EXCHANGE ONLY:** Describe ONE move. Attack -> Defense -> Result -> Stop.
+        - **NO INSTANT KILLS:** A player with low stats cannot "one-shot" a Champion. Even a dirty trick (sand in eyes) only gives a temporary advantage, not an instant kill.
 
     4. **ANTI-RAILROADING:**
        - If the player leaves ("I walk away"), the scene MUST end. Do not make the NPC continue talking to a wall.
@@ -1152,9 +1153,9 @@ def process_game_turn(chat_id, user_input):
        - BAD: "The guard attacks, you dodge, and then you kill him." (You played the whole fight).
        - GOOD: "The guard swings his sword at your head! What do you do?" (Stops for reaction).
        
-    7. **TARGET LOCK:** Listen carefully to WHO the player is attacking.
-       - If Player attacks "The Guard", DO NOT describe damage to "The King".
-       - Stick to the specific target named by the player.
+    7. **NO VENTRILOQUISM:** You are FORBIDDEN from writing dialogue lines for the Hero.
+   - ❌ BAD: "You say: 'I will never bow!'"
+   - ✅ GOOD: "You stare at him silently. What do you say?"
     
     === DOCTRINE OF RESISTANCE (CRITICAL RULES) ===
     1. **NO "YES-MAN":** Do not agree with the player just to move the plot. If they try to repair a ship in one night, say NO. It takes weeks. If they try to intimidate a powerful Lord with no army, the Lord must laugh and throw them out.
@@ -1184,10 +1185,6 @@ def process_game_turn(chat_id, user_input):
     - Don't be afraid to kill a character or cripple them if it is a logical consequence of their stupidity.
     2. **Cruelty:** Describe the world realistically. Dirt, blood, betrayal, injustice. Do not embellish reality.
     3. **Consequences:** Every action has a price. Victory is never pure (you won, but broke your arm/lost a friend/ruined your reputation).
-    4. **DIFFICULTY CHECK** Analyze the action. Is it difficult?
-    - **Impossible:** Asking a King to give up the throne -> FAIL immediately.
-    - **Hard:** Capturing a ship alone -> FAIL with injury ("dmg_medium").
-    - **Medium:** Bribing a guard with little gold -> FAIL or High Cost.
     **IF THE PLAYER FAILS:** Describe the failure painfully. Do not give them what they want. Make them suffer the consequences.
 
     === DIALOGUE RULES (PING-PONG MODE) — CRITICAL! ===
