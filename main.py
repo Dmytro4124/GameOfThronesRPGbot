@@ -70,7 +70,7 @@ model = genai.GenerativeModel(
 )
 model_worker = genai.GenerativeModel(
     # Вибір технічної моделі тут
-    model_name='gemma-3-12b-it',
+    model_name='gemma-3-4'b-it',
 )
 
 # Збереження стану гравців у пам'яті
@@ -1095,7 +1095,7 @@ def process_game_turn(chat_id, user_input):
         mechanics_note = check_skill_mechanics(user_input, profile)
 
     duration = time.time() - t_start
-    debug_log += f"\n⏱️ [WORKER AI] зайняло: {duration:.2f}s"
+    debug_log += f"\n⏱️ [WORKER AI] (calculate impacts) зайняло: {duration:.2f}s"
     timing_details.append(f"🤖 Worker: {duration:.2f}s")
 
     # --- ПРОМПТ ---
@@ -1291,7 +1291,7 @@ def process_game_turn(chat_id, user_input):
             story = fix_resp.text
 
         duration = time.time() - t_start
-        debug_log += f"\n⏱️ [MAIN AI] зайняло: {duration:.2f}s"
+        debug_log += f"\n⏱️ [MAIN AI] (process_game_turn) зайняло: {duration:.2f}s"
         timing_details.append(f"✍️ Story: {duration:.2f}s")
 
         t_start = time.time()
@@ -1326,11 +1326,11 @@ def process_game_turn(chat_id, user_input):
         session['history'] = history[-30:]
 
         duration = time.time() - t_start
-        debug_log += f"\n⏱️ [SAVE & LOG] зайняло: {duration:.2f}s"
+        debug_log += f"\n⏱️ [SAVE & LOG(with summarization)] зайняло: {duration:.2f}s"
         timing_details.append(f"💾 Save: {duration:.2f}s")
 
         total_time = time.time() - global_start
-        debug_log += "\n🏁 [TOTAL] Загальний час ходу: {total_time:.2f}s\n-------------------"
+        debug_log += f"\n🏁 [TOTAL] Загальний час ходу: {total_time:.2f}s\n-------------------"
         print(debug_log)
 
         # Зберігаємо лог для кнопки (якщо ви її зробите)
