@@ -595,10 +595,10 @@ def get_narrative_intro(profile):
     """Генерує атмосферний вступ на основі локації"""
     print(f"📜 Пишу вступ для {profile.get("Ім'я")}...")
 
-    # Перетворюємо весь профіль на текст для контексту
+    # Перетворюємо профіль на текст
     profile_json = json.dumps(profile, ensure_ascii=False, indent=2)
 
-    # Визначаємо локацію (вона вже правильна завдяки попередній функції)
+    # Визначаємо локацію
     current_location = profile.get("Поточне місцезнаходження", "Вестерос")
 
     prompt = f"""
@@ -1316,14 +1316,33 @@ def process_game_turn(chat_id, user_input):
         if safe_int(profile.get("Здоров'я", 100)) <= 0:
             story += "\n\n💀 *ВАШ ДОЗОР ЗАКІНЧИВСЯ. Ви загинули.*"
 
-        save_user_data(user_id, profile, profile.get("Ім'я"))
+        def background_task(chat_id_arg, user_id_arg, profile_arg, char_name_arg, input_arg, story_arg):
+            try:
+                # 1. Збереження в Google Sheets (синхронне, повільне)
+                save_user_data(user_id_arg, profile_arg, char_name_arg)
 
-        short_turn_history = summarize_turn(story)
-        short_user_input = summarize_turn(user_input)
-        history.append({"role": "User", "content": short_user_input})
-        history.append({"role": "GM", "content": short_turn_history})
-        #history.append({"role": "GM", "content": story})
-        session['history'] = history[-30:]
+                # 2. Сумаризація через AI (повільна)
+                short_hist_turn = summarize_turn(story_arg)
+                short_user_inp = summarize_turn(input_arg)
+
+                # 3. Оновлення історії в пам'яті
+                # Потрібно отримати актуальний об'єкт сесії
+                if chat_id_arg in user_sessions:
+                    hist = user_sessions[chat_id_arg].get('history', [])
+                    hist.append({"role": "User", "content": short_user_inp})
+                    hist.append({"role": "GM", "content": short_hist_turn})
+                    user_sessions[chat_id_arg]['history'] = hist[-30:]
+
+                print(f"✅ [BG TASK] Дані збережено та історію оновлено для {chat_id_arg}")
+
+            except Exception as e:
+                print(f"❌ [BG ERROR] {e}")
+
+        # Створення та запуск потоку
+        # Передаємо копії даних, щоб уникнути конфліктів
+        bg_thread = Thread(target=background_task,
+                           args=(chat_id, user_id, profile, profile.get("Ім'я"), user_input, story))
+        bg_thread.start()
 
         duration = time.time() - t_start
         debug_log += f"\n⏱️ [SAVE & LOG(with summarization)] зайняло: {duration:.2f}s"
