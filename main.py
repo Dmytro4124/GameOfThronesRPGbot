@@ -1782,6 +1782,21 @@ def back_to_houses_handler(call):
     )
 
 
+@bot.callback_query_handler(func=lambda call: call.data == "debug_stats")
+def show_debug_stats(call):
+    chat_id = call.message.chat.id
+
+    # Дістаємо збережений лог із сесії
+    session = user_sessions.get(chat_id, {})
+    debug_info = session.get('last_debug_time', "Дані відсутні.")
+
+    # Показуємо спливаюче вікно (alert)
+    bot.answer_callback_query(call.id, text="Завантажую логи...", show_alert=False)
+
+    # Відправляємо окремим повідомленням, бо лог може бути довгим
+    bot.send_message(chat_id, debug_info, parse_mode='Markdown')
+
+
 def send_game_response(chat_id, text, reply_to_message_id=None):
     """
     Відправляє відповідь користувачу з кнопкою для перегляду технічних логів.
