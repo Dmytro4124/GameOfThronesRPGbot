@@ -1578,6 +1578,8 @@ def handle_custom_name(message):
 
 # --- ОБРОБНИКИ МЕНЮ ---
 
+PROCESSED_MESSAGES = set()
+
 @bot.message_handler(func=lambda m: m.text == "📜 Профіль")
 def show_profile_handler(message):
     chat_id = message.chat.id
@@ -1785,32 +1787,54 @@ def back_to_houses_handler(call):
 @bot.message_handler(func=lambda m: user_sessions.get(m.chat.id, {}).get('state') == "GAME_ACTIVE")
 def handle_game_turn(message):
     chat_id = message.chat.id
+    msg_id = message.message_id
+
+    # --- 1. ПЕРЕВІРКА НА ДУБЛІКАТИ (IDEMPOTENCY) ---
+    if msg_id in PROCESSED_MESSAGES:
+        print(f"🛑 [SKIPPED] Telegram надіслав дублікат повідомлення {msg_id}. Ігноруємо.", flush=True)
+        return
+
+    # Додаємо ID в список оброблених
+    PROCESSED_MESSAGES.add(msg_id)
+
+    # Чистимо пам'ять (тримаємо тільки останні 100 ID)
+    if len(PROCESSED_MESSAGES) > 100:
+        # Видаляємо найстаріший (set не впорядкований, але pop видалить довільний, що ок для очистки)
+        PROCESSED_MESSAGES.pop()
+    # -----------------------------------------------
+
     user_text = message.text
 
-    # Ігноруємо кнопки меню
+    # Ігноруємо кнопки
     if user_text in ["📜 Профіль", "🎒 Інвентар", "🎲 Кинути кубик", "🆘 Допомога", "🔄 Рестарт"]:
         return
 
     bot.send_chat_action(chat_id, 'typing')
 
-    # 1. ОТРИМУЄМО ПРОФІЛЬ (для контексту валідатора)
+    # Отримуємо профіль
     profile, _ = get_user_data(chat_id)
     if not profile:
         bot.send_message(chat_id, "Помилка профілю. Натисніть /start")
         return
 
-    # 2. --- ЗАПУСК ВАРТОВОГО РЕАЛЬНОСТІ ---
-    is_valid, refusal_reason = validate_action(user_text, profile)
-
+    # Валідація
+    is_valid, reason = validate_action(user_text, profile)
     if not is_valid:
-        # Якщо дія неадекватна - відшиваємо гравця, не чіпаючи історію і головного GM
-        bot.reply_to(message, f"🚫 *Дія відхилена:*\n_{refusal_reason}_", parse_mode='Markdown')
+        bot.reply_to(message, f"🚫 {reason}")
         return
-    # --------------------------------------
 
-    # 3. Якщо все ок, запускаємо основний сюжет (як і раніше)
-    response = process_game_turn(chat_id, user_text)
-    send_safe_message(chat_id, response, reply_to_message_id=message.message_id)
+    # ЗАПУСК ГРИ
+    try:
+        # Викликаємо вашу функцію process_game_turn
+        # Вона тепер виконається ТІЛЬКИ ОДИН РАЗ для одного повідомлення
+        response = process_game_turn(chat_id, user_text)
+
+        # Відправляємо відповідь (з кнопкою логів)
+        send_game_response(chat_id, response, reply_to_message_id=msg_id)
+
+    except Exception as e:
+        print(f"CRITICAL ERROR: {e}", flush=True)
+        bot.send_message(chat_id, "⚠️ Сталася помилка. Спробуйте ще раз.")
 
 
 app = Flask('')
