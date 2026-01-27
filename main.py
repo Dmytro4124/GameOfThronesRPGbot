@@ -1782,7 +1782,36 @@ def back_to_houses_handler(call):
     )
 
 
-# Обробка ігрових повідомлень
+def send_game_response(chat_id, text, reply_to_message_id=None):
+    """
+    Відправляє відповідь користувачу з кнопкою для перегляду технічних логів.
+    Має захист від битого Markdown.
+    """
+    # Створюємо клавіатуру з кнопкою Debug
+    markup = types.InlineKeyboardMarkup()
+    debug_btn = types.InlineKeyboardButton("⚙️ Тех. дані", callback_data="debug_stats")
+    markup.add(debug_btn)
+
+    try:
+        # Спробуємо відправити з Markdown (красиво)
+        bot.send_message(
+            chat_id,
+            text,
+            reply_to_message_id=reply_to_message_id,
+            reply_markup=markup,
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        print(f"⚠️ Markdown Error: {e}. Sending plain text.")
+        # Якщо АІ згенерував кривий Markdown (наприклад, незакриту зірочку *)
+        # Відправляємо просто текстом, щоб бот не впав
+        bot.send_message(
+            chat_id,
+            text,
+            reply_to_message_id=reply_to_message_id,
+            reply_markup=markup
+        )
+
 # Обробка ігрових повідомлень
 @bot.message_handler(func=lambda m: user_sessions.get(m.chat.id, {}).get('state') == "GAME_ACTIVE")
 def handle_game_turn(message):
