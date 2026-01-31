@@ -25,6 +25,11 @@ TAB_HOUSES = 'Доми'  # Аркуш зі списком домів
 TAB_CHARACTER = 'CharacterSheet'  # Аркуш персонажа
 TAB_KNOWLEDGE = 'KnowledgeBase'
 TAB_USERS = 'Users_DB'
+TAB_NPC = 'NPC_DB'
+
+#кеш для швидкого підтягування даних
+NPC_CACHE = {}
+
 
 # Файл з ключами
 CREDENTIALS_FILE = 'credentials.json'
@@ -356,6 +361,79 @@ def load_lore_data():
         LORE_CACHE = []
 
 
+def refresh_npc_database():
+    """Завантажує NPC з Google Sheets у пам'ять бота"""
+    global NPC_CACHE
+    try:
+        # Використовуємо вашу функцію get_sheet
+        worksheet = get_sheet(TAB_NPC)
+        raw_data = worksheet.get_all_records()
+
+        new_cache = {}
+        count = 0
+
+        for row in raw_data:
+            # 1. Фільтрація
+            status = row.get("Status", "Active").strip()
+            if status.lower() != "active": continue  # Пропускаємо мертвих
+
+            # Нормалізація ключів (іноді gspread повертає пусті рядки, якщо клітинка пуста)
+            loc = str(row.get("Location", "GLOBAL")).strip()
+            name = str(row.get("Name", "Unknown")).strip()
+            is_canon = str(row.get("Is_Canon", "FALSE")).upper() == "TRUE"
+
+            type_tag = "[CANON/BOSS]" if is_canon else "[LOCAL/BACKGROUND]"
+
+            # 2. Формуємо "Картку Персонажа" для АІ
+            npc_card = f"> **{name}** {type_tag}\n"
+            if row.get("Description"): npc_card += f"- **Visual:** {row.get('Description')}\n"
+            if row.get("Character"): npc_card += f"- **Personality:** {row.get('Character')}\n"
+            if row.get("Goal"): npc_card += f"- **Goal:** {row.get('Goal')}\n"
+            if row.get("Relation_Player"): npc_card += f"- **Attitude to Player:** {row.get('Relation_Player')}\n"
+            if row.get("Relation_NPCs"): npc_card += f"- **Attitude to other NPC:** {row.get('Relation_NPCs')}\n"
+            # Секрети помічаємо як GM ONLY
+            if row.get("Secrets"): npc_card += f"- **[SECRET/GM ONLY]:** (GUIDE BEHAVIOR, DO NOT REVEAL): {row.get('Secrets')}\n"
+
+            # 3. Додаємо в кеш по локації
+            if loc not in new_cache:
+                new_cache[loc] = []
+            new_cache[loc].append(npc_card)
+            count += 1
+
+        NPC_CACHE = new_cache
+        print(f"✅ [NPC DB] Завантажено {count} персонажів.", flush=True)
+        return True
+    except Exception as e:
+        print(f"❌ [NPC DB ERROR] {e}", flush=True)
+        return False
+
+
+def get_location_npcs(current_location):
+    """
+    Повертає текст з описом NPC для поточної локації.
+    """
+    found_npcs = []
+
+    # Шукаємо часткове співпадіння (наприклад "Пентос" в "Маєток Ілліріо, Пентос")
+    for loc_key, npcs_list in NPC_CACHE.items():
+        if loc_key.lower() in current_location.lower():
+            found_npcs.extend(npcs_list)
+
+    # Додаємо глобальних NPC (якщо є)
+    if "GLOBAL" in NPC_CACHE:
+        found_npcs.extend(NPC_CACHE["GLOBAL"])
+
+    if not found_npcs:
+        return ""  # Повертаємо пустий рядок, щоб не смітити в промпті
+
+    npc_block = "=== 👥 VISIBLE NPC ROSTER (PRIORITY USE!) ===\n"
+    npc_block += "GM INSTRUCTION: If player interacts with someone, PICK FROM THIS LIST first.\n"
+    npc_block += "DO NOT HALLUCINATE NEW CHARACTERS IF A SUITABLE ONE IS HERE.\n\n"
+    npc_block += "\n".join(found_npcs)
+
+    return npc_block
+
+
 def get_relevant_context(user_text, current_location):
     """
     Шукає в базі інформацію, яка відповідає словам гравця або локації.
@@ -663,14 +741,193 @@ Write a creative text (3 paragraphs), Ukrainian language only.
         return f"Ви прибули у {current_location}. Вітер дме в обличчя, а навколо чути гомін. Що ви робите?"
 
 
+def background_canon_generation():
+    """
+    ФОНОВИЙ ПРОЦЕС: Створення "кістяка" світу.
+    Генерує ключових канонічних NPC по регіонах.
+    """
+    print("🌍 [CANON GEN] Починаю створення глобального світу...")
+
+    # 1. Очищаємо таблицю перед стартом нової гри
+    try:
+        worksheet = get_sheet(TAB_NPC)
+        worksheet.clear()
+        headers = ["Location", "Name", "Description", "Character", "Goal", "Secrets", "Relation_Player",
+                   "Relation_NPCs", "Status", "Is_Canon"]
+        worksheet.append_row(headers)
+    except Exception as e:
+        print(f"❌ [CANON GEN ERROR] Clear failed: {e}")
+        return
+
+    # 2. Визначаємо регіони для генерації (щоб не перевантажити один запит)
+    regions_tasks = [
+        ("The North & The Wall", "Starks, Night's Watch, Boltons"),
+        ("King's Landing & South", "Lannisters, Baratheons, Tyrells, Small Council"),
+        ("Essos & Across the Sea", "Targaryens, Dothraki, Illyrio")
+    ]
+
+    all_npcs = []
+
+    for region, focus in regions_tasks:
+        print(f"🌍 [CANON GEN] Генерую регіон: {region}...")
+        prompt = f"""
+        ROLE: Game of Thrones Lore Keeper.
+        TASK: Generate a JSON list of KEY CANON CHARACTERS (Year 298 AC) for: {region}.
+        FOCUS ON: {focus}.
+
+        Generate 5-7 most important characters for this region.
+
+        OUTPUT JSON ARRAY ONLY:
+        [
+          {{
+            "Location": "Specific location (e.g. Winterfell)",
+            "Name": "Full Name",
+            "Description": "Canonical appearance",
+            "Character": "Personality traits",
+            "Goal": "Canonical goal in book 1",
+            "Secrets": "Key plot secret (GM info)",
+            "Relation_Player": "Neutral/Suspicious",
+            "Relation_NPCs": "Allies/Enemies",
+            "Status": "Active"
+          }}
+        ]
+        """
+        try:
+            # Використовуємо Main модель (27b)
+            response = model.generate_content(prompt)
+            data = clean_and_parse_json(response.text)
+            if data and isinstance(data, list):
+                all_npcs.extend(data)
+        except Exception as e:
+            print(f"⚠️ [CANON GEN] Skip region {region}: {e}")
+
+    # 3. Масовий запис
+    if all_npcs:
+        rows_to_add = []
+        for npc in all_npcs:
+            row = [
+                npc.get("Location", "Westeros"),
+                npc.get("Name", "Unknown"),
+                npc.get("Description", "-"),
+                npc.get("Character", "-"),
+                npc.get("Goal", "-"),
+                npc.get("Secrets", "-"),
+                npc.get("Relation_Player", "Neutral"),
+                npc.get("Relation_NPCs", "-"),
+                "Active",
+                "TRUE"  # <--- ЦЕ КАНОН, ЇХ НЕ МОЖНА ВИДАЛЯТИ
+            ]
+            rows_to_add.append(row)
+
+        try:
+            worksheet.append_rows(rows_to_add)
+            print(f"✅ [CANON GEN] Світ заселено! Додано {len(rows_to_add)} легенд.")
+            refresh_npc_database()  # Оновлюємо пам'ять бота
+        except Exception as e:
+            print(f"❌ [CANON GEN SAVE ERROR] {e}")
+
+
+def populate_contextual_npcs(location):
+    """
+    Розумна генерація "масовки" залежно від локації.
+    1. Видаляє старих неканонічних NPC.
+    2. Аналізує атмосферу локації.
+    3. Створює відповідний набір персонажів.
+    """
+    print(f"🏘️ [LOCAL POP] Аналізую локацію: {location}...")
+
+    # 1. ЗАЧИСТКА (Видаляємо тільки Is_Canon != TRUE)
+    try:
+        worksheet = get_sheet(TAB_NPC)
+        all_rows = worksheet.get_all_values()
+
+        # Індекс колонки Is_Canon (остання, тобто 9, якщо рахувати з 0)
+        canon_col_idx = 9
+
+        headers = all_rows[0]
+        preserved_rows = [headers]
+
+        # Зберігаємо тільки канон
+        for row in all_rows[1:]:
+            if len(row) > canon_col_idx and str(row[canon_col_idx]).upper() == "TRUE":
+                preserved_rows.append(row)
+
+        # Перезаписуємо таблицю (стара масовка зникає)
+        worksheet.clear()
+        worksheet.update(preserved_rows)
+
+    except Exception as e:
+        print(f"❌ [LOCAL POP ERROR] Cleanup failed: {e}")
+        return
+
+    # 2. ГЕНЕРАЦІЯ (ВІЛЬНИЙ СТИЛЬ)
+    prompt = f"""
+    ROLE: Narrative Designer for Game of Thrones (Grimdark Fantasy).
+    TASK: Populate the current location: "{location}" with 10-12 background NPCs.
+
+    CONTEXT ANALYSIS:
+    - Analyze the name "{location}". Is it a castle, a slum, a forest, a ship?
+    - Generate NPCs that NATURALLY fit this specific place.
+    - Examples: 
+      * If "Tavern" -> Drunks, Bards, Spies.
+      * If "Battlefield" -> Looters, Dying Soldiers, Deserters.
+      * If "King's Court" -> Nobles, Servants, Guards.
+
+    REQUIREMENTS:
+    - Create a DIVERSE mix (Social standing, professions, hostility).
+    - "Secrets" must be interesting plot hooks, but not break canonical story.
+
+    OUTPUT JSON ARRAY ONLY:
+    [
+      {{
+        "Name": "Name",
+        "Description": "Atmospheric visual description",
+        "Character": "Personality traits",
+        "Goal": "Current desire",
+        "Secrets": "Hidden info",
+        "Relation_Player": "Initial reaction",
+        "Relation_NPCs": "Connection to local groups"
+      }}
+    ]
+    """
+
+    try:
+        response = model.generate_content(prompt)  # Main model
+        npc_list = clean_and_parse_json(response.text)
+
+        if not npc_list: return
+
+        new_rows = []
+        for npc in npc_list:
+            row = [
+                location,  # Прив'язуємо до поточної локації
+                npc.get("Name", "Local"),
+                npc.get("Description", "-"),
+                npc.get("Character", "-"),
+                npc.get("Goal", "-"),
+                npc.get("Secrets", "-"),
+                npc.get("Relation_Player", "Neutral"),
+                npc.get("Relation_NPCs", "-"),
+                "Active",
+                "FALSE"
+            ]
+            new_rows.append(row)
+
+        worksheet.append_rows(new_rows)
+        print(f"✅ [LOCAL POP] Локацію {location} заселено ({len(new_rows)} NPC).")
+        refresh_npc_database()
+
+    except Exception as e:
+        print(f"❌ [LOCAL POP AI ERROR] {e}")
+
+
+
 def generate_initial_stats(char_name, house_name, house_data):
-    """Генерує стартовий профіль, враховуючи КАНОНІЧНЕ місцезнаходження"""
-    # Це регіон походження Дому (для довідки), але не обов'язково місце старту
+    """Генерує стартовий профіль"""
     origin_region = house_data.get('Регіон', 'Вестерос')
 
     print(f"🎲 Генерую статистику для {char_name}...")
 
-    # Переконуємося, що змінні контексту існують
     context = GAME_ERA_CONTEXT if 'GAME_ERA_CONTEXT' in globals() else "Час: Початок Гри Престолів."
 
     prompt = f"""
@@ -961,7 +1218,7 @@ def process_training_request(user_input, profile):
     Повертає JSON з оновленнями (ціна, час, стат) або None.
     """
     # Список ключових слів (можна розширити)
-    training_keywords = ["тренув", "вчив", "практив", "train", "practice", "study"]
+    training_keywords = ["тренув", "вчив", "практикув", "train", "practice", "study"]
     if not any(word in user_input.lower() for word in training_keywords):
         return None
 
@@ -993,11 +1250,7 @@ def process_training_request(user_input, profile):
         current_val = safe_int(profile.get(f"{skill_target} навички", 0))
         if current_val == 0: current_val = safe_int(profile.get(skill_target, 10))
 
-        # === МАТЕМАТИКА БАЛАНСУ (HARDCORE) ===
-        # Чим вищий рівень, тим дорожче і довше
-        # Формула ціни: Поточний рівень * 5 золотих
         cost_gold = current_val * 5
-        # Формула часу: Мінімум 3 дні + (Рівень / 20)
         cost_time_days = 3 + int(current_val / 20)
 
         user_gold = safe_int(profile.get("Особисте Золото", 0))
@@ -1043,6 +1296,7 @@ def process_game_turn(chat_id, user_input):
 
     # 2. Контекст
     history_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in history[-40:]])
+    old_location = profile.get("Поточне місцезнаходження", "")
     mini_profile = {
         "Name": profile.get("Ім'я"),
         "Loc": profile.get("Поточне місцезнаходження"),
@@ -1056,6 +1310,7 @@ def process_game_turn(chat_id, user_input):
 
     # Знання з бази
     context_knowledge = get_relevant_context(user_input, curr_loc)
+    npc_context_text = get_location_npcs(curr_loc)
     duration = time.time() - t_start
     debug_log += f"\n⏱️ [DATA LOAD] зайняло: {duration:.2f}s"
     timing_details.append(f"📚 Data: {duration:.2f}s")
@@ -1064,7 +1319,7 @@ def process_game_turn(chat_id, user_input):
 
     mechanics_instruction = check_skill_mechanics(user_input, profile)
 
-    # 1. ПЕРЕВІРКА НА ТРЕНУВАННЯ (Explicit Training)
+    # 1. ПЕРЕВІРКА НА ТРЕНУВАННЯ
     training_result = process_training_request(user_input, profile)
 
     mechanics_note = ""
@@ -1077,21 +1332,18 @@ def process_game_turn(chat_id, user_input):
         else:
             # Якщо успіх - готуємо дані для АІ і Профілю
             mechanics_note = training_result['story_prompt']
-            # Примусові оновлення, які ми передамо в apply_system_impacts
+            # Примусові оновлення, які ідуть в apply_system_impacts
             extra_updates = {
                 "gold_impact": f"spend_{training_result['cost_gold']}",
                 # Це треба адаптувати під вашу логіку або просто відняти вручну
                 "skill_impact": {training_result['skill']: training_result['stat_gain']},
                 "time_passed": "days"  # Примусовий пропуск часу
             }
-            # ХАК: Віднімаємо золото і час вручну, щоб не плутати АІ тегами
-            # (Або можна довіритись АІ, але вручну надійніше)
             current_gold = safe_int(profile.get("Особисте Золото", 0))
             profile["Особисте Золото"] = max(0, current_gold - int(training_result['cost_gold']))
             # Час оновиться через тег "days"
 
     else:
-        # 2. ЯКЩО НЕ ТРЕНУВАННЯ - ЗВИЧАЙНА ПЕРЕВІРКА (Skill Check)
         mechanics_note = check_skill_mechanics(user_input, profile)
 
     duration = time.time() - t_start
@@ -1115,12 +1367,23 @@ def process_game_turn(chat_id, user_input):
     {GAME_ERA_CONTEXT}
     {context_knowledge}
     
+    {npc_context_text}
+    
+    === NPC INTERACTION RULES (CRITICAL) ===
+    1. **PRIORITY:** If the player says "I look around" or "I talk to the merchant", YOU MUST check the "VISIBLE NPC ROSTER" above.
+       - If there is a merchant named 'Lotho' in the list -> Use Lotho.
+       - DO NOT invent a new 'Generic Merchant' if a specific one exists.
+    2. **SECRETS:** Use the [SECRET] field to determine how the NPC acts, creates tension, or lies.
+       - Example: If Secret is "Is a spy", the NPC should ask too many questions, but NOT say "Hello, I am a spy."
+    3. **RELATIONS:** Use 'Attitude to Player'. If it says 'Suspicious', the NPC will not be helpful without a bribe or persuasion.
+    
     === TAGS GUIDE ===
     1. **time_passed** (How much time has passed):
        - “short” (pure dialogue, thoughts, quick look - NO TIME ADVANCE)
        - “medium” (an hour or two - walk, exploration)
-       - “long” (half a day - travel, work)
+       - “long” (half a day - study, work)
        - “sleep” (night - rest)
+       - “days” (intense training, travel)
 
     2. **health_impact** (Health consequences):
        - “none” (no change)
@@ -1316,17 +1579,23 @@ def process_game_turn(chat_id, user_input):
         if safe_int(profile.get("Здоров'я", 100)) <= 0:
             story += "\n\n💀 *ВАШ ДОЗОР ЗАКІНЧИВСЯ. Ви загинули.*"
 
+        new_location = profile.get("Поточне місцезнаходження", "")
+        # Детектор переміщення
+        if old_location != new_location and len(new_location) > 3:
+            print(f"✈️ TRAVEL: {old_location} -> {new_location}")
+            pop_thread = Thread(target=populate_contextual_npcs, args=(new_location,))
+            pop_thread.start()
+
         def background_task(chat_id_arg, user_id_arg, profile_arg, char_name_arg, input_arg, story_arg):
             try:
-                # 1. Збереження в Google Sheets (синхронне, повільне)
+                # 1. Збереження в Google Sheets
                 save_user_data(user_id_arg, profile_arg, char_name_arg)
 
-                # 2. Сумаризація через AI (повільна)
+                # 2. Сумаризація через AI
                 short_hist_turn = summarize_turn(story_arg)
                 short_user_inp = summarize_turn(input_arg)
 
                 # 3. Оновлення історії в пам'яті
-                # Потрібно отримати актуальний об'єкт сесії
                 if chat_id_arg in user_sessions:
                     hist = user_sessions[chat_id_arg].get('history', [])
                     hist.append({"role": "User", "content": short_user_inp})
@@ -1352,7 +1621,7 @@ def process_game_turn(chat_id, user_input):
         debug_log += f"\n🏁 [TOTAL] Загальний час ходу: {total_time:.2f}s\n-------------------"
         print(debug_log)
 
-        # Зберігаємо лог для кнопки (якщо ви її зробите)
+        # Зберігаємо лог для кнопки
         debug_msg = "\n".join(timing_details) + f"\n🏁 Всього: {total_time:.2f}s"
         debug_msg = "⏱️ *ТЕХНІЧНИЙ ЗВІТ ХОДУ:*\n━━━━━━━━━━━━━━━━\n"
         debug_msg += "\n".join(timing_details)
@@ -1370,9 +1639,9 @@ def process_game_turn(chat_id, user_input):
 
     except Exception as e:
         import traceback
-        traceback.print_exc()  # Це покаже в консолі точний рядок помилки
+        traceback.print_exc() # Тут показує рядок помилки
         print(f"❌ Помилка AI: {e}")
-        return f"Щось пішло не так... (Помилка: {str(e)})"  # Виведемо помилку гравцю, щоб ви її побачили
+        return f"Щось пішло не так... (Помилка: {str(e)})"  # Виведемо помилку гравцю
 
 
 
@@ -1543,6 +1812,24 @@ def start_game_with_character(chat_id, char_name):
             session['character_name'] = char_name
             session['history'] = []  # Очищаємо історію в пам'яті для нової гри
 
+            # ОТРИМУЄМО СТАРТОВУ ЛОКАЦІЮ
+            start_loc = full_profile.get('Поточне місцезнаходження', 'Westeros')
+
+            # ========================================================
+            # 🚀 MEGA-THREAD: ГЕНЕРАЦІЯ ВСЬОГО СВІТУ
+            # ========================================================
+            def initial_world_setup(loc):
+                # 1. Спочатку генеруємо весь канон
+                background_canon_generation()
+
+                # 2. Потім заселяємо конкретно стартову локацію
+                populate_contextual_npcs(loc)
+
+                print("🏁 [WORLD READY] Світ повністю готовий до гри!")
+
+            # Запускаємо потік
+            world_thread = Thread(target=initial_world_setup, args=(start_loc,))
+            world_thread.start()
             # 2. Технічне повідомлення
             stats_msg = (
                 f"✅ *Персонажа створено!*\n"
@@ -1910,6 +2197,7 @@ if __name__ == "__main__":
     keep_alive()
 
     try:
+        refresh_npc_database()
         bot.infinity_polling()
     except Exception as e:
         print(f"❌ Помилка polling: {e}")
