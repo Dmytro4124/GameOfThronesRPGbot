@@ -741,7 +741,7 @@ Write a creative text (3 paragraphs), Ukrainian language only.
         return f"Ви прибули у {current_location}. Вітер дме в обличчя, а навколо чути гомін. Що ви робите?"
 
 
-def background_canon_generation():
+def background_canon_generation(context_text, excluded_name=None):
     """
     ФОНОВИЙ ПРОЦЕС: Створення "кістяка" світу.
     Генерує ключових канонічних NPC по регіонах.
@@ -771,11 +771,21 @@ def background_canon_generation():
     for region, focus in regions_tasks:
         print(f"🌍 [CANON GEN] Генерую регіон: {region}...")
         prompt = f"""
-        ROLE: Game of Thrones Lore Keeper.
+        ROLE: Game of Thrones Lore Keeper (Year 298 AC).
         TASK: Generate a JSON list of KEY CANON CHARACTERS (Year 298 AC) for: {region}.
         FOCUS ON: {focus}.
+        
+        === CURRENT TIMELINE & SITUATION (CRITICAL) ===
+        {context_text}
+        
+        INSTRUCTION:
+        1. **Adapt Goals to Timeline:** - If King Robert is riding to Winterfell -> Ned Stark's goal is "Prepare for the King's arrival", NOT just "Rule the North".
+           - If Jon Arryn just died -> Cersei's goal is "Conceal the truth", NOT just "Be Queen".
+           - If Daenerys is about to marry Drogo -> Viserys is "Impatient for the army", Illyrio is "Scheming".
+        2. **Atmospheric Description:** Describe them IN THIS MOMENT (e.g., "Covered in road dust", "Wearing mourning clothes").
+        3. **Secrets:** Include specifically the secrets relevant to THIS moment (e.g., "Letters from Lysa Arryn").
 
-        Generate 15-20 most important characters for this region.
+        Generate 25-30 most important characters for this region.
         Output 'Location' field in UKRAINIAN language (e.g., 'Вінтерфел', 'Пентос', 'Стіна').
 
         OUTPUT JSON ARRAY ONLY:
@@ -806,6 +816,13 @@ def background_canon_generation():
     if all_npcs:
         rows_to_add = []
         for npc in all_npcs:
+            npc_name = npc.get("Name", "Unknown")
+
+            # Фільтр імені гравця
+            if excluded_name and npc_name.strip().lower() == excluded_name.strip().lower():
+                print(f"🛑 [NAME CLASH] Ігнорую канон {npc_name}, бо гравець обрав це ім'я.")
+                continue
+
             row = [
                 npc.get("Location", "Westeros"),
                 npc.get("Name", "Unknown"),
@@ -828,12 +845,13 @@ def background_canon_generation():
             print(f"❌ [CANON GEN SAVE ERROR] {e}")
 
 
-def populate_contextual_npcs(location):
+def populate_contextual_npcs(location, situation_context="Normal day, calm atmosphere", excluded_name=None):
     """
-    Розумна генерація "масовки" залежно від локації.
-    1. Видаляє старих неканонічних NPC.
-    2. Аналізує атмосферу локації.
-    3. Створює відповідний набір персонажів.
+   Генерує NPC, які відповідають ПОТОЧНІЙ СИТУАЦІЇ в локації.
+
+    :param location: Назва локації (напр. "Королівська Гавань")
+    :param situation_context: Опис подій (напр. "Траур, помер Десниця, всі шепочуться про отруту")
+    :param excluded_name: Ім'я гравця (щоб не створити клона)
     """
     print(f"🏘️ [LOCAL POP] Аналізую локацію: {location}...")
 
@@ -865,14 +883,16 @@ def populate_contextual_npcs(location):
     prompt = f"""
     ROLE: Narrative Designer for Game of Thrones (Grimdark Fantasy).
     TASK: Populate the current location: "{location}" with 10-12 background NPCs.
-
-    CONTEXT ANALYSIS:
-    - Analyze the name "{location}". Is it a castle, a slum, a forest, a ship?
-    - Generate NPCs that NATURALLY fit this specific place.
-    - Examples: 
-      * If "Tavern" -> Drunks, Bards, Spies.
-      * If "Battlefield" -> Looters, Dying Soldiers, Deserters.
-      * If "King's Court" -> Nobles, Servants, Guards.
+    
+    === CURRENT SITUATION (CRITICAL) ===
+    {situation_context}
+    
+    INSTRUCTION:
+    1. **Adapt to the Situation:** - If context says "War/Siege" -> Generate wounded soldiers, starving refugees, looting mercenaries.
+       - If context says "Festival/Tourney" -> Generate drunk knights, pickpockets, singers.
+       - If context says "Mourning" -> Generate silent sisters, crying servants, paranoid guards.
+    2. **Diverse Cast:** Do not just make 10 guards. We need beggars, nobles, merchants, criminals.
+    3. **Relationships:** Their "Goal" and "Secrets" must be tied to the Current Situation.
 
     REQUIREMENTS:
     - Create a DIVERSE mix (Social standing, professions, hostility).
@@ -901,6 +921,12 @@ def populate_contextual_npcs(location):
 
         new_rows = []
         for npc in npc_list:
+            npc_name = npc.get("Name", "Local")
+
+            # Фільтр імені
+            if excluded_name and npc_name.strip().lower() == excluded_name.strip().lower():
+                continue
+
             row = [
                 location,  # Прив'язуємо до поточної локації
                 npc.get("Name", "Local"),
@@ -1007,6 +1033,70 @@ def safe_int(value):
     except (ValueError, TypeError):
         return 0
 
+
+def update_npcs_in_db(updates):
+    """
+    Приймає список змін для NPC і записує їх у базу.
+    updates = [
+        {"Name": "Illyrio Mopatis", "Relation_Player": "Hostile", "Status": "Active"},
+        {"Name": "Guard", "Status": "Dead"}
+    ]
+    """
+    if not updates: return
+
+    print(f"📝 [NPC UPDATE] Записую зміни для {len(updates)} персонажів...")
+
+    try:
+        worksheet = get_sheet(TAB_NPC)
+        # Отримуємо всі дані, щоб знайти потрібні рядки
+        all_records = worksheet.get_all_records()
+
+        # Створюємо мапу: Ім'я -> Номер рядка (враховуючи, що заголовки - це рядок 1, дані з 2)
+        # gspread нумерує з 1.
+        name_to_row = {str(row['Name']).strip().lower(): i + 2 for i, row in enumerate(all_records)}
+
+        # Список клітинок для пакетного оновлення (Batch Update - це швидко)
+        cells_to_update = []
+
+        # Отримуємо заголовки колонок, щоб знати індекси (A=1, B=2...)
+        # Припускаємо стандартний порядок, який ми створили раніше:
+        # 1:Location, 2:Name, 3:Description, 4:Character, 5:Goal, 6:Secrets, 7:Relation_Player, 8:Relation_NPCs, 9:Status
+
+        col_map = {
+            "Description": 3,
+            "Character": 4,
+            "Goal": 5,
+            "Secrets": 6,
+            "Relation_Player": 7,
+            "Relation_NPCs": 8,
+            "Status": 9
+        }
+
+        for update in updates:
+            name = str(update.get("Name")).strip()
+            row_idx = name_to_row.get(name.lower())
+
+            if not row_idx:
+                print(f"⚠️ [NPC UPDATE] Не знайдено NPC: {name}")
+                continue
+
+            # Проходимося по полях, які змінилися
+            for field, new_value in update.items():
+                if field in col_map:
+                    col_idx = col_map[field]
+                    # Створюємо об'єкт клітинки
+                    cells_to_update.append(gspread.Cell(row_idx, col_idx, str(new_value)))
+                    print(f"   -> {name}: {field} = {new_value}")
+
+        if cells_to_update:
+            worksheet.update_cells(cells_to_update)
+            print("✅ [NPC UPDATE] Зміни збережено в Google Sheets.")
+
+            # ВАЖЛИВО: Оновлюємо кеш, щоб зміни подіяли одразу
+            refresh_npc_database()
+
+    except Exception as e:
+        print(f"❌ [NPC UPDATE ERROR] {e}")
 
 def validate_action(user_input, profile):
     """
@@ -1408,7 +1498,15 @@ def process_game_turn(chat_id, user_input):
     
     4. **inventory**   
         - "inventory_new": ["Item Name"] (If obtained).
-        - "inventory_lost": ["Item Name"] (If lost/eaten). 
+        - "inventory_lost": ["Item Name"] (If lost/eaten).
+        
+    5. **npc_updates**:
+       Use this IF and ONLY IF an interacting NPC changes significantly.
+       Fields to update:
+       - "Relation_Player": "Hostile", "Friendly", "Afraid", "Deadly Enemy".
+       - "Goal": If their motivation changes (e.g. from "Guard the gate" to "Kill the intruder").
+       - "Status": "Dead", "Injured", "Fled".
+       - "Secrets": If a secret is revealed or created. 
         
     === THE GOLDEN LAWS OF AGENCY (VIOLATION = FAILURE) ===
     1. **NEVER TOUCH THE PLAYER:** You control NPCs, Weather, and Physics. The Player controls ONLY their Hero.
@@ -1525,7 +1623,16 @@ def process_game_turn(chat_id, user_input):
              "health_impact": "...",
              "gold_impact": "...",
              "inventory_new": [],
-             "inventory_lost": []
+             "inventory_lost": [],
+             "npc_updates": [
+                {{
+                    "Name": "Exact NPC Name from context",
+                    "Goal": "New Goal",
+                    "Secret": "New Secret",
+                    "Relation_Player": "New Attitude",
+                    "Status": "Active/Dead/Injured"
+                }}
+             ]
         }}
     }}
     """
@@ -1585,13 +1692,35 @@ def process_game_turn(chat_id, user_input):
         # Детектор переміщення
         if old_location != new_location and len(new_location) > 3:
             print(f"✈️ TRAVEL: {old_location} -> {new_location}")
-            pop_thread = Thread(target=populate_contextual_npcs, args=(new_location,))
+            current_char_name = profile.get("Ім'я", "")
+
+            # 1. Генеруємо контекст ситуації "на льоту" (це робиться в потоці, тому не гальмує гру)
+            def travel_population_task(new_loc, char_name):
+                # Просимо Worker придумати ситуацію
+                situation_prompt = f"""
+                        Describe the current atmosphere in "{new_loc}" (Game of Thrones, Year 298) in 1 sentence.
+                        Examples: "The city is preparing for a siege.", "A festive market day.", "Dark alleys filled with beggars."
+                        """
+                try:
+                    # Worker (4b) впорається миттєво
+                    situation = model_worker.generate_content(situation_prompt).text.strip()
+                except:
+                    situation = "A tense day in Westeros."
+
+                # 2. Заселяємо з цим контекстом
+                populate_contextual_npcs(new_loc, situation, excluded_name=char_name)
+
+            pop_thread = Thread(target=travel_population_task, args=(new_location, current_char_name))
             pop_thread.start()
 
-        def background_task(chat_id_arg, user_id_arg, profile_arg, char_name_arg, input_arg, story_arg):
+        def background_task(chat_id_arg, user_id_arg, profile_arg, char_name_arg, input_arg, story_arg, npc_changes_arg):
             try:
                 # 1. Збереження в Google Sheets
                 save_user_data(user_id_arg, profile_arg, char_name_arg)
+
+                # ОНОВЛЕННЯ NPC
+                if npc_changes_arg:
+                    update_npcs_in_db(npc_changes_arg)
 
                 # 2. Сумаризація через AI
                 short_hist_turn = summarize_turn(story_arg)
@@ -1816,18 +1945,21 @@ def start_game_with_character(chat_id, char_name):
 
             # ОТРИМУЄМО СТАРТОВУ ЛОКАЦІЮ
             start_loc = full_profile.get('Поточне місцезнаходження', 'Westeros')
+            player_name_filter = full_profile.get("Ім'я", "")
+            timeline_context = GAME_ERA_CONTEXT
 
             # ========================================================
             # 🚀 MEGA-THREAD: ГЕНЕРАЦІЯ ВСЬОГО СВІТУ
             # ========================================================
-            def initial_world_setup(loc):
+            def initial_world_setup(loc, p_name, time_ctx):
                 # 1. Спочатку генеруємо весь канон
-                background_canon_generation()
+                background_canon_generation(context_text=time_ctx, excluded_name=p_name)
 
                 # 2. Потім заселяємо конкретно стартову локацію
-                populate_contextual_npcs(loc)
+                start_situation = "Start of the game. Normal daily routine."
+                populate_contextual_npcs(loc, start_situation, excluded_name=p_name)
 
-                print("🏁 [WORLD READY] Світ повністю готовий до гри!")
+                print("🏁 [WORLD READY] Світ повністю налаштований!")
 
             # Запускаємо потік
             world_thread = Thread(target=initial_world_setup, args=(start_loc,))
