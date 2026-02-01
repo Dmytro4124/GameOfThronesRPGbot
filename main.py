@@ -1544,12 +1544,16 @@ def process_game_turn(chat_id, user_input):
     2. **NPC POWER:** Illyrio Mopatis, Tywin Lannister, and Iron Bank envoys are SMARTER and MORE POWERFUL than the player.
        - Illyrio is not a servant. He owns the player. If the player is rude, Illyrio cuts off funding or locks the door.
        - Merchants have guards. You cannot just rob a port without the City Watch (2000 spears) reacting.
-    3. **PHYSICS & TIME:** - Repairing a ship = Weeks.
+    3. **PACING & LOGIC (STOP THE LOOP):**
+       - **ONE CLIMAX PER SCENE:** If the player wins a major conflict (e.g., kills a challenger), THE SCENE ENDS. Do NOT spawn a new random enemy immediately.
+       - Transition to the next logical step (Feast, Sleep, Travel).
+       - Do NOT create "chain reactions" of trials. If Drogo is impressed, he is impressed. He won't test the player again 5 seconds later.
+    4. **PHYSICS & TIME:** - Repairing a ship = Weeks.
        - Gathering an army = Months.
        - Traveling = Days.
        - If the player ignores time ("I do it quickly"), FORCE a "time_passed": "long" tag and describe the weeks lost.
-    4. **CONSEQUENCES:** If the player commits a crime (murder, theft) in a Free City, the Magisters WILL send the City Watch. The player is not invisible.
-    5. **PAUSE RULE:** Do NOT describe a long chain of actions for NPCs.
+    5. **CONSEQUENCES:** If the player commits a crime (murder, theft) in a Free City, the Magisters WILL send the City Watch. The player is not invisible.
+    6. **PAUSE RULE:** Do NOT describe a long chain of actions for NPCs.
        - BAD: "Drogo laughs, grabs you, beats you, and throws you out." (Player had no chance to react).
        - GOOD: "Drogo laughs and reaches for your throat. What do you do?" (Stops for player reaction).
     
