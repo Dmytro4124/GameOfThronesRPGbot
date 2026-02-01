@@ -11,6 +11,7 @@ import os
 from dotenv import load_dotenv
 from flask import Flask
 from threading import Thread
+import difflib
 
 # ================= КОНФІГУРАЦІЯ =================
 
@@ -786,7 +787,10 @@ def background_canon_generation(context_text, excluded_name=None):
         3. **Secrets:** Include specifically the secrets relevant to THIS moment (e.g., "Letters from Lysa Arryn").
 
         Generate 25-30 most important characters for this region.
-        Output 'Location' field in UKRAINIAN language (e.g., 'Вінтерфел', 'Пентос', 'Стіна').
+        
+        === LANGUAGE REQUIREMENT (CRITICAL) ===
+        
+        Responce should be in UKRAINIAN language only
 
         OUTPUT JSON ARRAY ONLY:
         [
@@ -816,12 +820,15 @@ def background_canon_generation(context_text, excluded_name=None):
     if all_npcs:
         rows_to_add = []
         for npc in all_npcs:
-            npc_name = npc.get("Name", "Unknown")
+            # Отримуємо ім'я, яке згенерував АІ
+            ai_gen_name = npc.get("Name", "Unknown")
 
-            # Фільтр імені гравця
-            if excluded_name and npc_name.strip().lower() == excluded_name.strip().lower():
-                print(f"🛑 [NAME CLASH] Ігнорую канон {npc_name}, бо гравець обрав це ім'я.")
-                continue
+            # 1. Перевірка проти імені гравця (використовуємо нашу нову функцію)
+            if excluded_name:
+                # Створюємо міні-список з одного імені гравця, щоб перевірити схожість
+                if find_best_match(ai_gen_name, [excluded_name], threshold=0.8):
+                    print(f"🛑 [CLASH] '{ai_gen_name}' занадто схоже на гравця '{excluded_name}'. Пропуск.")
+                    continue
 
             row = [
                 npc.get("Location", "Westeros"),
@@ -897,7 +904,10 @@ def populate_contextual_npcs(location, situation_context="Normal day, calm atmos
     REQUIREMENTS:
     - Create a DIVERSE mix (Social standing, professions, hostility).
     - "Secrets" must be interesting plot hooks, but not break canonical story.
-    - Output 'Location' field in UKRAINIAN language (e.g., 'Вінтерфел', 'Пентос', 'Стіна').
+    
+    === LANGUAGE REQUIREMENT (CRITICAL) ===
+        
+        Responce should be in UKRAINIAN language only
 
     OUTPUT JSON ARRAY ONLY:
     [
@@ -921,11 +931,15 @@ def populate_contextual_npcs(location, situation_context="Normal day, calm atmos
 
         new_rows = []
         for npc in npc_list:
-            npc_name = npc.get("Name", "Local")
+            # Отримуємо ім'я, яке згенерував АІ
+            ai_gen_name = npc.get("Name", "Unknown")
 
-            # Фільтр імені
-            if excluded_name and npc_name.strip().lower() == excluded_name.strip().lower():
-                continue
+            # 1. Перевірка проти імені гравця (використовуємо нашу нову функцію)
+            if excluded_name:
+                # Створюємо міні-список з одного імені гравця, щоб перевірити схожість
+                if find_best_match(ai_gen_name, [excluded_name], threshold=0.8):
+                    print(f"🛑 [CLASH] '{ai_gen_name}' занадто схоже на гравця '{excluded_name}'. Пропуск.")
+                    continue
 
             row = [
                 location,  # Прив'язуємо до поточної локації
@@ -1034,6 +1048,34 @@ def safe_int(value):
         return 0
 
 
+def find_best_match(query_name, distinct_names, threshold=0.65):
+    """
+    Шукає найбільш схоже ім'я зі списку.
+    query_name: "Візеріс" (те, що написав АІ або гравець)
+    distinct_names: ["Вісерис Таргарієн", "Джон Сноу", ...] (список з бази)
+    threshold: 0.65 (65% схожості достатньо)
+    """
+    if not query_name or not distinct_names:
+        return None
+
+    query = query_name.lower().strip()
+
+    # 1. Спробуємо точний збіг або входження (швидкий пошук)
+    # Це покриває варіанти "Ілліріо" -> "Ілліріо Мопатіс"
+    for real_name in distinct_names:
+        r_low = real_name.lower()
+        if query == r_low or query in r_low or r_low in query:
+            return real_name
+
+    # 2. Якщо не знайшли - використовуємо difflib (розумний пошук)
+    # Це покриває "Візеріс" -> "Вісерис"
+    matches = difflib.get_close_matches(query, distinct_names, n=1, cutoff=threshold)
+
+    if matches:
+        return matches[0]
+
+    return None
+
 def update_npcs_in_db(updates):
     """
     Приймає список змін для NPC і записує їх у базу.
@@ -1044,59 +1086,76 @@ def update_npcs_in_db(updates):
     """
     if not updates: return
 
-    print(f"📝 [NPC UPDATE] Записую зміни для {len(updates)} персонажів...")
+    print(f"📝 [NPC UPDATE] Обробка змін: {json.dumps(updates, ensure_ascii=False)}")
 
     try:
         worksheet = get_sheet(TAB_NPC)
-        # Отримуємо всі дані, щоб знайти потрібні рядки
-        all_records = worksheet.get_all_records()
+        all_values = worksheet.get_all_values()
 
-        # Створюємо мапу: Ім'я -> Номер рядка (враховуючи, що заголовки - це рядок 1, дані з 2)
-        # gspread нумерує з 1.
-        name_to_row = {str(row['Name']).strip().lower(): i + 2 for i, row in enumerate(all_records)}
+        if not all_values: return
 
-        # Список клітинок для пакетного оновлення (Batch Update - це швидко)
+        # 1. ДИНАМІЧНИЙ МАПИНГ ЗАГОЛОВКІВ (Рядок 1)
+        # Шукаємо, в якій колонці які дані, щоб не залежати від порядку
+        headers = [h.strip().lower() for h in all_values[0]]
+
+        col_map = {}
+        # Список полів, які дозволено оновлювати
+        target_cols = ["status", "relation_player", "goal", "secrets", "description", "character"]
+
+        for target in target_cols:
+            if target in headers:
+                # +1 тому що gspread рахує колонки з 1
+                col_map[target] = headers.index(target) + 1
+
+        # 2. Створюємо мапу існуючих імен: { "Вісерис Таргарієн": 5, ... }
+        # Зберігаємо оригінальне ім'я як ключ, а номер рядка як значення
+        db_names_map = {}
+        for i, row in enumerate(all_values[1:], start=2):  # Дані з 2-го рядка
+            # Припускаємо, що Name завжди у 2-й колонці (індекс 1)
+            raw_name = str(row[1]).strip()
+            if raw_name:
+                db_names_map[raw_name] = i
+
         cells_to_update = []
 
-        # Отримуємо заголовки колонок, щоб знати індекси (A=1, B=2...)
-        # Припускаємо стандартний порядок, який ми створили раніше:
-        # 1:Location, 2:Name, 3:Description, 4:Character, 5:Goal, 6:Secrets, 7:Relation_Player, 8:Relation_NPCs, 9:Status
-
-        col_map = {
-            "Description": 3,
-            "Character": 4,
-            "Goal": 5,
-            "Secrets": 6,
-            "Relation_Player": 7,
-            "Relation_NPCs": 8,
-            "Status": 9
-        }
+        # Список імен для пошуку
+        available_names_list = list(db_names_map.keys())
 
         for update in updates:
-            name = str(update.get("Name")).strip()
-            row_idx = name_to_row.get(name.lower())
+            target_name = str(update.get("Name")).strip()
 
-            if not row_idx:
-                print(f"⚠️ [NPC UPDATE] Не знайдено NPC: {name}")
-                continue
+            # 🔥 ВИКОРИСТОВУЄМО РОЗУМНИЙ ПОШУК 🔥
+            best_match = find_best_match(target_name, available_names_list)
 
-            # Проходимося по полях, які змінилися
-            for field, new_value in update.items():
-                if field in col_map:
-                    col_idx = col_map[field]
-                    # Створюємо об'єкт клітинки
-                    cells_to_update.append(gspread.Cell(row_idx, col_idx, str(new_value)))
-                    print(f"   -> {name}: {field} = {new_value}")
+            if best_match:
+                row_idx = db_names_map[best_match]
+                print(f"✅ [MATCH] '{target_name}' ототожнено з '{best_match}' (Рядок {row_idx})")
+
+                # Формуємо клітинки для оновлення
+                for field, new_val in update.items():
+                    field_key = field.lower()
+
+                    # Ім'я не оновлюємо
+                    if field_key == "name": continue
+
+                    if field_key in col_map:
+                        col_idx = col_map[field_key]
+                        cells_to_update.append(gspread.Cell(row_idx, col_idx, str(new_val)))
+                        print(f"   -> Оновлюю {field}: {new_val}")
+            else:
+                print(f"⚠️ [NO MATCH] Не вдалося знайти NPC: '{target_name}' в базі.")
 
         if cells_to_update:
             worksheet.update_cells(cells_to_update)
-            print("✅ [NPC UPDATE] Зміни збережено в Google Sheets.")
-
-            # ВАЖЛИВО: Оновлюємо кеш, щоб зміни подіяли одразу
+            print(f"💾 [SAVED] Оновлено {len(cells_to_update)} полів.")
             refresh_npc_database()
+        else:
+            print("⚠️ [NPC UPDATE] Немає співпадінь для запису.")
 
     except Exception as e:
-        print(f"❌ [NPC UPDATE ERROR] {e}")
+        print(f"❌ [UPDATE ERROR] {e}")
+        import traceback
+        traceback.print_exc()
 
 def validate_action(user_input, profile):
     """
@@ -1672,6 +1731,9 @@ def process_game_turn(chat_id, user_input):
 
         t_start = time.time()
         impacts = ai_data.get("updates", {})
+        npc_changes = impacts.get("npc_updates", [])
+        if not npc_changes:
+            npc_changes = ai_data.get("npc_updates", [])
 
         # --- PYTHON-МЕНЕДЖЕР ---
         profile, logs = apply_system_impacts(profile, impacts)
@@ -1745,7 +1807,7 @@ def process_game_turn(chat_id, user_input):
         # Створення та запуск потоку
         # Передаємо копії даних, щоб уникнути конфліктів
         bg_thread = Thread(target=background_task,
-                           args=(chat_id, user_id, profile, profile.get("Ім'я"), user_input, story))
+                           args=(chat_id, user_id, profile, profile.get("Ім'я"), user_input, story, npc_changes))
         bg_thread.start()
 
         duration = time.time() - t_start
