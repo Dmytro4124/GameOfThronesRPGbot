@@ -775,7 +775,8 @@ def background_canon_generation():
         TASK: Generate a JSON list of KEY CANON CHARACTERS (Year 298 AC) for: {region}.
         FOCUS ON: {focus}.
 
-        Generate 5-7 most important characters for this region.
+        Generate 15-20 most important characters for this region.
+        Output 'Location' field in UKRAINIAN language (e.g., 'Вінтерфел', 'Пентос', 'Стіна').
 
         OUTPUT JSON ARRAY ONLY:
         [
@@ -876,6 +877,7 @@ def populate_contextual_npcs(location):
     REQUIREMENTS:
     - Create a DIVERSE mix (Social standing, professions, hostility).
     - "Secrets" must be interesting plot hooks, but not break canonical story.
+    - Output 'Location' field in UKRAINIAN language (e.g., 'Вінтерфел', 'Пентос', 'Стіна').
 
     OUTPUT JSON ARRAY ONLY:
     [
