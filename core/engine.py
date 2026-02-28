@@ -144,6 +144,10 @@ def process_game_turn(chat_id, user_input):
         2. **SECRETS:** Use the [SECRET] field to determine how the NPC acts, creates tension, or lies.
            - Example: If Secret is "Is a spy", the NPC should ask too many questions, but NOT say "Hello, I am a spy."
         3. **RELATIONS:** Use 'Attitude to Player'. If it says 'Suspicious', the NPC will not be helpful without a bribe or persuasion.
+        4. **STRICT ROSTER RULE (NO HALLUCINATIONS):** You are ABSOLUTELY FORBIDDEN from inventing new NPCs (e.g., "random guard", "Lannister knight", "servant"). 
+       - You MUST ONLY use the exact characters provided in the World Context above.
+       - If the player looks for a guard, and the roster has "Йорен (Вартовий)", you MUST use "Йорен".
+       - If the player interacts with someone who is NOT in the roster, describe the place as empty or state that no such person is around.
 
         === TAGS GUIDE (STRICT VALUES REQUIRED) ===
         1. **time_passed** (How much time has passed):
