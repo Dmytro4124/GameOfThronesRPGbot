@@ -1,6 +1,10 @@
-pyTelegramBotAPI
+pyTelegramBotAPI~=4.30.0
 google-generativeai
-gspread
-oauth2client
-python-dotenv
-flask
+gspread~=6.2.1
+oauth2client~=4.1.3
+python-dotenv~=1.2.1
+flask~=3.1.2
+protobuf~=5.29.5
+telebot~=0.0.5
+google-api-python-client~=2.188.0
+requests~=2.32.5
