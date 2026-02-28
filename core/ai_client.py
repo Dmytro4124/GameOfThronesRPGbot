@@ -1,14 +1,33 @@
 # core/ai_client.py
 import json
 import time
-import google.generativeai as genai
+from google import genai
 from config import GEMINI_API_KEY, MODEL_MAIN_NAME, MODEL_WORKER_NAME
 
-# Ініціалізація Gemini
-genai.configure(api_key=GEMINI_API_KEY)
+# Ініціалізація нового клієнта
+client = genai.Client(api_key=GEMINI_API_KEY)
 
-model = genai.GenerativeModel(model_name=MODEL_MAIN_NAME)
-model_worker = genai.GenerativeModel(model_name=MODEL_WORKER_NAME)
+
+class AIWrapper:
+    """
+    Обгортка для сумісності зі старим кодом.
+    Дозволяє використовувати .generate_content() без змін в інших файлах.
+    """
+
+    def __init__(self, model_name):
+        self.model_name = model_name
+
+    def generate_content(self, prompt):
+        # Виклик через новий SDK
+        return client.models.generate_content(
+            model=self.model_name,
+            contents=prompt
+        )
+
+
+# Створюємо екземпляри моделей
+model = AIWrapper(MODEL_MAIN_NAME)
+model_worker = AIWrapper(MODEL_WORKER_NAME)
 
 
 def clean_and_parse_json(text):

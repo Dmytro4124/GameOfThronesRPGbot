@@ -98,6 +98,24 @@ def process_game_turn(chat_id, user_input):
     # === ЕТАП 3: ГЕНЕРАЦІЯ СЮЖЕТУ (MAIN AI) ===
     t_start = time.time()
 
+    # --- ПЕРЕВІРКА СВІТОВИХ ПОДІЙ ЗА ДАТОЮ ---
+    current_time_str = profile.get("Ігровий час", "")
+    day_match = re.search(r'День (\d+)', current_time_str)
+    current_day = int(day_match.group(1)) if day_match else 1
+
+    # Словник подій (Ключ = День)
+    world_events = {
+        5: "Починається сильна хуртовина. Пересування стає майже неможливим.",
+        14: "До міста прибуває величезний королівський кортеж.",
+        30: "Починається війна. Оголошено загальну мобілізацію."
+    }
+
+    event_injection = ""
+    if current_day in world_events:
+        event_injection = f"\n[SYSTEM INTERRUPT: СЬОГОДНІ ВАЖЛИВА ПОДІЯ: {world_events[current_day]}. Ти ПОВИНЕН органічно вплести цю подію в поточну сцену.]\n"
+
+    clocks_info = json.dumps(profile.get("Годинники", {}), ensure_ascii=False)
+
     prompt = f"""
     YOU — MERCILESS GAME MASTER (GM) IN THE WORLD OF “GAME OF THRONES.” NOT A NOVELIST. DO NOT WRITE A BOOK. RUN A GAME.
     Your task: Run the game, balancing between the plot, player freedom, and CLEAR MECHANICS, to create a realistic, dangerous, and dark story.
@@ -108,8 +126,13 @@ def process_game_turn(chat_id, user_input):
     === WORLD CONTEXT ===
     {GAME_ERA_CONTEXT}
     {context_knowledge}
+    {event_injection}
 
     {npc_context_text}
+    
+    === ACTIVE CLOCKS (TENSION) ===
+    {clocks_info}
+    (If a clock reaches its maximum, e.g., 4/4, the threat happens immediately!)
 
     === SYSTEM VERDICT (MANDATORY TO FOLLOW) ===
     {mechanics_note}
@@ -123,12 +146,12 @@ def process_game_turn(chat_id, user_input):
     PLAYER SAYS/DOES: “{user_input}”
 
     === YOUR TASK (FUTURE) ===
-    Write a creative continuation of the story in Ukrainian.
-    End with a QUESTION or a DILEMMA.
-    Fill in the JSON TAGS based on the player's actions.
+    1. Write a creative continuation in Ukrainian. End with a QUESTION or a DILEMMA.
+    2. Fill in the JSON TAGS. Use "clocks_impact" to increase tension (+1) if the player acts suspiciously or fails, or "clear" to remove it.
 
     RESPONSE FORMAT (JSON ONLY):
     {{
+        "internal_monologue": "Think here first. Analyze the mechanic verdict, clocks, and events. Example: 'Player failed. Clock is 2/4. I will add +1 to clock and describe rising tension, but NOT attack yet.'",
         "story": "Your story text here...",
         "updates": {{ 
              "time_passed": "...",
@@ -136,6 +159,7 @@ def process_game_turn(chat_id, user_input):
              "gold_impact": "...",
              "inventory_new": [],
              "inventory_lost": [],
+             "clocks_impact": {{"Підозра варти": 1}},
              "npc_updates": []
         }}
     }}
@@ -213,7 +237,26 @@ def process_game_turn(chat_id, user_input):
                     hist = user_sessions[chat_id_arg].get('history', [])
                     hist.append({"role": "User", "content": short_user_inp})
                     hist.append({"role": "GM", "content": short_hist_turn})
-                    user_sessions[chat_id_arg]['history'] = hist[-30:]
+
+                    # === CONTEXT FLUSHING (Скидання пам'яті) ===
+                    # Якщо історія стає занадто довгою (наприклад, > 20 реплік)
+                    if len(hist) > 20:
+                        # Беремо всі повідомлення як один текст
+                        history_to_compress = "\n".join([f"{m['role']}: {m['content']}" for m in hist])
+
+                        # Просимо Worker AI зробити один абзац summary
+                        summary_prompt = f"Summarize this RPG history into one short paragraph (Ukrainian). Focus on the current location, main objective, and immediate situation:\n{history_to_compress}"
+                        try:
+                            summary_resp = model_worker.generate_content(summary_prompt).text.strip()
+                            # ОЧИЩАЄМО історію і залишаємо ТІЛЬКИ summary
+                            user_sessions[chat_id_arg]['history'] = [
+                                {"role": "SYSTEM", "content": f"PREVIOUS EVENTS SUMMARY: {summary_resp}"}]
+                            print("🧹 [CONTEXT FLUSH] Пам'ять успішно стиснуто!")
+                        except Exception as e:
+                            print(f"⚠️ Помилка стиснення: {e}")
+                            user_sessions[chat_id_arg]['history'] = hist[-20:]  # Fallback, якщо ШІ впав
+                    else:
+                        user_sessions[chat_id_arg]['history'] = hist
             except Exception as exept:
                 print(f"❌ [BG ERROR] {exept}")
 

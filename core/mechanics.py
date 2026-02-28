@@ -162,6 +162,30 @@ def apply_system_impacts(profile, ai_impacts):
                 profile[target_key] = new_val
                 logs.append(f"📈 {skill_name}: +{val} (Стало {new_val})")
 
+        # === 6. ОБРОБКА ГОДИННИКІВ (CLOCKS) ===
+        clocks_updates = ai_impacts.get("clocks_impact", {})
+        if clocks_updates:
+            current_clocks = profile.get("Годинники", {})
+            if isinstance(current_clocks, str):
+                current_clocks = {}
+
+            for clock_name, change in clocks_updates.items():
+                if change == "clear":
+                    if clock_name in current_clocks:
+                        del current_clocks[clock_name]
+                        logs.append(f"⏱️ Годинник '{clock_name}' скинуто.")
+                else:
+                    current_val, max_val = 0, 4  # Годинник на 4 кроки за замовчуванням
+                    if clock_name in current_clocks:
+                        parts = current_clocks[clock_name].split('/')
+                        current_val, max_val = int(parts[0]), int(parts[1])
+
+                    new_val = min(max_val, current_val + safe_int(change))
+                    current_clocks[clock_name] = f"{new_val}/{max_val}"
+                    logs.append(f"⏱️ Годинник '{clock_name}': {new_val}/{max_val}")
+
+            profile["Годинники"] = current_clocks
+
     return profile, logs
 
 

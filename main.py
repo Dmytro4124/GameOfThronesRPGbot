@@ -23,7 +23,7 @@ def home():
     return "Bot is alive and ready to conquer Westeros!"
 
 
-# Секретний маршрут для Webhook (використовуємо токен для безпеки)
+# маршрут для Webhook
 @app.route('/' + TELEGRAM_TOKEN, methods=['POST'])
 def webhook():
     # Отримуємо оновлення від Telegram і передаємо його боту
