@@ -102,17 +102,30 @@ def apply_system_impacts(profile, ai_impacts):
     # === 1.1. ОБРОБКА ЕНЕРГІЇ ===
     if energy_impact != "none" or energy_impact == "sleep":
         current_energy = profile.get("Енергія", 100)
-        energy_costs = {"spend_small": -5, "spend_medium": -15, "spend_large": -30}
+
+        # Задаємо діапазони: (мінімум, максимум)
+        energy_ranges = {
+            "spend_small": (1, 3),  # Було -5. Тепер: від -1 до -3 (легка втома)
+            "spend_medium": (4, 8),  # Було -15. Тепер: від -4 до -8 (середнє навантаження)
+            "spend_large": (10, 16)  # Було -30. Тепер: від -10 до -16 (важкий бій або втеча)
+        }
 
         if energy_impact == "sleep":
             profile["Енергія"] = 100
             logs.append("💤 Енергія: 100 (Повністю відновлено після сну)")
         else:
-            delta = energy_costs.get(energy_impact, 0)
+            delta = 0
+            if energy_impact in energy_ranges:
+                min_cost, max_cost = energy_ranges[energy_impact]
+                # Вибираємо випадкове число з діапазону і робимо його від'ємним
+                delta = -random.randint(min_cost, max_cost)
+
             new_energy = max(0, min(100, current_energy + delta))
             if new_energy != current_energy:
                 profile["Енергія"] = new_energy
-                logs.append(f"⚡ Енергія: {current_energy} -> {new_energy}")
+
+                # Робимо лог більш інформативним, показуючи, скільки саме витрачено
+                logs.append(f"⚡ Енергія: {current_energy} -> {new_energy} ({delta})")
 
     # === 2. ОБРОБКА ЗДОРОВ'Я ===
     damage_tag = ai_impacts.get("health_impact", "none")
@@ -321,66 +334,72 @@ def validate_action(user_input, profile):
 
 def check_skill_mechanics(user_input, profile):
     """
-    Визначає складність дії та проводить перевірку навичок (Dice Roll) у Python.
-    Повертає текстову інструкцію для Сюжетної Моделі.
+    Аналізує дію гравця та визначає потрібну навичку і складність.
     """
     prompt = f"""
-    Analyze player action: "{user_input}"
-    Hero Stats: {json.dumps(profile, ensure_ascii=False)}
+    You are a strict Rule Engine for a Grimdark RPG. 
+    Analyze the player's action: "{user_input}"
 
-    Task: Determine the Skill needed and Difficulty (0-100).
-    Difficulty Guide:
-    0 = Talking, walking, looking.
-    20 = Easy.
-    60 = Medium.
-    90 = Hard.
-    110 = Impossible.
+    1. CLASSIFY REQUIRED SKILL (STRICT RULES):
+       - "Інтрига": Sneaking, hiding, stealing, lying, bluffing, persuasion, gathering rumors.
+       - "Військові навички": Tactics, commanding, assessing the battlefield, spotting ambushes.
+       - "Бойові навички": Direct physical combat, sword fighting, wrestling, attacking.
+       - "Управління": Using noble status, bribery, trade, giving official orders.
+       - "Немає": Basic dialogue, walking peacefully, looking around.
 
-    Skills: "Бойові", "Військові", "Інтрига", "Управління", "None".
+    2. DETERMINE DIFFICULTY (10 to 90).
+       - Easy (Lie to a peasant, sneak past sleeping guard): 20-30
+       - Medium (Sneak past awake guard, command a squad): 40-60
+       - Hard (Attack a trained knight, bribe a loyal lord): 70-90
 
-    Return JSON: {{ "skill": "...", "difficulty": 0-100, "reason": "..." }}
+    RETURN ONLY JSON FORMAT:
+    {{
+        "skill": "Назва навички або Немає",
+        "difficulty": 40
+    }}
     """
+
     try:
-        resp = model_worker.generate_content(prompt)
-        data = clean_and_parse_json(resp.text)
+        response = model_worker.generate_content(prompt)
+        data = clean_and_parse_json(response.text)
+        if not data: return ""
 
-        if not data: return "RESULT: AUTO_SUCCESS (Simple Action)"
+        skill_name = data.get("skill", "Немає")
+        difficulty = safe_int(data.get("difficulty", 50))
 
-        difficulty = data.get("difficulty", 0)
-        skill_name = data.get("skill", "None")
+        if skill_name == "Немає":
+            return ""  # Звичайна дія, механіка не потрібна
 
-        if difficulty == 0:
-            return "RESULT: NARRATIVE_CHOICE (No mechanics needed)"
+        # Отримуємо стат гравця
+        player_stat = safe_int(profile.get(skill_name, 30))
 
-        player_stat = safe_int(profile.get(f"{skill_name} навички", 0))
-        if player_stat == 0: player_stat = safe_int(profile.get(skill_name, 10))
+        # Штраф за виснаження (якщо енергії < 15, стат падає)
+        current_energy = safe_int(profile.get("Енергія", 100))
+        exhaustion_penalty = 0
+        if current_energy < 15:
+            exhaustion_penalty = 20
+            player_stat = max(5, player_stat - exhaustion_penalty)
 
-        dice_roll = random.randint(1, 30)
-        total_score = player_stat + dice_roll
+        # Кидок кубика
+        roll = random.randint(1, 30)  # d30
+        total_score = player_stat + roll
+        is_success = total_score >= difficulty
 
-        if total_score >= difficulty:
-            outcome = "SUCCESS"
-            details = "Action succeeds."
+        verdict = f"[SYSTEM VERDICT: Player used {skill_name}. Stat: {player_stat} + Roll: {roll} = {total_score} vs Difficulty {difficulty}. "
+
+        if is_success:
+            verdict += "RESULT: SUCCESS. Describe how they elegantly or effectively succeed without taking damage.]"
         else:
-            outcome = "FAILURE"
-            details = "Action fails. Player gets hurt or rejected."
+            verdict += "RESULT: FAILURE. Describe how they fail. If combat, they take a hit. If stealth, they are discovered. NO INSTANT DEATH.]"
 
-        stat_increase_msg = ""
-        if difficulty >= 50 and dice_roll >= 28:  # Трішки поправив математику критичного успіху для D30
-            stat_increase_msg = f"BONUS: CRITICAL INSIGHT! {skill_name} increased by +1!"
+        if exhaustion_penalty > 0:
+            verdict += " [NOTE: Player is EXTREMELY EXHAUSTED (Energy < 15). Mention their fatigue in the text.]"
 
-        return f"""
-        MECHANICAL VERDICT:
-        - Action Difficulty: {difficulty}
-        - Player Skill ({skill_name}): {player_stat}
-        - Dice Roll: {dice_roll}
-        - FINAL RESULT: {outcome.upper()}!
-        - INSTRUCTION: You MUST describe a {outcome} scenario. {details}
-        {stat_increase_msg}
-        """
+        return verdict
+
     except Exception as e:
-        print(f"Skill Check Error: {e}")
-        return "RESULT: UNKNOWN (Proceed with logic)"
+        print(f"❌ Помилка механіки: {e}")
+        return ""
 
 
 def process_training_request(user_input, profile):
