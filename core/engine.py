@@ -153,6 +153,10 @@ def process_game_turn(chat_id, user_input):
         {event_injection}
 
         {npc_context_text}
+        
+        === IN-GAME TIME & ENVIRONMENT ===
+        CURRENT TIME: {current_time_str}
+        (GM INSTRUCTION: Strictly respect the time of day. If it is night, describe darkness, torches, closed shops, and sleeping NPCs. If it is morning, describe the dawn and waking city. Adjust NPC behavior based on the hour.)
 
         === NPC INTERACTION RULES (CRITICAL) ===
         1. **PRIORITY:** If the player says "I look around" or "I talk to the merchant", YOU MUST check the "VISIBLE NPC ROSTER" above.
@@ -293,6 +297,18 @@ def process_game_turn(chat_id, user_input):
 
         if safe_int(profile.get("Здоров'я", 100)) <= 0:
             story += "\n\n💀 *ВАШ ДОЗОР ЗАКІНЧИВСЯ. Ви загинули.*"
+
+        if "skill_used" in mechanical_updates and mechanical_updates["skill_used"] != "None":
+            skill = mechanical_updates["skill_used"]
+            total = mechanical_updates.get("total_score", 0)
+            diff = mechanical_updates.get("difficulty", 0)
+            outcome = mechanical_updates.get("outcome", "UNKNOWN")
+
+            icon = "✅" if outcome == "SUCCESS" else "❌"
+            dice_log = f"{icon} Перевірка: {skill} | Результат: {total} (Складність: {diff})"
+
+            # Вставляємо кидок кубика на початок списку логів
+            logs.insert(0, dice_log)
 
         new_location = profile.get("Поточне місцезнаходження", "")
         if old_location != new_location and len(new_location) > 3:

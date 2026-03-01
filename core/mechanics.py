@@ -513,6 +513,7 @@ def resolve_action_mechanics(user_input, profile):
             - 15-30 (conversation, lockpicking), 
             - 60-120 (travel, exploring), 
             - 480-600 (sleeping, waiting until morning).
+            - STRICT OVERRIDE: If the action involves ANY physical combat, dodging, running, or quick physical struggle, it MUST be 1 or 2.
 
         2. **health_impact** (Health consequences):
            - “none” (no change)
