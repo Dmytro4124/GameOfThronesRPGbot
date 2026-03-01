@@ -6,7 +6,8 @@ from threading import Thread
 
 # Імпорти з нашої нової структури
 from core.ai_client import model, model_worker, clean_and_parse_json
-from core.mechanics import apply_system_impacts, check_skill_mechanics, process_training_request, safe_int
+from core.mechanics import apply_system_impacts, check_skill_mechanics, process_training_request, safe_int, \
+    resolve_action_mechanics
 from core.prompts import GAME_ERA_CONTEXT
 from core.world import populate_contextual_npcs
 from database.operations import (
@@ -70,30 +71,50 @@ def process_game_turn(chat_id, user_input):
     timing_details.append(f"📚 Data: {duration:.2f}s")
 
     # === ЕТАП 2: МЕХАНІКА ТА ПЕРЕВІРКА НАВИЧОК ===
+    # === ЕТАП 2: МЕХАНІКА ТА ПЕРЕВІРКА НАВИЧОК ===
     t_start = time.time()
 
+    # 1. Перевіряємо жорстко задані механіки (Тренування)
     training_result = process_training_request(user_input, profile)
-    mechanics_note = ""
-    extra_updates = {}
+    mechanics_verdict = ""
+    mechanical_updates = {}
+    logs = []
 
     if training_result:
         if "error" in training_result:
-            mechanics_note = f"SYSTEM: Player tried to train but FAILED. Reason: {training_result['error']}. Describe their disappointment."
+            # Тренування провалено (наприклад, мало золота)
+            mechanics_verdict = f"SYSTEM: Player tried to train but FAILED. Reason: {training_result['error']}. Describe their disappointment."
         else:
-            mechanics_note = training_result['story_prompt']
-            extra_updates = {
-                "gold_impact": f"spend_{training_result['cost_gold']}",
-                "skill_impact": {training_result['skill']: training_result['stat_gain']},
-                "time_passed": "days"
+            # Тренування успішне
+            mechanics_verdict = training_result['story_prompt']
+
+            # Переводимо дні у хвилини (1 день = 1440 хвилин)
+            days_spent = training_result['cost_time']
+            cost_gold = int(training_result['cost_gold'])
+
+            # Формуємо словник оновлень за новими правилами Worker'а
+            mechanical_updates = {
+                "minutes_passed": days_spent * 1440,
+                "energy_impact": "spend_large",  # Тренування виснажує
+                "skill_impact": {training_result['skill']: training_result['stat_gain']}
             }
+
+            # Віднімаємо золото вручну (оскільки apply_system_impacts для gold_impact використовує рендомні діапазони)
             current_gold = safe_int(profile.get("Особисте Золото", 0))
-            profile["Особисте Золото"] = max(0, current_gold - int(training_result['cost_gold']))
+            profile["Особисте Золото"] = max(0, current_gold - cost_gold)
+            logs.append(f"💰 Золото: -{cost_gold} (Оплата тренування)")
+
     else:
-        mechanics_note = check_skill_mechanics(user_input, profile)
+        # 2. Якщо це не тренування — віддаємо Worker AI
+        mechanics_verdict, mechanical_updates = resolve_action_mechanics(user_input, profile)
+
+    # 3. ОДРАЗУ застосовуємо всі наслідки до профілю (час, здоров'я, навички, годинники, інвентар)
+    profile, impact_logs = apply_system_impacts(profile, mechanical_updates)
+    logs.extend(impact_logs)
 
     duration = time.time() - t_start
-    debug_log += f"\n⏱️ [WORKER AI] зайняло: {duration:.2f}s"
-    timing_details.append(f"🤖 Worker: {duration:.2f}s")
+    debug_log += f"\n⏱️ [WORKER AI / MECHANICS] зайняло: {duration:.2f}s"
+    timing_details.append(f"🤖 Mechanics: {duration:.2f}s")
 
     # === ЕТАП 3: ГЕНЕРАЦІЯ СЮЖЕТУ (MAIN AI) ===
     t_start = time.time()
@@ -133,10 +154,6 @@ def process_game_turn(chat_id, user_input):
 
         {npc_context_text}
 
-        === ACTIVE CLOCKS (TENSION) ===
-        {clocks_info}
-        (If a clock reaches its maximum, e.g., 4/4, the threat happens immediately! Do not spawn threats if clock is 0 or 1.)
-
         === NPC INTERACTION RULES (CRITICAL) ===
         1. **PRIORITY:** If the player says "I look around" or "I talk to the merchant", YOU MUST check the "VISIBLE NPC ROSTER" above.
            - If there is a merchant named 'Lotho' in the list -> Use Lotho.
@@ -146,57 +163,6 @@ def process_game_turn(chat_id, user_input):
         3. **RELATIONS:** Use 'Attitude to Player'. If it says 'Suspicious', the NPC will not be helpful without a bribe or persuasion.
         4. **STRICT ROSTER RULE (NO HALLUCINATIONS):** It is STRICTLY FORBIDDEN to invent characters on the fly. You must take them exclusively from those already generated in the world database. In the npc_updates block, the Name field must contain an exact, unmodified string from the database (character for character). It is forbidden to translate, abbreviate, or combine names. If a character is not in the current context of the database, do not mention it in updates.
 
-
-        === TAGS GUIDE (STRICT VALUES REQUIRED) ===
-        1. **"minutes_passed"** (Integer): Estimate the realistic duration of the player's current action in in-game minutes.
-            - 1-2 (combat turn, quick action), 
-            - 15-30 (conversation, lockpicking), 
-            - 60-120 (travel, exploring), 
-            - 480-600 (sleeping, waiting until morning).
-
-        2. **health_impact** (Health consequences):
-           - “none” (no change)
-           - “heal_small” / “heal_full”
-           --- ONLY if the enemy successfully hit the player in the text ---
-           - “dmg_light” (bruise, scratch: -5 HP)
-           - “dmg_medium” (sword wound, burn: -15 HP)
-           - “dmg_heavy” (critical injury: -30 HP)
-           - “dmg_fatal” (death: -100 HP)
-
-        3. **gold_impact** (Economy):
-           - “none”
-           - “spend_small” (food, small items)
-           - “spend_medium” (weapons, clothing)
-           - “spend_large” (horses, houses)
-           - “earn_small” (found a coin)
-           - “earn_medium” (quest reward)
-           - “earn_large” (grand treasure)
-
-        4. **inventory** - "inventory_new": ["Item Name"] (If obtained).
-           - "inventory_lost": ["Item Name"] (If lost/eaten).
-
-        5. **clocks_impact** (Tension & Event Management):
-            - **Local Tension (Scenes/Dialogues):** IT IS STRICTLY FORBIDDEN to invent new names for tension clocks. Use ONLY the fixed key {{"Scene_Tension": 1}} to increase tension (max 3) if the player acts suspiciously, aggressively, or fails a skill check.
-            - **Escalation:** If `Scene_Tension` reaches 3, you MUST immediately alter the scene's state (e.g., the NPC attacks, issues a hard ultimatum, or leaves). Stop looping the conversation.
-            - **Reset:** Use {{"Scene_Tension": "clear"}} to reset the tension when the conflict is resolved.
-            - **Global Events:** Do not use abstract clocks for global events. It is better to tie event timers directly to the in-game date (e.g., "Ship departure: Year 298 AL, Month 1, Day 7").
-            
-        6. **npc_updates**:
-           Use this IF and ONLY IF an interacting NPC changes significantly.
-           Fields to update:
-           - "Relation_Player": "Hostile", "Friendly", "Afraid", "Deadly Enemy".
-           - "Goal": If their motivation changes.
-           - "Status": "Dead", "Injured", "Fled".
-           - "Secrets": If a secret is revealed or created. 
-           
-        7. **"energy_impact"** (String): 
-            Evaluate the stamina cost of the action. 
-            Must be ONE of the following: 
-            - "none" (talking), 
-            - "spend_small" (minor stress, short walk), 
-            - "spend_medium" (argument, training, long walk), 
-            - "spend_large" (combat, heavy labor), 
-            - "sleep" (full rest).
 
         === THE GOLDEN LAWS OF AGENCY (VIOLATION = FAILURE) ===
         1. **NEVER TOUCH THE PLAYER:** You control NPCs, Weather, and Physics. The Player controls ONLY their Hero.
@@ -252,7 +218,7 @@ def process_game_turn(chat_id, user_input):
         2. Speed: One player turn = One NPC line.
 
         === SYSTEM VERDICT (MANDATORY TO FOLLOW) ===
-        {mechanics_note}
+        {mechanics_verdict}
         (IF RESULT is FAILURE -> Describe how the hero fails painfully. Add +1 to a tension clock.
          IF RESULT is SUCCESS -> Describe a triumph.)
 
@@ -274,30 +240,20 @@ def process_game_turn(chat_id, user_input):
         Write a creative continuation of the story, responding ONLY TO THE PLAYER'S CURRENT ACTION in Ukrainian.
         1. Describe the consequences of the action, keep it focused on the IMMEDIATE reaction of the world.
         2. End with a QUESTION or a DILEMMA to which the player must respond.
-        3. Fill in the JSON TAGS strictly using the values from === TAGS GUIDE ===.
 
         RESPONSE FORMAT (JSON ONLY):
         {{
-            "internal_monologue": "Think here first. Analyze the mechanic verdict, clocks, and events. Example: 'Player failed combat. I will use dmg_medium and add +1 to tension clock.'",
+            "internal_monologue": "Think here first. Example: 'The verdict is FAILURE. The player insulted the guard. I will describe the guard drawing his sword and update his Relation to Hostile.'",
             "story": "Your story text here (Ukrainian)...",
-            "updates": {{ 
-                 "minutes_passed": 15,
-                 "health_impact": "dmg_small",
-                 "energy_impact": "spend_small",
-                 "gold_impact": "players gold change",
-                 "inventory_new": [new inventory item],
-                 "inventory_lost": [lost invertory item],
-                 "clocks_impact": {{"Clock Name": 1}},
-                 "npc_updates": [
-                    {{
-                        "Name": "Exact NPC Name",
-                        "Goal": "New Goal",
-                        "Secret": "New Secret",
-                        "Relation_Player": "New Attitude",
-                        "Status": "Active/Dead/Injured"
-                    }}
-                 ]
-            }}
+            "npc_updates": [
+                {{
+                    "Name": "Exact NPC Name",
+                    "Goal": "New Goal",
+                    "Secret": "New Secret",
+                    "Relation_Player": "New Attitude",
+                    "Status": "Active/Dead/Injured"
+                }}
+            ]
         }}
         \n\nВАЖЛИВО: Відповідай ТІЛЬКИ JSON.
         """
@@ -332,15 +288,8 @@ def process_game_turn(chat_id, user_input):
         # === ЕТАП 4: ЗАСТОСУВАННЯ НАСЛІДКІВ ТА ЗБЕРЕЖЕННЯ ===
         t_start = time.time()
 
-        impacts = ai_data.get("updates", {})
-        npc_changes = impacts.get("npc_updates", [])
-        if not npc_changes: npc_changes = ai_data.get("npc_updates", [])
-
-        if extra_updates:
-            impacts["skill_impact"] = extra_updates.get("skill_impact")
-            if "time_passed" in extra_updates: impacts["time_passed"] = "days"
-
-        profile, logs = apply_system_impacts(profile, impacts)
+        # Дістаємо тільки оновлення NPC (бо іншого Main-модель більше не генерує)
+        npc_changes = ai_data.get("npc_updates", [])
 
         if safe_int(profile.get("Здоров'я", 100)) <= 0:
             story += "\n\n💀 *ВАШ ДОЗОР ЗАКІНЧИВСЯ. Ви загинули.*"
@@ -389,8 +338,8 @@ def process_game_turn(chat_id, user_input):
                             user_sessions[chat_id_arg]['history'] = [
                                 {"role": "SYSTEM", "content": f"PREVIOUS EVENTS SUMMARY: {summary_resp}"}]
                             print("🧹 [CONTEXT FLUSH] Пам'ять успішно стиснуто!")
-                        except Exception as e:
-                            print(f"⚠️ Помилка стиснення: {e}")
+                        except Exception as ex:
+                            print(f"⚠️ Помилка стиснення: {ex}")
                             user_sessions[chat_id_arg]['history'] = hist[-20:]  # Fallback, якщо ШІ впав
                     else:
                         user_sessions[chat_id_arg]['history'] = hist

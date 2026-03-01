@@ -92,3 +92,82 @@ def test_process_training_request_insufficient_gold():
         assert result is not None
         assert "error" in result
         assert "Не вистачає золота" in result["error"]
+
+
+# test/test_mechanics.py
+import pytest
+from unittest.mock import patch, MagicMock
+from core.mechanics import resolve_action_mechanics
+
+
+@pytest.fixture
+def sample_profile():
+    return {
+        "Бойові навички": 50,
+        "Військові навички": 10,
+        "Інтрига": 20,
+        "Управління": 5,
+        "Здоров'я": 100,
+        "Особисте Золото": 50,
+        "Годинники": {"Scene_Tension": "1/4"}
+    }
+
+
+@patch('core.mechanics.model_worker.generate_content')
+@patch('core.mechanics.random.randint')  # Мокаємо кубик для стабільності
+def test_resolve_action_mechanics_success(mock_randint, mock_generate, sample_profile):
+    """Тестуємо успішну обробку валідного JSON від Worker AI"""
+    # 1. Фіксуємо кидок кубика
+    mock_randint.return_value = 15
+
+    # 2. Імітуємо ідеальну відповідь від Worker'а
+    mock_response = MagicMock()
+    mock_response.text = """
+    {
+        "skill_used": "Бойові",
+        "difficulty": 60,
+        "total_score": 65,
+        "outcome": "SUCCESS",
+        "verdict_text": "Player successfully parried the attack.",
+        "updates": {
+             "minutes_passed": 2,
+             "health_impact": "none",
+             "energy_impact": "spend_small",
+             "gold_impact": "none",
+             "inventory_new": [],
+             "inventory_lost": [],
+             "clocks_impact": {}
+        }
+    }
+    """
+    mock_generate.return_value = mock_response
+
+    # 3. Викликаємо функцію
+    user_input = "Я відбиваю удар мечем"
+    verdict_str, updates = resolve_action_mechanics(user_input, sample_profile)
+
+    # 4. Перевіряємо, чи правильно сформувався текстовий вердикт
+    assert "MECHANICAL VERDICT: SUCCESS!" in verdict_str
+    assert "Skill: Бойові" in verdict_str
+    assert "Player successfully parried the attack." in verdict_str
+
+    # 5. Перевіряємо, чи правильно повернувся словник updates
+    assert isinstance(updates, dict)
+    assert updates["minutes_passed"] == 2
+    assert updates["energy_impact"] == "spend_small"
+
+
+@patch('core.mechanics.model_worker.generate_content')
+def test_resolve_action_mechanics_fallback(mock_generate, sample_profile):
+    """Тестуємо поведінку системи, якщо Worker AI падає з помилкою"""
+    # 1. Змушуємо API викинути виняток (імітуємо таймаут або 500 помилку сервера)
+    mock_generate.side_effect = Exception("Google API Error Timeout")
+
+    # 2. Викликаємо функцію
+    user_input = "Я намагаюся вижити при падінні сервера"
+    verdict_str, updates = resolve_action_mechanics(user_input, sample_profile)
+
+    # 3. Перевіряємо спрацювання Fallback-логіки (щоб гравець не чекав вічно)
+    assert "MECHANICAL VERDICT: AUTO_SUCCESS" in verdict_str
+    assert isinstance(updates, dict)
+    assert updates["minutes_passed"] == 5

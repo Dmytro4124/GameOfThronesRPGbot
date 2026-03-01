@@ -215,29 +215,29 @@ def apply_system_impacts(profile, ai_impacts):
                 profile[target_key] = new_val
                 logs.append(f"📈 {skill_name}: +{val} (Стало {new_val})")
 
-        # === 6. ОБРОБКА ГОДИННИКІВ (CLOCKS) ===
-        clocks_updates = ai_impacts.get("clocks_impact", {})
-        if clocks_updates:
-            current_clocks = profile.get("Годинники", {})
-            if isinstance(current_clocks, str):
-                current_clocks = {}
+    # === 6. ОБРОБКА ГОДИННИКІВ (CLOCKS) ===
+    clocks_updates = ai_impacts.get("clocks_impact", {})
+    if clocks_updates:
+        current_clocks = profile.get("Годинники", {})
+        if isinstance(current_clocks, str):
+            current_clocks = {}
 
-            for clock_name, change in clocks_updates.items():
-                if change == "clear":
-                    if clock_name in current_clocks:
-                        del current_clocks[clock_name]
-                        logs.append(f"⏱️ Годинник '{clock_name}' скинуто.")
-                else:
-                    current_val, max_val = 0, 4  # Годинник на 4 кроки за замовчуванням
-                    if clock_name in current_clocks:
-                        parts = current_clocks[clock_name].split('/')
-                        current_val, max_val = int(parts[0]), int(parts[1])
+        for clock_name, change in clocks_updates.items():
+            if change == "clear":
+                if clock_name in current_clocks:
+                    del current_clocks[clock_name]
+                    logs.append(f"⏱️ Годинник '{clock_name}' скинуто.")
+            else:
+                current_val, max_val = 0, 4  # Годинник на 4 кроки за замовчуванням
+                if clock_name in current_clocks:
+                    parts = current_clocks[clock_name].split('/')
+                    current_val, max_val = int(parts[0]), int(parts[1])
 
-                    new_val = min(max_val, current_val + safe_int(change))
-                    current_clocks[clock_name] = f"{new_val}/{max_val}"
-                    logs.append(f"⏱️ Годинник '{clock_name}': {new_val}/{max_val}")
+                new_val = min(max_val, current_val + safe_int(change))
+                current_clocks[clock_name] = f"{new_val}/{max_val}"
+                logs.append(f"⏱️ Годинник '{clock_name}': {new_val}/{max_val}")
 
-            profile["Годинники"] = current_clocks
+        profile["Годинники"] = current_clocks
 
     return profile, logs
 
@@ -454,3 +454,128 @@ def process_training_request(user_input, profile):
         }
     except:
         return None
+
+
+def resolve_action_mechanics(user_input, profile):
+    """
+    Worker (4b): Оцінює складність дії та рахує всю механіку (Здоров'я, Час, Золото, Енергія, Годинники).
+    Не пише художній текст!
+    """
+    import random
+    from core.ai_client import model_worker, clean_and_parse_json
+    import json
+
+    dice_roll = random.randint(1, 30)
+
+    skills = {
+        "Бойові": safe_int(profile.get("Бойові навички", 10)),
+        "Військові": safe_int(profile.get("Військові навички", 10)),
+        "Інтрига": safe_int(profile.get("Інтрига", 10)),
+        "Управління": safe_int(profile.get("Управління", 10))
+    }
+
+    clocks_info = profile.get("Годинники", {})
+
+    prompt = f"""
+    YOU ARE THE SYSTEM ENGINE FOR A GRIMDARK RPG. 
+    Your ONLY job is to calculate the mechanical outcome of the player's action.
+
+    === DATA ===
+    Player Action: "{user_input}"
+    Player Skills: {json.dumps(skills, ensure_ascii=False)}
+    Active Clocks (Tension): {json.dumps(clocks_info, ensure_ascii=False)}
+
+    === ACTIVE CLOCKS RULES ===
+        If a clock reaches its maximum, e.g., 4/4, the threat happens immediately! Do not spawn threats if clock is 0 or 1.
+
+    === RULES & MATH (CRITICAL) ===
+    1. CLASSIFY REQUIRED SKILL (STRICT RULES):
+       - "Інтрига": Sneaking, hiding, stealing, lying, bluffing, persuasion, gathering rumors.
+       - "Військові навички": Tactics, commanding, assessing the battlefield, spotting ambushes.
+       - "Бойові навички": Direct physical combat, sword fighting, wrestling, attacking.
+       - "Управління": Using noble status, bribery, trade, giving official orders.
+       - "Немає": Basic dialogue, walking peacefully, looking around.
+
+    2. DETERMINE DIFFICULTY (0 to 90).
+       - None (Basic dialogue, safe walking, looking around): 0
+       - Easy (Lie to a peasant, sneak past sleeping guard): 1-20
+       - Medium (Sneak past awake guard, command a squad): 21-50
+       - Hard (Attack a trained knight, bribe a loyal lord): 51-90
+       - Impossible (Kill a dragon) 91-120
+    
+    3. INJECTED DICE ROLL: The player rolled a {dice_roll}.
+    4. Calculate Total: Skill Value + {dice_roll}. 
+    5. Compare: If Total >= Difficulty, OUTCOME is "SUCCESS". Else "FAILURE". (If Difficulty is 0, it's always SUCCESS).
+    
+    === TAGS GUIDE (STRICT VALUES REQUIRED) ===
+        1. **"minutes_passed"** (Integer): Estimate the realistic duration of the player's current action in in-game minutes.
+            - 1-2 (combat turn, quick action), 
+            - 15-30 (conversation, lockpicking), 
+            - 60-120 (travel, exploring), 
+            - 480-600 (sleeping, waiting until morning).
+
+        2. **health_impact** (Health consequences):
+           - “none” (no change)
+           - “heal_small” / “heal_full”
+           --- ONLY if the enemy successfully hit the player in the text ---
+           - “dmg_light” (bruise, scratch: -5 HP)
+           - “dmg_medium” (sword wound, burn: -15 HP)
+           - “dmg_heavy” (critical injury: -30 HP)
+           - “dmg_fatal” (death: -100 HP)
+
+        3. **gold_impact** (Economy):
+           - “none”
+           - “spend_small” (food, small items)
+           - “spend_medium” (weapons, clothing)
+           - “spend_large” (horses, houses)
+           - “earn_small” (found a coin)
+           - “earn_medium” (quest reward)
+           - “earn_large” (grand treasure)
+
+        4. **inventory** - "inventory_new": ["Item Name"] (If obtained).
+           - "inventory_lost": ["Item Name"] (If lost/eaten).
+
+        5. **clocks_impact** (Tension & Event Management):
+            - **Local Tension (Scenes/Dialogues):** IT IS STRICTLY FORBIDDEN to invent new names for tension clocks. Use ONLY the fixed key {{"Scene_Tension": 1}} to increase tension (max 3) if the player acts suspiciously, aggressively, or fails a skill check.
+            - **Escalation:** If `Scene_Tension` reaches 3, you MUST immediately alter the scene's state (e.g., the NPC attacks, issues a hard ultimatum, or leaves). Stop looping the conversation.
+            - **Reset:** Use {{"Scene_Tension": "clear"}} to reset the tension when the conflict is resolved.
+            - **Global Events:** Do not use abstract clocks for global events. It is better to tie event timers directly to the in-game date (e.g., "Ship departure: Year 298 AL, Month 1, Day 7").
+            
+        6. **"energy_impact"** (String): 
+            Evaluate the stamina cost of the action. 
+            Must be ONE of the following: 
+            - "none" (talking), 
+            - "spend_small" (minor stress, short walk), 
+            - "spend_medium" (argument, training, long walk), 
+            - "spend_large" (combat, heavy labor), 
+            - "sleep" (full rest).
+    
+    OUTPUT EXACTLY IN THIS JSON FORMAT:
+    {{
+        "skill_used": "Name of skill or None",
+        "difficulty": 60,
+        "total_score": 75,
+        "outcome": "SUCCESS" or "FAILURE",
+        "verdict_text": "Short instruction for GM (e.g. 'Player successfully dodged' or 'Player failed and took damage. Scene tension +1.')",
+        "updates": {{
+             "minutes_passed": 15,
+             "health_impact": "none",
+             "energy_impact": "spend_small",
+             "gold_impact": "none",
+             "inventory_new": [new inventory],
+             "inventory_lost": [lost inventory],
+             "clocks_impact": {{"Scene_Tension": "clear"}}
+        }}
+    }}
+    """
+
+    try:
+        resp = model_worker.generate_content(prompt + "\n\nВАЖЛИВО: Відповідай ТІЛЬКИ JSON.")
+        data = clean_and_parse_json(resp.text)
+        if not data: return "MECHANICAL VERDICT: AUTO_SUCCESS", {}
+
+        verdict_str = f"MECHANICAL VERDICT: {data.get('outcome', 'UNKNOWN')}! (Skill: {data.get('skill_used')}, Diff: {data.get('difficulty')}, Roll: {data.get('total_score')}). INSTRUCTION FOR GM: {data.get('verdict_text')}"
+        return verdict_str, data.get("updates", {})
+    except Exception as e:
+        print(f"⚠️ Worker Error: {e}")
+        return "MECHANICAL VERDICT: AUTO_SUCCESS", {"minutes_passed": 5}
