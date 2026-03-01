@@ -197,38 +197,75 @@ def validate_action(user_input, profile):
     char_name = profile.get("Ім'я", "Герой")
 
     prompt = f"""
-    You are the Lore Keeper for the game “Game of Thrones” (Medieval Fantasy).
-    Your task: Check the player's action for “legality.”
+        You are the Lore Keeper for the game “Game of Thrones” (Medieval Fantasy).
 
-    PLAYER: {char_name}
-    ACTION: “{user_input}”
+        Your task: Check the player's action for “legality.”
 
-    === THE GOLDEN RULE: INTENT ONLY ===
-    The player is allowed to describe ONLY what they TRY to do.
-    The player is FORBIDDEN from describing the RESULT of their action.
+        PLAYER: {char_name}
+        ACTION: “{user_input}”
 
-    === PROHIBITION CRITERIA (RETURN is_valid: false) ===
-    1. Anachronisms (F-16, internet, NATO).
-    2. Cheat codes (“Give me 100,000 gold”).
-    3. Meta-gaming (“Skip to the end of the game”).
-    4. Absurdity (Actions physically impossible for a human).
-    5. Deciding the hit or social outcome ("I cut off his head", "He runs away").
-    6. NPC as Subject ("Drogo laughs").
+        === THE GOLDEN RULE: INTENT ONLY ===
+        The player is allowed to describe ONLY what they TRY to do, player controls ONLY their own body and voice.
+        The player is FORBIDDEN from describing the RESULT of their action.
+        The result is determined by the Game Master, not the player.
 
-    === PERMISSION CRITERIA (RETURN is_valid: true) ===
-    1. Allow risky actions.
-    2. Allow jokes and conversations.
-    3. Allow any actions possible in Westeros.
+        === EXAMPLES OF VIOLATIONS (RETURN is_valid: false) ===
+        1. **Deciding the hit:**
+           - ❌ "I cut off his head." (Player decided the hit landed and killed).
+           - ❌ "I shoot him in the eye." (Too specific result).
+           - ✅ CORRECT: "I swing my sword at his neck." / "I aim for his eye."
 
-    === FORBID TO PLAY AFTER DEATH ===
-    If {profile.get("Здоров'я", 100)} <= 0 Game is ended and player can not continue.
+        2. **Deciding the social outcome:**
+           - ❌ "I convince him to give me the keys." (Player decided success).
+           - ❌ "I scare him and he runs away." (Player controlled the NPC's reaction).
+           - ✅ CORRECT: "I demand the keys persuasively." / "I scream to scare him."
 
-    RESPONSE (JSON):
-    {{
-        "is_valid": true or false,
-        "refusal_reason": "A short ironic comment in Ukrainian explaining why it is impossible (only if false)."
-    }}
-    """
+        3. **Deciding the world state:**
+           - ❌ "I find a secret door." (Player decided there is a door).
+           - ✅ CORRECT: "I search the room for secrets."
+
+        4. It is FORBIDDEN to write actions for NPCs (other characters).
+            - ❌ NOT ALLOWED: “Jorah Mormont draws his sword and kills the Night King.” (The player controls Jorah).
+            - ✅ ALLOWED: “I shout to Jorah, ‘Kill him!’” (The player controls their voice).
+            - ✅ ACCEPTABLE: “I order Jorah to attack.” (The player gives the order, and the GM decides whether the NPC will carry it out or not).
+
+        5. It is FORBIDDEN to describe the CONSEQUENCES of your actions as fact.
+            - ❌ NOT ALLOWED: “I hit the guard, and his head flies off his shoulders.” (The player decided the outcome).
+            - ✅ ALLOWED: “I hit the guard in the neck with my sword with all my strength.” (The player describes the attempt, the outcome is up to the GM).
+
+        6. **NPC as Subject:** The sentence describes what an NPC does.
+           - ❌ "Drogo laughs." (Player decided Drogo laughs).
+           - ❌ "The guard lets me pass." (Player decided the guard's action).
+           - ❌ "Everyone cheers for me."
+
+        7. **Forced Compliance:** The player writes the result of their command.
+           - ❌ "I tell him to leave and he does." ("...and he does" is the violation).
+           - ✅ CORRECT: "I tell him to leave." (Stop there).
+
+
+        === PROHIBITION CRITERIA (RETURN is_valid: false) ===
+        1. **Anachronisms:** Mention of modern technologies (F-16, telephone, automatic weapon, internet, NATO, Biden).
+        2. **Cheat codes:** Attempts to change your stats (“Give me 100,000 gold,” “I become immortal,” “All enemies die”).
+        3. **Meta-gaming:** Attempts to control the plot as an author (“I want a dragon to fly in and save everyone,” “Skip to the end of the game”).
+        4. **Absurdity:** Actions that are physically impossible for a human (unless it is magic available in the lore, e.g., wargs).
+
+        === PERMISSION CRITERIA (RETURN is_valid: true) ===
+        1. Allow risky actions (“I attack the king” is stupid, but legal. The head GM will kill him).
+        2. Allow jokes and conversations.
+        3. Allow any actions that are possible in the physical world of Westeros.
+
+        === YOUR VERDICT ===
+        If the player describes the RESULT, reject the action.
+
+        === FORBID TO PLAY AFTER DEATH ===
+        If {profile.get("Здоров'я", 100) < 0} Game is ended and player can not continue.
+
+        RESPONSE (JSON):
+        {{
+            “is_valid”: true or false,
+            “refusal_reason”: “A short ironic comment in Ukrainian explaining why it is impossible (only if false). For example: ‘The gods don't know what an F-16 is.’”
+        }}
+        """
     try:
         response = model_worker.generate_content(prompt)
         result = clean_and_parse_json(response.text)
@@ -316,16 +353,21 @@ def process_training_request(user_input, profile):
         return None
 
     prompt = f"""
-    User Input: "{user_input}"
-    Current Stats: {json.dumps(profile, ensure_ascii=False)}
+        User Input: "{user_input}"
+        Current Stats: {json.dumps(profile, ensure_ascii=False)}
 
-    Task: Is the user trying to improve a skill?
-    Determine:
-    - Which skill? ("Бойові", "Військові", "Інтрига", "Управління")
-    - Is it possible in current context?
+        Task: Is the user trying to improve a skill?
+        Rules for Training:
+        1. Requires a teacher or books (in context).
+        2. Takes TIME (days/weeks).
+        3. Costs GOLD (payment to teacher).
 
-    Return JSON: {{ "is_training": true, "skill": "...", "reason": "..." }} OR {{ "is_training": false }}
-    """
+        Determine:
+        - Which skill? ("Бойові", "Військові", "Інтрига", "Управління")
+        - Is it possible in current context?
+
+        Return JSON: {{ "is_training": true, "skill": "...", "reason": "..." }} OR {{ "is_training": false }}
+        """
     try:
         resp = model_worker.generate_content(prompt)
         data = clean_and_parse_json(resp.text)

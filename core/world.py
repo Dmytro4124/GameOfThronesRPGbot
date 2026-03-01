@@ -98,29 +98,57 @@ def get_narrative_intro(profile):
     current_location = profile.get("Поточне місцезнаходження", "Вестерос")
 
     prompt = f"""
-    YOU ARE THE AUTHOR OF THE NOVEL “A GAME OF THRONES” (GEORGE MARTIN).
-    Your goal: Write the first scene for the character (Prologue).
+        YOU ARE THE AUTHOR OF THE NOVEL “A GAME OF THRONES” (GEORGE MARTIN).
+        Your goal: Write the first scene for the character (Prologue).
 
-    === HERO ===
-    {profile_json}
+        === HERO ===
+        {profile_json}
 
-    === START LOCATION ===
-    {current_location}
+        === START LOCATION ===
+        {current_location}
+        (Describe this location as atmospherically as possible, using the canon of 298 B.E.)
 
-    === TIME CONTEXT ===
-    {GAME_ERA_CONTEXT}
+        === TIME CONTEXT ===
+        {GAME_ERA_CONTEXT}
 
-    === TEXT REQUIREMENTS (GRIMDARK INTRO) ===
-    1. **Atmosphere:** Start with sensory details. Smell, temperature, sounds.
-    2. **Style:** Gloomy realism.
-    3. **PLOT HOOK (INCITING INCIDENT) - CANON:** Tie the scene to REAL events from the beginning of the first book.
-    4. **DON'TS:** NEVER write actions for the character. Stop the scene at the exact moment when the character has to react.
+        === TEXT REQUIREMENTS (GRIMDARK INTRO) ===
+        1. **Atmosphere:** Start with sensory details. Smell (sea, manure, incense, steel), temperature (the cold of the North or the heat of Essos), sounds.
+        2. **Style:** Gloomy realism. No “friendly merchants.” If it's Pentos, it smells of spices and slavery. If it's Winterfell, it smells of wolves and winter.
+        3. **The character's situation:** - If it's an outcast (like Jorah), emphasize their longing for home or poverty.
+    - If it's a lord, emphasize the burden of responsibility and the hypocrisy of the court.
 
-    === FINALE (CRITICALLY IMPORTANT) ===
-    Your response MUST end with a QUESTION that presents the player with a specific choice.
+    4. **PLOT HOOK (INCITING INCIDENT) - CANON:**
+           You must tie the scene to REAL events from the beginning of the first book, depending on the location:
+
+    - **NORTH (WINTERFELL):** * Main event: Lord Eddard prepares to execute a deserter from the Night's Watch (Gareth). 
+             * Or: News arrives that King Robert's huge procession is on its way.
+
+           - **ESSOS (Pentos):** * Main event: Illyrio Mopatis prepares Daenerys for her viewing by Khal Drogo.
+             * Or: Viserys is nervous about the delay of the wedding.
+
+    - **KING'S LANDING:** * Main event: The court is in mourning. Hand of the King Jon Arryn has died suddenly. Rumors of poison.
+             * Or: Intrigue over who will become the new Hand of the King.
+
+           - **THE WALL (Black Castle):** * Main event: Arrival of new recruits (including Tyrion as a guest).
+             * Or: Scouts have disappeared in the Haunted Forest. Strange corpses have been found.
+
+           **IF THIS IS A CANON CHARACTER ({profile.get("Ім'я")}):** Start with the scene where we first meet him in the book.
+
+           **IF IT IS A FICTIONAL CHARACTER:**
+           Include him in these events as a witness or participant (for example, he stands in the crowd during the execution or serves at court during the mourning).
+
+        5. **DON'TS:**
+           - NEVER write actions for the character (“You took the sword”).
+           - Stop the scene at the exact moment when the character has to react.
+
+        === FINALE (CRITICALLY IMPORTANT) ===
+        Your response MUST end with a QUESTION that presents the player with a specific choice.
+    - BAD: “What do you do?” (Too vague).
+    - GOOD: "The guard squints suspiciously, waiting for an explanation. Will you show him the House seal or try to bribe him?"
+    - GOOD: “The screams are getting closer. Will you hide in the shadows or face the danger?”
 
     Write a creative text (3 paragraphs), Ukrainian language only.
-    """
+        """
     try:
         response = model.generate_content(prompt)
         return response.text
@@ -153,16 +181,42 @@ def background_canon_generation(context_text, excluded_name=None):
     all_npcs = []
     for region, focus in regions_tasks:
         prompt = f"""
-        ROLE: Game of Thrones Lore Keeper (Year 298 AC).
-        TASK: Generate a JSON list of KEY CANON CHARACTERS (Year 298 AC) for: {region}.
-        FOCUS ON: {focus}.
+                ROLE: Game of Thrones Lore Keeper (Year 298 AC).
+                TASK: Generate a JSON list of KEY CANON CHARACTERS (Year 298 AC) for: {region}.
+                FOCUS ON: {focus}.
 
-        === CURRENT TIMELINE & SITUATION ===
-        {context_text}
+                === CURRENT TIMELINE & SITUATION (CRITICAL) ===
+                {context_text}
 
-        Generate 25-30 most important characters. Ukrainian language only.
-        OUTPUT JSON ARRAY ONLY.
-        """
+                INSTRUCTION:
+                1. **Adapt Goals to Timeline:** - If King Robert is riding to Winterfell -> Ned Stark's goal is "Prepare for the King's arrival", NOT just "Rule the North".
+                   - If Jon Arryn just died -> Cersei's goal is "Conceal the truth", NOT just "Be Queen".
+                   - If Daenerys is about to marry Drogo -> Viserys is "Impatient for the army", Illyrio is "Scheming".
+                2. **Atmospheric Description:** Describe them IN THIS MOMENT (e.g., "Covered in road dust", "Wearing mourning clothes").
+                3. **Secrets:** Include specifically the secrets relevant to THIS moment (e.g., "Letters from Lysa Arryn").
+
+                Generate 25-30 most important characters for this region.
+                Output 'Location' field in UKRAINIAN language (e.g., 'Вінтерфел', 'Пентос', 'Стіна').
+
+                === LANGUAGE REQUIREMENT (CRITICAL) ===
+
+                Responce should be in UKRAINIAN language only
+
+                OUTPUT JSON ARRAY ONLY:
+                [
+                  {{
+                    "Location": "Specific location (e.g. Winterfell)",
+                    "Name": "Full Name",
+                    "Description": "Canonical appearance",
+                    "Character": "Personality traits",
+                    "Goal": "Canonical goal in book 1",
+                    "Secrets": "Key plot secret (GM info)",
+                    "Relation_Player": "Neutral/Suspicious",
+                    "Relation_NPCs": "Allies/Enemies",
+                    "Status": "Active"
+                  }}
+                ]
+                """
         try:
             response = model.generate_content(prompt)
             data = clean_and_parse_json(response.text)
@@ -216,13 +270,41 @@ def populate_contextual_npcs(location, situation_context="Normal day, calm atmos
         return
 
     prompt = f"""
-    ROLE: Narrative Designer for Game of Thrones.
-    TASK: Populate the current location: "{location}" with 10-12 background NPCs.
-    === CURRENT SITUATION ===
-    {situation_context}
+        ROLE: Narrative Designer for Game of Thrones (Grimdark Fantasy).
+        TASK: Populate the current location: "{location}" with 10-12 background NPCs.
 
-    OUTPUT JSON ARRAY ONLY. Ukrainian language.
-    """
+        === CURRENT SITUATION (CRITICAL) ===
+        {situation_context}
+
+        INSTRUCTION:
+        1. **Adapt to the Situation:** - If context says "War/Siege" -> Generate wounded soldiers, starving refugees, looting mercenaries.
+           - If context says "Festival/Tourney" -> Generate drunk knights, pickpockets, singers.
+           - If context says "Mourning" -> Generate silent sisters, crying servants, paranoid guards.
+        2. **Diverse Cast:** Do not just make 10 guards. We need beggars, nobles, merchants, criminals.
+        3. **Relationships:** Their "Goal" and "Secrets" must be tied to the Current Situation.
+
+        REQUIREMENTS:
+        - Create a DIVERSE mix (Social standing, professions, hostility).
+        - "Secrets" must be interesting plot hooks, but not break canonical story.
+        - Output 'Location' field in UKRAINIAN language (e.g., 'Вінтерфел', 'Пентос', 'Стіна').
+
+        === LANGUAGE REQUIREMENT (CRITICAL) ===
+
+            Responce should be in UKRAINIAN language only
+
+        OUTPUT JSON ARRAY ONLY:
+        [
+          {{
+            "Name": "Name",
+            "Description": "Atmospheric visual description",
+            "Character": "Personality traits",
+            "Goal": "Current desire",
+            "Secrets": "Hidden info",
+            "Relation_Player": "Initial reaction",
+            "Re'lation_NPCs": "Connection to local groups"
+          }}
+        ]
+        """
     try:
         response = model.generate_content(prompt)
         npc_list = clean_and_parse_json(response.text)
