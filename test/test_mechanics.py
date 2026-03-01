@@ -26,18 +26,28 @@ def test_apply_system_impacts_health_limits():
 def test_apply_system_impacts_gold_and_time():
     profile = {
         "Особисте Золото": 50,
-        "Ігровий час": "298 рік В.Е., 1-й місяць, День 1, Ранок"
+        "Енергія": 20,  # Додаємо стартову енергію для перевірки
+        "Ігровий час": "298 рік В.Е., 1-й місяць, День 1, 21:00",  # Використовуємо точний час
+        "Час_хвилини": 1260  # 21 * 60
     }
     impacts = {
-        "gold_impact": "spend_medium",  # віднімає 50-150
-        "time_passed": "sleep"  # переводить на Ранок наступного дня
+        "gold_impact": "spend_medium",  # віднімає від 50 до 150
+        "energy_impact": "sleep"  # мотає час до 08:00 наступного дня і відновлює енергію
     }
     updated, logs = apply_system_impacts(profile, impacts)
 
-    # Золото не може бути мінусовим
+    # 1. Золото не може бути мінусовим
     assert updated["Особисте Золото"] == 0
+
+    # 2. Перевіряємо перехід на наступний день
     assert "День 2" in updated["Ігровий час"]
-    assert "Ранок" in updated["Ігровий час"]
+
+    # 3. Перевіряємо, що гравець прокинувся рівно о 08:00
+    assert "08:00" in updated["Ігровий час"]
+    assert updated["Час_хвилини"] == 480  # 8 * 60
+
+    # 4. Перевіряємо, чи відновилася енергія після сну
+    assert updated["Енергія"] == 100
 
 
 def test_apply_system_impacts_inventory():

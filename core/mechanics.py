@@ -22,57 +22,97 @@ def apply_system_impacts(profile, ai_impacts):
     """
     logs = []
 
-    # === 1. ОБРОБКА ЧАСУ ===
-    time_str = profile.get("Ігровий час", "День 1, Ранок")
-    time_tag = ai_impacts.get("time_passed", "none")
-    times_of_day = ["Ранок", "День", "Вечір", "Ніч"]
+    # === 1. ОБРОБКА ЧАСУ ТА КАЛЕНДАРЯ ===
+    # Константи календаря
+    DAYS_IN_MONTH = 30
+    MONTHS_IN_YEAR = 12
 
-    if time_tag != "none":
-        day_match = re.search(r'День (\d+)', time_str)
-        if not day_match: day_match = re.search(r'(\d+)', time_str)
-        current_day = int(day_match.group(1)) if day_match else 1
+    time_str = profile.get("Ігровий час", "298 рік В.Е., 1-й місяць, День 1, 08:00")
+    minutes_passed = ai_impacts.get("minutes_passed", 0)
+    energy_impact = ai_impacts.get("energy_impact", "none")
 
-        current_phase = "Ранок"
-        for t in times_of_day:
-            if t in time_str:
-                current_phase = t
-                break
+    if minutes_passed > 0 or energy_impact == "sleep":
+        # Витягуємо поточний рік, місяць та день за допомогою регулярного виразу
+        # Очікуваний формат: "298 рік В.Е., 1-й місяць, День 1..."
+        date_match = re.search(r'(\d+)\s*рік.*?(\d+)-й\s*місяць.*?День\s*(\d+)', time_str)
 
-        new_phase = current_phase
-        new_day = current_day
+        if date_match:
+            current_year = int(date_match.group(1))
+            current_month = int(date_match.group(2))
+            current_day = int(date_match.group(3))
+        else:
+            # Fallback, якщо рядок зламаний
+            current_year, current_month, current_day = 298, 1, 1
 
-        if time_tag == "short":
-            pass
-        elif time_tag == "medium":
-            try:
-                idx = times_of_day.index(current_phase)
-                if idx + 1 < len(times_of_day):
-                    new_phase = times_of_day[idx + 1]
-                else:
-                    new_phase = "Ранок"
-                    new_day += 1
-            except:
-                pass
-        elif time_tag == "long":
-            try:
-                idx = times_of_day.index(current_phase)
-                if idx + 2 < len(times_of_day):
-                    new_phase = times_of_day[idx + 2]
-                else:
-                    new_phase = "Ранок"
-                    new_day += 1
-            except:
-                pass
-        elif time_tag in ["sleep", "days"]:
-            new_phase = "Ранок"
-            new_day += 1
-
-        if new_phase != current_phase or new_day != current_day:
-            profile["Ігровий час"] = f"298 рік В.Е., 1-й місяць, День {new_day}, {new_phase}"
-            if new_day != current_day:
-                logs.append(f"⏳ Час: {current_phase} -> {new_phase} (Новий день!)")
+        # Витягуємо поточні хвилини
+        if "Час_хвилини" in profile:
+            current_minutes = profile["Час_хвилини"]
+        else:
+            time_match = re.search(r'(\d{2}):(\d{2})', time_str)
+            if time_match:
+                current_minutes = int(time_match.group(1)) * 60 + int(time_match.group(2))
             else:
-                logs.append(f"⏳ Час: {current_phase} -> {new_phase}")
+                current_minutes = 8 * 60  # За замовчуванням 08:00
+
+        old_time_str = f"{current_minutes // 60:02d}:{current_minutes % 60:02d}"
+
+        # Логіка сну: мотаємо час до 08:00 наступного ранку
+        if energy_impact == "sleep":
+            # (Хвилин до кінця поточної доби) + (8 годин наступної доби)
+            sleep_minutes = (1440 - current_minutes) + (8 * 60)
+            minutes_passed = max(minutes_passed, sleep_minutes)  # Беремо більше значення
+
+        # --- МАТЕМАТИКА ЧАСУ ---
+        new_total_minutes = current_minutes + minutes_passed
+
+        # 1. Рахуємо нові години та хвилини
+        days_passed = new_total_minutes // 1440
+        new_minutes_of_day = new_total_minutes % 1440
+
+        exact_time_str = f"{new_minutes_of_day // 60:02d}:{new_minutes_of_day % 60:02d}"
+
+        # 2. Рахуємо нові дні, місяці та роки
+        # Переводимо в 0-індексовану систему для зручності ділення (День 1 = 0, Місяць 1 = 0)
+        total_days = (current_day - 1) + days_passed
+
+        new_day = (total_days % DAYS_IN_MONTH) + 1
+        months_passed = total_days // DAYS_IN_MONTH
+
+        total_months = (current_month - 1) + months_passed
+
+        new_month = (total_months % MONTHS_IN_YEAR) + 1
+        years_passed = total_months // MONTHS_IN_YEAR
+
+        new_year = current_year + years_passed
+
+        # --- ЗБЕРЕЖЕННЯ ---
+        profile["Час_хвилини"] = new_minutes_of_day
+        profile["Ігровий час"] = f"{new_year} рік В.Е., {new_month}-й місяць, День {new_day}, {exact_time_str}"
+
+        # --- ЛОГУВАННЯ ---
+        if years_passed > 0:
+            logs.append(f"⏳ З Новим Роком! Тепер {new_year} рік В.Е.")
+        elif months_passed > 0:
+            logs.append(f"⏳ Почався новий місяць: {new_month}-й.")
+        elif days_passed > 0:
+            logs.append(f"⏳ Час: {old_time_str} -> {exact_time_str} (Новий день!)")
+        else:
+            logs.append(f"⏳ Час: {old_time_str} -> {exact_time_str} (+{minutes_passed} хв)")
+
+    # === 1.1. ОБРОБКА ЕНЕРГІЇ ===
+    if energy_impact != "none" or energy_impact == "sleep":
+        current_energy = profile.get("Енергія", 100)
+        energy_costs = {"spend_small": -5, "spend_medium": -15, "spend_large": -30}
+
+        if energy_impact == "sleep":
+            profile["Енергія"] = 100
+            logs.append("💤 Енергія: 100 (Повністю відновлено після сну)")
+        else:
+            delta = energy_costs.get(energy_impact, 0)
+            new_energy = max(0, min(100, current_energy + delta))
+            if new_energy != current_energy:
+                profile["Енергія"] = new_energy
+                logs.append(f"⚡ Енергія: {current_energy} -> {new_energy}")
 
     # === 2. ОБРОБКА ЗДОРОВ'Я ===
     damage_tag = ai_impacts.get("health_impact", "none")

@@ -144,19 +144,15 @@ def process_game_turn(chat_id, user_input):
         2. **SECRETS:** Use the [SECRET] field to determine how the NPC acts, creates tension, or lies.
            - Example: If Secret is "Is a spy", the NPC should ask too many questions, but NOT say "Hello, I am a spy."
         3. **RELATIONS:** Use 'Attitude to Player'. If it says 'Suspicious', the NPC will not be helpful without a bribe or persuasion.
-        4. **STRICT ROSTER RULE (NO HALLUCINATIONS):** You are ABSOLUTELY FORBIDDEN from inventing new NPCs (e.g., "random guard", "Lannister knight", "servant"). 
-       - You MUST ONLY use the exact characters provided in the World Context above.
-       - If the player looks for a guard, and the roster has "Йорен (Вартовий)", you MUST use "Йорен".
-       - If the player interacts with someone who is NOT in the roster, describe the place as empty or state that no such person is around.
+        4. **STRICT ROSTER RULE (NO HALLUCINATIONS):** It is STRICTLY FORBIDDEN to invent characters on the fly. You must take them exclusively from those already generated in the world database. In the npc_updates block, the Name field must contain an exact, unmodified string from the database (character for character). It is forbidden to translate, abbreviate, or combine names. If a character is not in the current context of the database, do not mention it in updates.
+
 
         === TAGS GUIDE (STRICT VALUES REQUIRED) ===
-        1. **time_passed** (How much time has passed):
-           - “short” (pure dialogue, thoughts, quick look)
-           - “medium” (an hour or two - walk, exploration)
-           - “long” (half a day - study, work)
-           - “sleep” (night - rest)
-           - “days” (intense training, travel)
-           - "none"
+        1. **"minutes_passed"** (Integer): Estimate the realistic duration of the player's current action in in-game minutes.
+            - 1-2 (combat turn, quick action), 
+            - 15-30 (conversation, lockpicking), 
+            - 60-120 (travel, exploring), 
+            - 480-600 (sleeping, waiting until morning).
 
         2. **health_impact** (Health consequences):
            - “none” (no change)
@@ -179,10 +175,12 @@ def process_game_turn(chat_id, user_input):
         4. **inventory** - "inventory_new": ["Item Name"] (If obtained).
            - "inventory_lost": ["Item Name"] (If lost/eaten).
 
-        5. **clocks_impact** (Tension management):
-           - Use {{"Name of Threat": 1}} to increase tension if player acts suspiciously or fails a check.
-           - Use {{"Name of Threat": "clear"}} to reset it.
-
+        5. **clocks_impact** (Tension & Event Management):
+            - **Local Tension (Scenes/Dialogues):** IT IS STRICTLY FORBIDDEN to invent new names for tension clocks. Use ONLY the fixed key {{"Scene_Tension": 1}} to increase tension (max 3) if the player acts suspiciously, aggressively, or fails a skill check.
+            - **Escalation:** If `Scene_Tension` reaches 3, you MUST immediately alter the scene's state (e.g., the NPC attacks, issues a hard ultimatum, or leaves). Stop looping the conversation.
+            - **Reset:** Use {{"Scene_Tension": "clear"}} to reset the tension when the conflict is resolved.
+            - **Global Events:** Do not use abstract clocks for global events. It is better to tie event timers directly to the in-game date (e.g., "Ship departure: Year 298 AL, Month 1, Day 7").
+            
         6. **npc_updates**:
            Use this IF and ONLY IF an interacting NPC changes significantly.
            Fields to update:
@@ -190,6 +188,15 @@ def process_game_turn(chat_id, user_input):
            - "Goal": If their motivation changes.
            - "Status": "Dead", "Injured", "Fled".
            - "Secrets": If a secret is revealed or created. 
+           
+        7. **"energy_impact"** (String): 
+            Evaluate the stamina cost of the action. 
+            Must be ONE of the following: 
+            - "none" (talking), 
+            - "spend_small" (minor stress, short walk), 
+            - "spend_medium" (argument, training, long walk), 
+            - "spend_large" (combat, heavy labor), 
+            - "sleep" (full rest).
 
         === THE GOLDEN LAWS OF AGENCY (VIOLATION = FAILURE) ===
         1. **NEVER TOUCH THE PLAYER:** You control NPCs, Weather, and Physics. The Player controls ONLY their Hero.
@@ -274,8 +281,9 @@ def process_game_turn(chat_id, user_input):
             "internal_monologue": "Think here first. Analyze the mechanic verdict, clocks, and events. Example: 'Player failed combat. I will use dmg_medium and add +1 to tension clock.'",
             "story": "Your story text here (Ukrainian)...",
             "updates": {{ 
-                 "time_passed": "How much time passed",
-                 "health_impact": "players health impact",
+                 "minutes_passed": 15,
+                 "health_impact": "dmg_small",
+                 "energy_impact": "spend_small",
                  "gold_impact": "players gold change",
                  "inventory_new": [new inventory item],
                  "inventory_lost": [lost invertory item],
