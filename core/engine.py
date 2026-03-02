@@ -6,7 +6,7 @@ from threading import Thread
 
 # Імпорти з нашої нової структури
 from core.ai_client import model, model_worker, clean_and_parse_json
-from core.mechanics import apply_system_impacts, check_skill_mechanics, process_training_request, safe_int, \
+from core.mechanics import apply_system_impacts, process_training_request, safe_int, \
     resolve_action_mechanics
 from core.prompts import GAME_ERA_CONTEXT
 from core.world import populate_contextual_npcs
@@ -156,8 +156,14 @@ def process_game_turn(chat_id, user_input):
         
         === IN-GAME TIME & ENVIRONMENT ===
         CURRENT TIME: {current_time_str}
-        (GM INSTRUCTION: Strictly respect the time of day. If it is night, describe darkness, torches, closed shops, and sleeping NPCs. If it is morning, describe the dawn and waking city. Adjust NPC behavior based on the hour.)
-
+        CURRENT LOCATION: {curr_loc}
+        (GM INSTRUCTION: The scene takes place STRICTLY in {curr_loc}. Do not change the location or teleport the player unless they explicitly state they are traveling elsewhere. Respect the time of day: night means darkness and sleeping NPCs.)
+        
+        === SYSTEM VERDICT (MANDATORY TO FOLLOW) ===
+        {mechanics_verdict}
+        (IF RESULT is FAILURE -> Describe how the hero fails painfully. Add +1 to a tension clock.
+         IF RESULT is SUCCESS -> Describe a triumph.)
+        
         === NPC INTERACTION RULES (CRITICAL) ===
         1. **PRIORITY:** If the player says "I look around" or "I talk to the merchant", YOU MUST check the "VISIBLE NPC ROSTER" above.
            - If there is a merchant named 'Lotho' in the list -> Use Lotho.
@@ -193,8 +199,11 @@ def process_game_turn(chat_id, user_input):
            - GOOD: "The guard swings his sword at your head! What do you do?"
 
         7. **NO VENTRILOQUISM:** You are FORBIDDEN from writing dialogue lines for the Hero.
-       - ❌ BAD: "You say: 'I will never bow!'"
-       - ✅ GOOD: "You stare at him silently. What do you say?"
+           - ❌ BAD: "You say: 'I will never bow!'"
+           - ✅ GOOD: "You stare at him silently. What do you say?"
+        
+        8. NO NUMBER DROPPING: NEVER mention specific numeric values for gold, health, skills, or energy in the story text. (e.g., Say "You found some coins", NOT "You found 50 gold"). The System Engine handles exact numbers.
+       
 
         === DOCTRINE OF RESISTANCE (CRITICAL RULES) ===
         1. **NO "YES-MAN":** Do not agree with the player just to move the plot, but do not artificially complicate simple tasks (like buying bread).
@@ -218,19 +227,16 @@ def process_game_turn(chat_id, user_input):
            - Write ONLY THE FIRST REACTION or RESPONSE of the NPC.
            - NEVER summarize the conversation.
         2. Speed: One player turn = One NPC line.
-
-        === SYSTEM VERDICT (MANDATORY TO FOLLOW) ===
-        {mechanics_verdict}
-        (IF RESULT is FAILURE -> Describe how the hero fails painfully. Add +1 to a tension clock.
-         IF RESULT is SUCCESS -> Describe a triumph.)
+        
+        === CLOCKS RULES ===
+            - **Escalation:** If `Scene_Tension` reaches 3, you MUST immediately alter the scene's state (e.g., the NPC attacks, issues a hard ultimatum, or leaves). Stop looping the conversation.
+            - **Reset tension:** If `Scene_Tension` resets or equals 0 scene must be quiet and calm. No threats or battles.
+            
 
         === PLOT MODE ===
         1. **Freedom of Action, but Realistic Consequences**
         2. **Story Magnet:** If the player's action is trivial, throw in an event that leads to the main story.
         3. **Continuity of the plot:** The world lives its own life. War is constantly looming.
-
-        === FINAL (CRITICALLY IMPORTANT) ===
-        Your response MUST end with a QUESTION that presents the player with a specific choice.
 
         === HISTORY OF EVENTS (PAST) ===
         {history_text}
@@ -377,7 +383,12 @@ def process_game_turn(chat_id, user_input):
         change_log = "\n\n📊 " + " | ".join(logs) if logs else ""
         return story + change_log
 
+
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return f"Щось пішло не так... (Помилка: {str(e)})"
+        error_msg = str(e)
+        if "429" in error_msg or "Quota" in error_msg:
+            return "⏳ *Старі Боги потребують часу на роздуми...*\n(Перевищено ліміт запитів до серверів. Будь ласка, зачекайте 20-30 секунд і повторіть дію)."
+        else:
+            import traceback
+            traceback.print_exc()
+            return f"📜 *Ворон згубив вашого листа...* Щось пішло не так. (Помилка: {error_msg})"

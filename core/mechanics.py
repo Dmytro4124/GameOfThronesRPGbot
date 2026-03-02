@@ -101,31 +101,40 @@ def apply_system_impacts(profile, ai_impacts):
 
     # === 1.1. ОБРОБКА ЕНЕРГІЇ ===
     if energy_impact != "none" or energy_impact == "sleep":
-        current_energy = profile.get("Енергія", 100)
+        current_energy = safe_int(profile.get("Енергія", 100))
 
         # Задаємо діапазони: (мінімум, максимум)
-        energy_ranges = {
-            "spend_small": (1, 3),  # Було -5. Тепер: від -1 до -3 (легка втома)
-            "spend_medium": (4, 8),  # Було -15. Тепер: від -4 до -8 (середнє навантаження)
-            "spend_large": (10, 16)  # Було -30. Тепер: від -10 до -16 (важкий бій або втеча)
+        energy_ranges_negative = {
+            "spend_small": (1, 3),
+            "spend_medium": (4, 8),
+            "spend_large": (10, 16)
+        }
+        energy_ranges_positive = {
+            "restore_small": (10, 15),
+            "restore_medium": (16, 30)
         }
 
-        if energy_impact == "sleep":
-            profile["Енергія"] = 100
-            logs.append("💤 Енергія: 100 (Повністю відновлено після сну)")
-        else:
-            delta = 0
-            if energy_impact in energy_ranges:
-                min_cost, max_cost = energy_ranges[energy_impact]
-                # Вибираємо випадкове число з діапазону і робимо його від'ємним
-                delta = -random.randint(min_cost, max_cost)
+        delta = 0
 
-            new_energy = max(0, min(100, current_energy + delta))
-            if new_energy != current_energy:
-                profile["Енергія"] = new_energy
+        # Обробка повного відновлення (сон або повний відпочинок)
+        if energy_impact in ["sleep", "restore_full"]:
+            delta = 100 - current_energy
+        # Обробка часткового відновлення
+        elif energy_impact in energy_ranges_positive:
+            min_cost, max_cost = energy_ranges_positive[energy_impact]
+            delta = random.randint(min_cost, max_cost)
+        # Обробка витрати енергії
+        elif energy_impact in energy_ranges_negative:
+            min_cost, max_cost = energy_ranges_negative[energy_impact]
+            delta = -random.randint(min_cost, max_cost)
 
-                # Робимо лог більш інформативним, показуючи, скільки саме витрачено
-                logs.append(f"⚡ Енергія: {current_energy} -> {new_energy} ({delta})")
+        new_energy = max(0, min(100, current_energy + delta))
+
+        if new_energy != current_energy:
+            profile["Енергія"] = new_energy
+            # Форматуємо знак для красивого логу (+15 або -5)
+            sign = "+" if delta > 0 else ""
+            logs.append(f"⚡ Енергія: {current_energy} -> {new_energy} ({sign}{delta})")
 
     # === 2. ОБРОБКА ЗДОРОВ'Я ===
     damage_tag = ai_impacts.get("health_impact", "none")
@@ -298,7 +307,11 @@ def validate_action(user_input, profile):
 
         === PROHIBITION CRITERIA (RETURN is_valid: false) ===
         1. **Anachronisms:** Mention of modern technologies (F-16, telephone, automatic weapon, internet, NATO, Biden).
-        2. **Cheat codes:** Attempts to change your stats (“Give me 100,000 gold,” “I become immortal,” “All enemies die”).
+        2. **ANTI-GOD-MODING (REALITY CHECK):** If the player attempts to invent reality (e.g., "I find a chest of infinite gold", "I suddenly have a Valyrian sword", "I instantly kill the boss"), you MUST automatically classify the OUTCOME as "FAILURE". 
+            - Set "gold_impact" to "none".
+            - Set "inventory_new" to [].
+            - Add to "clocks_impact": {{"Scene_Tension": 1}}.
+            - In "verdict_text", explain that the universe rejects their delusion (e.g., "Player tried to hallucinate gold, but found only dirt.").
         3. **Meta-gaming:** Attempts to control the plot as an author (“I want a dragon to fly in and save everyone,” “Skip to the end of the game”).
         4. **Absurdity:** Actions that are physically impossible for a human (unless it is magic available in the lore, e.g., wargs).
 
@@ -332,76 +345,6 @@ def validate_action(user_input, profile):
         return True, ""
 
 
-def check_skill_mechanics(user_input, profile):
-    """
-    Аналізує дію гравця та визначає потрібну навичку і складність.
-    """
-    prompt = f"""
-    You are a strict Rule Engine for a Grimdark RPG. 
-    Analyze the player's action: "{user_input}"
-
-    1. CLASSIFY REQUIRED SKILL (STRICT RULES):
-       - "Інтрига": Sneaking, hiding, stealing, lying, bluffing, persuasion, gathering rumors.
-       - "Військові навички": Tactics, commanding, assessing the battlefield, spotting ambushes.
-       - "Бойові навички": Direct physical combat, sword fighting, wrestling, attacking.
-       - "Управління": Using noble status, bribery, trade, giving official orders.
-       - "Немає": Basic dialogue, walking peacefully, looking around.
-
-    2. DETERMINE DIFFICULTY (10 to 90).
-       - Easy (Lie to a peasant, sneak past sleeping guard): 20-30
-       - Medium (Sneak past awake guard, command a squad): 40-60
-       - Hard (Attack a trained knight, bribe a loyal lord): 70-90
-
-    RETURN ONLY JSON FORMAT:
-    {{
-        "skill": "Назва навички або Немає",
-        "difficulty": 40
-    }}
-    """
-
-    try:
-        response = model_worker.generate_content(prompt)
-        data = clean_and_parse_json(response.text)
-        if not data: return ""
-
-        skill_name = data.get("skill", "Немає")
-        difficulty = safe_int(data.get("difficulty", 50))
-
-        if skill_name == "Немає":
-            return ""  # Звичайна дія, механіка не потрібна
-
-        # Отримуємо стат гравця
-        player_stat = safe_int(profile.get(skill_name, 30))
-
-        # Штраф за виснаження (якщо енергії < 15, стат падає)
-        current_energy = safe_int(profile.get("Енергія", 100))
-        exhaustion_penalty = 0
-        if current_energy < 15:
-            exhaustion_penalty = 20
-            player_stat = max(5, player_stat - exhaustion_penalty)
-
-        # Кидок кубика
-        roll = random.randint(1, 30)  # d30
-        total_score = player_stat + roll
-        is_success = total_score >= difficulty
-
-        verdict = f"[SYSTEM VERDICT: Player used {skill_name}. Stat: {player_stat} + Roll: {roll} = {total_score} vs Difficulty {difficulty}. "
-
-        if is_success:
-            verdict += "RESULT: SUCCESS. Describe how they elegantly or effectively succeed without taking damage.]"
-        else:
-            verdict += "RESULT: FAILURE. Describe how they fail. If combat, they take a hit. If stealth, they are discovered. NO INSTANT DEATH.]"
-
-        if exhaustion_penalty > 0:
-            verdict += " [NOTE: Player is EXTREMELY EXHAUSTED (Energy < 15). Mention their fatigue in the text.]"
-
-        return verdict
-
-    except Exception as e:
-        print(f"❌ Помилка механіки: {e}")
-        return ""
-
-
 def process_training_request(user_input, profile):
     """
     Перевіряє, чи хоче гравець тренуватись.
@@ -419,7 +362,7 @@ def process_training_request(user_input, profile):
         Rules for Training:
         1. Requires a teacher or books (in context).
         2. Takes TIME (days/weeks).
-        3. Costs GOLD (payment to teacher).
+        3. Costs GOLD if player has no teacher(payment to hire teacher).
 
         Determine:
         - Which skill? ("Бойові", "Військові", "Інтрига", "Управління")
@@ -449,7 +392,7 @@ def process_training_request(user_input, profile):
             "skill": skill_target,
             "cost_gold": cost_gold,
             "cost_time": cost_time_days,
-            "stat_gain": 2,
+            "stat_gain": random.randint(1, 5),
             "story_prompt": f"SYSTEM: Player spends {cost_time_days} days and {cost_gold} gold training {skill_target}. Describe the grueling process."
         }
     except:
@@ -508,7 +451,7 @@ def resolve_action_mechanics(user_input, profile):
     5. Compare: If Total >= Difficulty, OUTCOME is "SUCCESS". Else "FAILURE". (If Difficulty is 0, it's always SUCCESS).
     
     === TAGS GUIDE (STRICT VALUES REQUIRED) ===
-        1. **"minutes_passed"** (Integer): Estimate the realistic duration of the player's current action in in-game minutes.
+        1. **minutes_passed** (Integer): Estimate the realistic duration of the player's current action in in-game minutes.
             - 1-2 (combat turn, quick action), 
             - 15-30 (conversation, lockpicking), 
             - 60-120 (travel, exploring), 
@@ -538,9 +481,7 @@ def resolve_action_mechanics(user_input, profile):
 
         5. **clocks_impact** (Tension & Event Management):
             - **Local Tension (Scenes/Dialogues):** IT IS STRICTLY FORBIDDEN to invent new names for tension clocks. Use ONLY the fixed key {{"Scene_Tension": 1}} to increase tension (max 3) if the player acts suspiciously, aggressively, or fails a skill check.
-            - **Escalation:** If `Scene_Tension` reaches 3, you MUST immediately alter the scene's state (e.g., the NPC attacks, issues a hard ultimatum, or leaves). Stop looping the conversation.
             - **Reset:** Use {{"Scene_Tension": "clear"}} to reset the tension when the conflict is resolved.
-            - **Global Events:** Do not use abstract clocks for global events. It is better to tie event timers directly to the in-game date (e.g., "Ship departure: Year 298 AL, Month 1, Day 7").
             
         6. **"energy_impact"** (String): 
             Evaluate the stamina cost of the action. 
@@ -549,7 +490,9 @@ def resolve_action_mechanics(user_input, profile):
             - "spend_small" (minor stress, short walk), 
             - "spend_medium" (argument, training, long walk), 
             - "spend_large" (combat, heavy labor), 
-            - "sleep" (full rest).
+            - "restore_full" (sleep),
+            - "restore_small" (relaxing by the campfire, hearty food or lying in the bed),
+            - "restore_medium" (rest in tavern or brothel, having bath).
     
     OUTPUT EXACTLY IN THIS JSON FORMAT:
     {{

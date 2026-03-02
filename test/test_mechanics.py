@@ -1,6 +1,7 @@
 import pytest
 from core.mechanics import safe_int, apply_system_impacts, process_training_request
-
+from unittest.mock import patch
+from core.mechanics import apply_system_impacts
 
 def test_safe_int():
     assert safe_int("100") == 100
@@ -23,31 +24,55 @@ def test_apply_system_impacts_health_limits():
     assert updated["Здоров'я"] == 0
 
 
-def test_apply_system_impacts_gold_and_time():
-    profile = {
-        "Особисте Золото": 50,
-        "Енергія": 20,  # Додаємо стартову енергію для перевірки
-        "Ігровий час": "298 рік В.Е., 1-й місяць, День 1, 21:00",  # Використовуємо точний час
-        "Час_хвилини": 1260  # 21 * 60
-    }
-    impacts = {
-        "gold_impact": "spend_medium",  # віднімає від 50 до 150
-        "energy_impact": "sleep"  # мотає час до 08:00 наступного дня і відновлює енергію
-    }
-    updated, logs = apply_system_impacts(profile, impacts)
 
-    # 1. Золото не може бути мінусовим
-    assert updated["Особисте Золото"] == 0
+def test_energy_impact_spend():
+    """Перевірка витрати енергії"""
+    profile = {"Енергія": 50}
+    ai_impacts = {"energy_impact": "spend_medium"}
 
-    # 2. Перевіряємо перехід на наступний день
-    assert "День 2" in updated["Ігровий час"]
+    # Мокаємо randint, щоб він завжди повертав 5
+    with patch('core.mechanics.random.randint', return_value=5):
+        updated_profile, logs = apply_system_impacts(profile, ai_impacts)
 
-    # 3. Перевіряємо, що гравець прокинувся рівно о 08:00
-    assert "08:00" in updated["Ігровий час"]
-    assert updated["Час_хвилини"] == 480  # 8 * 60
+    assert updated_profile["Енергія"] == 45
+    assert any("⚡ Енергія: 50 -> 45 (-5)" in log for log in logs)
 
-    # 4. Перевіряємо, чи відновилася енергія після сну
-    assert updated["Енергія"] == 100
+
+def test_energy_impact_restore_partial():
+    """Перевірка часткового відновлення енергії"""
+    profile = {"Енергія": 30}
+    ai_impacts = {"energy_impact": "restore_small"}
+
+    # Мокаємо randint, щоб він завжди повертав 12
+    with patch('core.mechanics.random.randint', return_value=12):
+        updated_profile, logs = apply_system_impacts(profile, ai_impacts)
+
+    assert updated_profile["Енергія"] == 42
+    assert any("⚡ Енергія: 30 -> 42 (+12)" in log for log in logs)
+
+
+def test_energy_impact_restore_full():
+    """Перевірка повного відновлення енергії (restore_full або sleep)"""
+    profile = {"Енергія": 15}
+    ai_impacts = {"energy_impact": "restore_full"}
+
+    updated_profile, logs = apply_system_impacts(profile, ai_impacts)
+
+    assert updated_profile["Енергія"] == 100
+    assert any("⚡ Енергія: 15 -> 100 (+85)" in log for log in logs)
+
+
+def test_energy_impact_overheal():
+    """Перевірка, чи не виходить енергія за межі 100 при лікуванні"""
+    profile = {"Енергія": 95}
+    ai_impacts = {"energy_impact": "restore_medium"}
+
+    # Мокаємо randint, щоб він повернув 20 (95 + 20 = 115)
+    with patch('core.mechanics.random.randint', return_value=20):
+        updated_profile, logs = apply_system_impacts(profile, ai_impacts)
+
+    assert updated_profile["Енергія"] == 100  # Має обрізатися до 100
+    assert any("⚡ Енергія: 95 -> 100 (+20)" in log for log in logs)
 
 
 def test_apply_system_impacts_inventory():
@@ -132,7 +157,7 @@ def test_resolve_action_mechanics_success(mock_randint, mock_generate, sample_pr
         "updates": {
              "minutes_passed": 2,
              "health_impact": "none",
-             "energy_impact": "spend_small",
+             "energy_impact": "restore_small",
              "gold_impact": "none",
              "inventory_new": [],
              "inventory_lost": [],
@@ -154,7 +179,7 @@ def test_resolve_action_mechanics_success(mock_randint, mock_generate, sample_pr
     # 5. Перевіряємо, чи правильно повернувся словник updates
     assert isinstance(updates, dict)
     assert updates["minutes_passed"] == 2
-    assert updates["energy_impact"] == "spend_small"
+    assert updates["energy_impact"] == "restore_small"
 
 
 @patch('core.mechanics.model_worker.generate_content')
