@@ -576,7 +576,17 @@ def resolve_action_mechanics(user_input, profile):
         if not data: return "MECHANICAL VERDICT: AUTO_SUCCESS", {}
 
         verdict_str = f"MECHANICAL VERDICT: {data.get('outcome', 'UNKNOWN')}! (Skill: {data.get('skill_used')}, Diff: {data.get('difficulty')}, Roll: {data.get('total_score')}). INSTRUCTION FOR GM: {data.get('verdict_text')}"
-        return verdict_str, data.get("updates", {})
+
+        # --- НОВИЙ БЛОК: Прокидаємо дані кубика для UI ---
+        updates = data.get("updates", {})
+        updates["skill_used"] = data.get("skill_used", "None")
+        updates["total_score"] = data.get("total_score", 0)
+        updates["difficulty"] = data.get("difficulty", 0)
+        updates["outcome"] = data.get("outcome", "UNKNOWN")
+        # -------------------------------------------------
+
+        return verdict_str, updates
+
     except Exception as e:
         print(f"⚠️ Worker Error: {e}")
         return "MECHANICAL VERDICT: AUTO_SUCCESS", {"minutes_passed": 5}
