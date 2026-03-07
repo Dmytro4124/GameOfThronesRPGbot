@@ -260,6 +260,7 @@ def process_game_turn(chat_id, user_input):
                     "Goal": "New Goal",
                     "Secret": "New Secret",
                     "Relation_Player": "New Attitude",
+                    "Memory_Anchor": "Short explanation of WHY they feel this way based on recent events (e.g., 'Grateful because player saved them', 'Angry because player insulted their house').",
                     "Status": "Active/Dead/Injured"
                 }}
             ]

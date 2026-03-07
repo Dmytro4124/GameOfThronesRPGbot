@@ -166,6 +166,7 @@ def background_canon_generation(context_text, excluded_name=None):
     try:
         worksheet.clear()
         headers = ["Location", "Name", "Description", "Character", "Goal", "Secrets", "Relation_Player",
+                   "Memory_Anchor",
                    "Relation_NPCs", "Status", "Is_Canon"]
         worksheet.append_row(headers)
     except Exception as e:
@@ -212,6 +213,7 @@ def background_canon_generation(context_text, excluded_name=None):
                     "Goal": "Canonical goal in book 1",
                     "Secrets": "Key plot secret (GM info)",
                     "Relation_Player": "Neutral/Suspicious",
+                    "Memory_Anchor": "-",
                     "Relation_NPCs": "Allies/Enemies",
                     "Status": "Active"
                   }}
@@ -235,7 +237,8 @@ def background_canon_generation(context_text, excluded_name=None):
             row = [
                 npc.get("Location", "Westeros"), ai_gen_name, npc.get("Description", "-"),
                 npc.get("Character", "-"), npc.get("Goal", "-"), npc.get("Secrets", "-"),
-                npc.get("Relation_Player", "Neutral"), npc.get("Relation_NPCs", "-"), "Active", "TRUE"
+                npc.get("Relation_Player", "Neutral"), npc.get("Memory_Anchor", "-"), npc.get("Relation_NPCs", "-"),
+                "Active", "TRUE"
             ]
             rows_to_add.append(row)
 
@@ -255,7 +258,7 @@ def populate_contextual_npcs(location, situation_context="Normal day, calm atmos
 
     try:
         all_rows = worksheet.get_all_values()
-        canon_col_idx = 9
+        canon_col_idx = 10
         headers = all_rows[0]
         preserved_rows = [headers]
 
@@ -301,6 +304,7 @@ def populate_contextual_npcs(location, situation_context="Normal day, calm atmos
             "Goal": "Current desire",
             "Secrets": "Hidden info",
             "Relation_Player": "Initial reaction",
+            "Memory_Anchor": "-",
             "Re'lation_NPCs": "Connection to local groups"
           }}
         ]
@@ -320,7 +324,7 @@ def populate_contextual_npcs(location, situation_context="Normal day, calm atmos
             row = [
                 location, ai_gen_name, npc.get("Description", "-"), npc.get("Character", "-"),
                 npc.get("Goal", "-"), npc.get("Secrets", "-"), npc.get("Relation_Player", "Neutral"),
-                npc.get("Relation_NPCs", "-"), "Active", "FALSE"
+                npc.get("Memory_Anchor", "-"), npc.get("Relation_NPCs", "-"), "Active", "FALSE"
             ]
             new_rows.append(row)
 
