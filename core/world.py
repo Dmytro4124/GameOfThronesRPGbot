@@ -5,6 +5,7 @@ from database.operations import refresh_npc_database, find_best_match
 from core.ai_client import model, ask_gemini, clean_and_parse_json
 from core.prompts import GAME_ERA_CONTEXT
 from config import TAB_NPC
+from database.canon_npc import CANON_NPCS
 
 
 def get_canon_characters(house_name):
@@ -158,93 +159,49 @@ def get_narrative_intro(profile):
 
 
 def background_canon_generation(context_text, excluded_name=None):
-    """ФОНОВИЙ ПРОЦЕС: Створення кістяка світу. Генерує ключових канонічних NPC."""
-    print("🌍 [CANON GEN] Починаю створення глобального світу...")
+    """ФОНОВИЙ ПРОЦЕС: Створення кістяка світу. Завантажує ЖОРСТКИЙ КАНОН."""
+    print("🌍 [CANON GEN] Завантажую канонічну базу даних...")
     worksheet = db.get_sheet(TAB_NPC)
     if not worksheet: return
 
     try:
         worksheet.clear()
-        headers = ["Location", "Name", "Description", "Character", "Goal", "Secrets", "Relation_Player",
-                   "Memory_Anchor",
-                   "Relation_NPCs", "Status", "Is_Canon"]
+        # НАШІ ОНОВЛЕНІ ЗАГОЛОВКИ З MEMORY ANCHOR
+        headers = ["Location", "Name", "Description", "Character", "Goal", "Secrets",
+                   "Relation_Player", "Memory_Anchor", "Relation_NPCs", "Status", "Is_Canon"]
         worksheet.append_row(headers)
     except Exception as e:
         print(f"❌ [CANON GEN ERROR] Clear failed: {e}")
         return
 
-    regions_tasks = [
-        ("The North & The Wall", "Starks, Night's Watch, Boltons"),
-        ("King's Landing & South", "Lannisters, Baratheons, Tyrells, Small Council"),
-        ("Essos & Across the Sea", "Targaryens, Dothraki, Illyrio")
-    ]
+    rows_to_add = []
 
-    all_npcs = []
-    for region, focus in regions_tasks:
-        prompt = f"""
-                ROLE: Game of Thrones Lore Keeper (Year 298 AC).
-                TASK: Generate a JSON list of KEY CANON CHARACTERS (Year 298 AC) for: {region}.
-                FOCUS ON: {focus}.
+    for npc in CANON_NPCS:
+        name = npc.get("Name", "Unknown")
+        # Перевірка, чи це не сам гравець
+        if excluded_name and find_best_match(name, [excluded_name], threshold=0.8):
+            continue
 
-                === CURRENT TIMELINE & SITUATION (CRITICAL) ===
-                {context_text}
+        row = [
+            npc.get("Location", "Westeros"),
+            name,
+            npc.get("Description", "-"),
+            npc.get("Character", "-"),
+            npc.get("Goal", "-"),
+            npc.get("Secrets", "-"),
+            npc.get("Relation_Player", "Neutral"),
+            npc.get("Memory_Anchor", "-"),
+            npc.get("Relation_NPCs", "-"),
+            npc.get("Status", "Active"),
+            npc.get("Is_Canon", "TRUE")
+        ]
+        rows_to_add.append(row)
 
-                INSTRUCTION:
-                1. **Adapt Goals to Timeline:** - If King Robert is riding to Winterfell -> Ned Stark's goal is "Prepare for the King's arrival", NOT just "Rule the North".
-                   - If Jon Arryn just died -> Cersei's goal is "Conceal the truth", NOT just "Be Queen".
-                   - If Daenerys is about to marry Drogo -> Viserys is "Impatient for the army", Illyrio is "Scheming".
-                2. **Atmospheric Description:** Describe them IN THIS MOMENT (e.g., "Covered in road dust", "Wearing mourning clothes").
-                3. **Secrets:** Include specifically the secrets relevant to THIS moment (e.g., "Letters from Lysa Arryn").
-
-                Generate 25-30 most important characters for this region.
-                Output 'Location' field in UKRAINIAN language (e.g., 'Вінтерфел', 'Пентос', 'Стіна').
-
-                === LANGUAGE REQUIREMENT (CRITICAL) ===
-
-                Responce should be in UKRAINIAN language only
-
-                OUTPUT JSON ARRAY ONLY:
-                [
-                  {{
-                    "Location": "Specific location (e.g. Winterfell)",
-                    "Name": "Full Name",
-                    "Description": "Canonical appearance",
-                    "Character": "Personality traits",
-                    "Goal": "Canonical goal in book 1",
-                    "Secrets": "Key plot secret (GM info)",
-                    "Relation_Player": "Neutral/Suspicious",
-                    "Memory_Anchor": "-",
-                    "Relation_NPCs": "Allies/Enemies",
-                    "Status": "Active"
-                  }}
-                ]
-                """
-        try:
-            response = model.generate_content(prompt)
-            data = clean_and_parse_json(response.text)
-            if data and isinstance(data, list):
-                all_npcs.extend(data)
-        except Exception as e:
-            print(f"⚠️ [CANON GEN] Skip region {region}: {e}")
-
-    if all_npcs:
-        rows_to_add = []
-        for npc in all_npcs:
-            ai_gen_name = npc.get("Name", "Unknown")
-            if excluded_name and find_best_match(ai_gen_name, [excluded_name], threshold=0.8):
-                continue
-
-            row = [
-                npc.get("Location", "Westeros"), ai_gen_name, npc.get("Description", "-"),
-                npc.get("Character", "-"), npc.get("Goal", "-"), npc.get("Secrets", "-"),
-                npc.get("Relation_Player", "Neutral"), npc.get("Memory_Anchor", "-"), npc.get("Relation_NPCs", "-"),
-                "Active", "TRUE"
-            ]
-            rows_to_add.append(row)
-
+    if rows_to_add:
         try:
             worksheet.append_rows(rows_to_add)
-            print(f"✅ [CANON GEN] Світ заселено! Додано {len(rows_to_add)} легенд.")
+            print(f"✅ [CANON GEN] Світ заселено! Додано {len(rows_to_add)} канонічних легенд.")
+            from database.operations import refresh_npc_database
             refresh_npc_database()
         except Exception as e:
             print(f"❌ [CANON GEN SAVE ERROR] {e}")
