@@ -247,8 +247,8 @@ def find_best_match(query_name, distinct_names, threshold=0.65):
     return None
 
 
-def update_npcs_in_db(updates):
-    """Приймає список змін для NPC і записує їх у базу."""
+def update_npcs_in_db(updates, current_location="GLOBAL"):
+    """Приймає список змін для NPC і записує їх у базу. Якщо NPC немає — створює його."""
     if not updates: return
 
     print(f"📝 [NPC UPDATE] Обробка змін: {json.dumps(updates, ensure_ascii=False)}")
@@ -261,7 +261,9 @@ def update_npcs_in_db(updates):
 
         headers = [h.strip().lower() for h in all_values[0]]
         col_map = {}
-        target_cols = ["status", "relation_player", "memory_anchor", "goal", "secrets", "description", "character", "relation_npcs"]
+        # Оновлений список колонок (включаючи memory_anchor та relation_npcs)
+        target_cols = ["status", "relation_player", "memory_anchor", "goal", "secrets", "description", "character",
+                       "relation_npcs"]
 
         for target in target_cols:
             if target in headers:
@@ -274,6 +276,7 @@ def update_npcs_in_db(updates):
                 db_names_map[raw_name] = i
 
         cells_to_update = []
+        rows_to_append = []  # Список для нових (незнайдених) NPC
         available_names_list = list(db_names_map.keys())
 
         for update in updates:
@@ -288,18 +291,59 @@ def update_npcs_in_db(updates):
                     field_key = field.lower()
                     if field_key == "name": continue
 
+                    val_str = str(new_val).strip()
+
+                    # === АРХІТЕКТУРНИЙ ФІЛЬТР СМІТТЯ ===
+                    # Якщо поле пусте (як ми просили в промпті), або це базові технічні заглушки
+                    if not val_str or val_str.lower() in ["", "-", "none", "null", "same", "без змін"]:
+                        continue  # Ігноруємо, зберігаючи канонічні дані в БД
+
+                    # Додатковий захист від "коротких" відписок (якщо LLM все ж написала "Ні" чи "Так")
+                    # Статус може бути коротким (наприклад "Dead"), тому його пропускаємо
+                    if len(val_str) < 3 and field_key not in ["status"]:
+                        continue
+                    # ====================================
+
                     if field_key in col_map:
                         col_idx = col_map[field_key]
-                        cells_to_update.append(gspread.Cell(row_idx, col_idx, str(new_val)))
+                        cells_to_update.append(gspread.Cell(row_idx, col_idx, val_str))
             else:
-                print(f"⚠️ [NO MATCH] Не вдалося знайти NPC: '{target_name}' в базі.")
+                # ==========================================
+                # ЛОГІКА: СТВОРЕННЯ ТИМЧАСОВОГО NPC (NO MATCH)
+                # ==========================================
+                print(f"⚠️ [NO MATCH] Не знайдено '{target_name}'. Створюю нового NPC у {current_location}!")
+
+                # Допоміжна перевірка: якщо LLM повернула пустий рядок, пишемо "-" замість пустоти для нових NPC
+                def get_val(key, default="-"):
+                    v = update.get(key, "").strip()
+                    return v if v and v.lower() not in ["", "-", "none"] else default
+
+                # Порядок колонок: ["Location", "Name", "Description", "Character", "Goal", "Secrets", "Relation_Player", "Memory_Anchor", "Relation_NPCs", "Status", "Is_Canon"]
+                new_row = [
+                    current_location,
+                    target_name,
+                    get_val("Description", "Тимчасовий персонаж"),
+                    get_val("Character"),
+                    get_val("Goal"),
+                    get_val("Secrets", get_val("Secret")),  # Підтримка обох варіантів ключа
+                    get_val("Relation_Player", "Ворожа"),
+                    get_val("Memory_Anchor", "З'явився в результаті останніх подій."),
+                    get_val("Relation_NPCs"),
+                    get_val("Status", "Injured"),
+                    "FALSE"  # Це не канон
+                ]
+                rows_to_append.append(new_row)
 
         if cells_to_update:
             worksheet.update_cells(cells_to_update)
-            print(f"💾 [SAVED] Оновлено {len(cells_to_update)} полів.")
+            print(f"💾 [SAVED] Оновлено {len(cells_to_update)} полів існуючих NPC.")
+
+        if rows_to_append:
+            worksheet.append_rows(rows_to_append)
+            print(f"➕ [SPAWNED] Створено {len(rows_to_append)} нових динамічних NPC.")
+
+        if cells_to_update or rows_to_append:
             refresh_npc_database()  # Оновлюємо кеш у пам'яті
-        else:
-            print("⚠️ [NPC UPDATE] Немає співпадінь для запису.")
 
     except Exception as e:
         print(f"❌ [UPDATE ERROR] {e}")

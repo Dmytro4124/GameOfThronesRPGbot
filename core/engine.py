@@ -262,20 +262,24 @@ def process_game_turn(chat_id, user_input):
         2. Adhere STRICTLY to the System Verdict.
         3. End your text organically. You can ask "Що ви робите далі?" (What do you do next?) or simply describe the environment waiting for the player's reaction. DO NOT force a high-stakes "dilemma" at the end of every turn.
 
+        === JSON GENERATION RULES (CRITICAL) ===
+        If a specific field (like Character, Goal, Secrets) has NOT changed, you MUST set its value to an empty string "". 
+        IT IS STRICTLY FORBIDDEN to write words like "no change", "same", or "без змін". Only use "".
+
         RESPONSE FORMAT (JSON ONLY):
         {{
-            "internal_monologue": "Think here first. Example: 'The verdict is FAILURE. The player insulted the guard. I will describe the guard drawing his sword and update his Relation to Hostile.'",
+            "internal_monologue": "Think here first. Analyze the NPC's Personality, Goal, and [SECRET] before writing their reaction.",
             "story": "Your story text here (Ukrainian)...",
             "npc_updates": [
                 {{
                     "Name": "Exact NPC Name",
-                    "Description": "Update Visual ONLY if physically changed or injured.",
-                    "Character": "Update Personality ONLY if drastically changed through events.",
-                    "Goal": "Update Goal ONLY if the situation forced them to change it.",
-                    "Relation_Player": "Update Attitude to Player ONLY if changed.",
-                    "Memory_Anchor": "Short explanation of WHY their attitude changed based on THIS turn's events.",
-                    "Relation_NPCs": "Update Attitude to other NPCs ONLY if changed.",
-                    "Secrets": "Update Secret ONLY if they gained new hidden information.",
+                    "Description": "New description OR \"\" if no change.",
+                    "Character": "New personality OR \"\" if no change.",
+                    "Goal": "New goal OR \"\" if no change.",
+                    "Relation_Player": "New attitude OR \"\" if no change.",
+                    "Memory_Anchor": "Short explanation of WHY their attitude changed OR \"\" if no change.",
+                    "Relation_NPCs": "New attitude to others OR \"\" if no change.",
+                    "Secrets": "New secret OR \"\" if no change.",
                     "Status": "Active/Dead/Injured"
                 }}
             ]
