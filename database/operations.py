@@ -228,21 +228,44 @@ def get_location_npcs(current_location):
 
 # ================= ДОПОМІЖНІ ФУНКЦІЇ ДЛЯ БАЗИ =================
 
-def find_best_match(query_name, distinct_names, threshold=0.65):
-    """Шукає найбільш схоже ім'я зі списку (використовується для оновлення NPC)."""
+def find_best_match(query_name, distinct_names, threshold=0.75):
+    """
+    Шукає найбільш схоже ім'я зі списку.
+    Включає 'Анти-родинний запобіжник', щоб не плутати Дейнеріс та Візеріса Таргарієнів.
+    """
     if not query_name or not distinct_names:
         return None
 
     query = query_name.lower().strip()
 
+    # 1. АБСОЛЮТНИЙ ПРІОРИТЕТ: Точний збіг (ігноруючи регістр)
     for real_name in distinct_names:
-        r_low = real_name.lower()
-        if query == r_low or query in r_low or r_low in query:
+        if query == real_name.lower().strip():
             return real_name
 
+    # 2. Нечіткий пошук з базовим порогом
     matches = difflib.get_close_matches(query, distinct_names, n=1, cutoff=threshold)
+
     if matches:
-        return matches[0]
+        best_match = matches[0]
+        best_match_low = best_match.lower().strip()
+
+        # 3. АНТИ-РОДИННИЙ ЗАПОБІЖНИК (Перевірка імені)
+        query_words = query.split()
+        match_words = best_match_low.split()
+
+        if query_words and match_words:
+            query_first_name = query_words[0]
+            match_first_name = match_words[0]
+
+            # Математично порівнюємо ТІЛЬКИ перші імена (Візеріс vs Дейнеріс)
+            first_name_ratio = difflib.SequenceMatcher(None, query_first_name, match_first_name).ratio()
+
+            # Якщо імена відрізняються надто сильно (менше 65% збігу) — це різні люди з одним прізвищем!
+            if first_name_ratio < 0.65:
+                return None
+
+        return best_match
 
     return None
 

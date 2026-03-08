@@ -71,44 +71,67 @@ def process_game_turn(chat_id, user_input):
     timing_details.append(f"📚 Data: {duration:.2f}s")
 
     # === ЕТАП 2: МЕХАНІКА ТА ПЕРЕВІРКА НАВИЧОК ===
-    # === ЕТАП 2: МЕХАНІКА ТА ПЕРЕВІРКА НАВИЧОК ===
     t_start = time.time()
-
-    # 1. Перевіряємо жорстко задані механіки (Тренування)
-    training_result = process_training_request(user_input, profile)
-    mechanics_verdict = ""
-    mechanical_updates = {}
     logs = []
 
-    if training_result:
-        if "error" in training_result:
-            # Тренування провалено (наприклад, мало золота)
-            mechanics_verdict = f"SYSTEM: Player tried to train but FAILED. Reason: {training_result['error']}. Describe their disappointment."
-        else:
-            # Тренування успішне
-            mechanics_verdict = training_result['story_prompt']
+    # 1. ЗАВЖДИ спочатку викликаємо Розумного Суддю (він визначить намір)
+    mechanics_verdict, mechanical_updates = resolve_action_mechanics(user_input, profile)
 
-            # Переводимо дні у хвилини (1 день = 1440 хвилин)
-            days_spent = training_result['cost_time']
-            cost_gold = int(training_result['cost_gold'])
+    # 2. СЕМАНТИЧНИЙ РЕДИРЕКТ: Чи виявив суддя спробу довгого тренування?
+    if mechanical_updates.get("action_type") == "training":
 
-            # Формуємо словник оновлень за новими правилами Worker'а
-            mechanical_updates = {
-                "minutes_passed": days_spent * 1440,
-                "energy_impact": "spend_large",  # Тренування виснажує
-                "skill_impact": {training_result['skill']: training_result['stat_gain']}
-            }
+        # Передаємо хід вузькопрофільній функції тренування
+        training_result = process_training_request(user_input, profile)
 
-            # Віднімаємо золото вручну (оскільки apply_system_impacts для gold_impact використовує рендомні діапазони)
-            current_gold = safe_int(profile.get("Особисте Золото", 0))
-            profile["Особисте Золото"] = max(0, current_gold - cost_gold)
-            logs.append(f"💰 Золото: -{cost_gold} (Оплата тренування)")
+        if training_result:
+            if "error" in training_result:
+                # Тренування провалено (мало золота, небезпека, кулдаун)
+                mechanics_verdict = f"SYSTEM: Player tried to train but FAILED. Reason: {training_result['error']}. Describe their disappointment."
+                logs.append(f"❌ {training_result['error']}")
+            else:
+                # Тренування успішне!
+                mechanics_verdict = training_result['story_prompt']
+                skill = training_result['skill']
+                gain = training_result['stat_gain']
+                days_spent = training_result['cost_time']
+                cost_gold = int(training_result['cost_gold'])
+                energy_cost = training_result.get('energy_cost', 40)
 
-    else:
-        # 2. Якщо це не тренування — віддаємо Worker AI
-        mechanics_verdict, mechanical_updates = resolve_action_mechanics(user_input, profile)
+                # Малюємо лог для гравця
+                logs.append(
+                    f"🏋️ Тренування: {skill} +{gain} (Витрачено: {days_spent} дн., {cost_gold} 🪙, {energy_cost} ⚡)")
 
-    # 3. ОДРАЗУ застосовуємо всі наслідки до профілю (час, здоров'я, навички, годинники, інвентар)
+                # Якщо сталася травма від перевтоми
+                if training_result.get("temp_debuff", 0) > 0:
+                    logs.append(f"🩸 Травма від перевтоми! Штраф -{training_result['temp_debuff']} до '{skill}'.")
+
+                # Прокидаємо дані, щоб apply_system_impacts зберіг їх у базу
+                mechanical_updates["minutes_passed"] = days_spent * 1440
+
+                # Віднімаємо енергію вручну (якщо apply_system_impacts не вміє віднімати точні цифри)
+                current_energy = safe_int(profile.get("Енергія", 100))
+                profile["Енергія"] = max(0, current_energy - energy_cost)
+
+                if "skill_impact" not in mechanical_updates:
+                    mechanical_updates["skill_impact"] = {}
+                mechanical_updates["skill_impact"][skill] = gain
+
+                # Віднімаємо золото
+                current_gold = safe_int(profile.get("Особисте Золото", 0))
+                if cost_gold > 0:
+                    profile["Особисте Золото"] = max(0, current_gold - cost_gold)
+                    logs.append(f"💰 Золото: -{cost_gold} (Оплата вчителю)")
+
+                # Записуємо новий кулдаун асиміляції
+                if "set_cooldown" in training_result:
+                    if "training_cooldowns" not in profile:
+                        profile["training_cooldowns"] = {}
+                    profile["training_cooldowns"][skill] = training_result["set_cooldown"]
+
+        # БЛОКУЄМО кидки кубиків 2d50 для цього ходу, бо це було тренування
+        mechanical_updates["skill_used"] = "None"
+
+    # 3. ОДРАЗУ застосовуємо всі наслідки до профілю (час, здоров'я, інвентар)
     profile, impact_logs = apply_system_impacts(profile, mechanical_updates)
     logs.extend(impact_logs)
 
@@ -330,15 +353,47 @@ def process_game_turn(chat_id, user_input):
 
         if "skill_used" in mechanical_updates and mechanical_updates["skill_used"] != "None":
             skill = mechanical_updates["skill_used"]
-            total = mechanical_updates.get("total_score", 0)
-            diff = mechanical_updates.get("difficulty", 0)
+            roll_str = mechanical_updates.get("dice_roll", "0")
+            skill_val = mechanical_updates.get("skill_val", 0)
+            total_score = mechanical_updates.get("total_score", 0)
             outcome = mechanical_updates.get("outcome", "UNKNOWN")
+            circumstance = mechanical_updates.get("circumstance", "NORMAL")
 
-            icon = "✅" if outcome == "SUCCESS" else "❌"
-            dice_log = f"{icon} Перевірка: {skill} | Результат: {total} (Складність: {diff})"
+            # Переклад обставин
+            circ_ua = ""
+            if circumstance == "ADVANTAGE":
+                circ_ua = " (Перевага)"
+            elif circumstance == "DISADVANTAGE":
+                circ_ua = " (Недолік)"
 
-            # Вставляємо кидок кубика на початок списку логів
+            # Іконки та статус
+            if outcome == "CRITICAL SUCCESS":
+                icon = "🔥"
+                outcome_ua = "КРИТИЧНИЙ УСПІХ"
+            elif outcome == "CRITICAL FAILURE":
+                icon = "💀"
+                outcome_ua = "КРИТИЧНИЙ ПРОВАЛ"
+            elif outcome == "SUCCESS":
+                icon = "✅"
+                outcome_ua = "УСПІХ"
+            else:
+                icon = "❌"
+                outcome_ua = "ПРОВАЛ"
+
+            # Візуалізуємо формулу: Кидок + Навичка = Тотал
+            dice_log = f"{icon} {skill}{circ_ua}: Кидок {roll_str} + Навичка {skill_val} = {total_score} (Ціль: 100) -> {outcome_ua}"
             logs.insert(0, dice_log)
+
+            # === ЛОГУВАННЯ ХАРДКОРНИХ НАСЛІДКІВ ===
+            if outcome == "CRITICAL SUCCESS":
+                logs.insert(1, f"✨ Осяяння! Навичка '{skill}' назавжди зросла на +1.")
+
+            elif outcome == "CRITICAL FAILURE":
+                temp_debuff = mechanical_updates.get("temp_debuff", {}).get(skill, 0)
+                logs.insert(1, f"🩸 Тяжкий наслідок! Отримано тимчасовий штраф -{temp_debuff} до навички '{skill}'.")
+
+                if mechanical_updates.get("permanent_scar"):
+                    logs.insert(2, f"☠️ Фатальна помилка! Навичка '{skill}' назавжди знижена на -1.")
 
         new_location = profile.get("Поточне місцезнаходження", "")
         if old_location != new_location and len(new_location) > 3:

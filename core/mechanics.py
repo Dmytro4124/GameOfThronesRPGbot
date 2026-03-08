@@ -62,6 +62,26 @@ def apply_system_impacts(profile, ai_impacts):
             sleep_minutes = (1440 - current_minutes) + (8 * 60)
             minutes_passed = max(minutes_passed, sleep_minutes)  # Беремо більше значення
 
+
+        # Зменшення кулдаунів тренування
+        if minutes_passed > 0:
+            cooldowns = profile.get("training_cooldowns", {})
+            if cooldowns:
+                keys_to_remove = []
+                for skill_name, time_left in cooldowns.items():
+                    new_time = time_left - minutes_passed
+                    if new_time <= 0:
+                        keys_to_remove.append(skill_name)
+                    else:
+                        cooldowns[skill_name] = new_time
+
+                # Видаляємо кулдауни, які завершилися
+                for skill_name in keys_to_remove:
+                    del cooldowns[skill_name]
+
+                profile["training_cooldowns"] = cooldowns
+        # ===================================================
+
         # --- МАТЕМАТИКА ЧАСУ ---
         new_total_minutes = current_minutes + minutes_passed
 
@@ -347,68 +367,131 @@ def validate_action(user_input, profile):
 
 def process_training_request(user_input, profile):
     """
-    Перевіряє, чи хоче гравець тренуватись.
-    Повертає JSON з оновленнями (ціна, час, стат) або None.
+    Worker (Тренування): Хардкорна система (+1 бал), Гібрид Енергії та Кулдаунів (Асиміляція).
     """
-    training_keywords = ["тренув", "вчив", "практикув", "train", "practice", "study"]
-    if not any(word in user_input.lower() for word in training_keywords):
-        return None
+    import json
+    import random
+    from core.ai_client import model_worker, clean_and_parse_json
+
+    def safe_int(val, default=10):
+        try:
+            return int(val)
+        except:
+            return default
 
     prompt = f"""
-        User Input: "{user_input}"
-        Current Stats: {json.dumps(profile, ensure_ascii=False)}
+    YOU ARE THE GAME MASTER. The player might be trying to train a skill.
 
-        Task: Is the user trying to improve a skill?
-        Rules for Training:
-        1. Requires a teacher or books (in context).
-        2. Takes TIME (days/weeks).
-        3. Costs GOLD if player has no teacher(payment to hire teacher).
+    User Input: "{user_input}"
+    Current Stats: {json.dumps(profile, ensure_ascii=False)}
 
-        Determine:
-        - Which skill? ("Бойові", "Військові", "Інтрига", "Управління")
-        - Is it possible in current context?
+    RULES FOR TRAINING:
+    1. CONTEXT CHECK: Is it a safe time to pass days? (Active combat, stealth, or dialogue = impossible).
+    2. METHOD CHECK: Solo ("I train") vs Mentor ("I pay a master / read a book").
 
-        Return JSON: {{ "is_training": true, "skill": "...", "reason": "..." }} OR {{ "is_training": false }}
-        """
+    OUTPUT STRICTLY JSON:
+    {{
+        "is_training": true or false,
+        "is_possible": true or false,
+        "skill": "Бойові" or "Військові" or "Інтрига" or "Управління",
+        "method": "solo" or "mentor",
+        "reason_if_failed": "Why it's impossible."
+    }}
+    """
+
     try:
         resp = model_worker.generate_content(prompt)
         data = clean_and_parse_json(resp.text)
 
         if not data or not data.get("is_training"): return None
+        if not data.get("is_possible"):
+            return {
+                "error": f"Зараз неможливо розпочати тренування: {data.get('reason_if_failed', 'Небезпечна ситуація.')}"}
 
         skill_target = data.get("skill")
-        current_val = safe_int(profile.get(f"{skill_target} навички", 0))
-        if current_val == 0: current_val = safe_int(profile.get(skill_target, 10))
+        method = data.get("method", "solo")
 
-        cost_gold = current_val * 5
-        cost_time_days = 3 + int(current_val / 20)
+        # === ПЕРЕВІРКА КУЛДАУНУ (АСИМІЛЯЦІЇ) ===
+        cooldowns = profile.get("training_cooldowns", {})
+        current_cooldown_mins = safe_int(cooldowns.get(skill_target, 0), 0)
+
+        if current_cooldown_mins > 0:
+            days_left = max(1, current_cooldown_mins // 1440)
+            return {
+                "error": f"Ваше тіло та розум ще засвоюють попередні уроки з навички '{skill_target}'. Нервовій системі потрібен час на відновлення. Зачекайте ще приблизно {days_left} ігрових днів, перш ніж тренувати це знову."}
+
+        current_val = safe_int(profile.get(f"{skill_target} навички", profile.get(skill_target, 10)))
         user_gold = safe_int(profile.get("Особисте Золото", 0))
+        current_energy = safe_int(profile.get("Енергія", 100))
 
-        if user_gold < cost_gold:
-            return {"error": f"Не вистачає золота. Потрібно {cost_gold}, а є {user_gold}."}
+        # Математика Часу та Золота
+        if method == "solo":
+            if current_val >= 50:
+                return {
+                    "error": f"Навичка '{skill_target}' вже {current_val}. Межа самостійного навчання досягнута. Шукайте майстра."}
+            cost_gold = 0
+            cost_time_days = 3 + (current_val // 10)
+        else:  # mentor
+            cost_gold = current_val * 2
+            cost_time_days = 2 + (current_val // 15)
+            if user_gold < cost_gold:
+                return {"error": f"Не вистачає золота. Потрібно {cost_gold} 🪙, а є {user_gold} 🪙."}
+
+        # Гібридна система Енергії та Перетренування
+        energy_cost = 40
+        stat_gain = 0
+        temp_debuff = 0
+
+        # Встановлюємо новий кулдаун: час самого тренування + 7 днів відпочинку (у хвилинах)
+        new_cooldown_mins = (cost_time_days + 7) * 1440
+
+        if current_energy >= energy_cost:
+            stat_gain = 1
+            story_prompt = f"SYSTEM: Player spends {cost_time_days} days and {cost_gold} gold practicing '{skill_target}' ({method}). They gain +1 to the skill but lose 40 Energy. Describe the grueling process."
+        else:
+            if random.random() < 0.75:  # 75% травма
+                temp_debuff = random.randint(15, 20)
+                new_cooldown_mins = 14 * 1440  # 14 днів кулдауну через травму
+                story_prompt = f"SYSTEM: Player tried to train '{skill_target}' while exhausted. IT WAS A DISASTER. They tore a muscle/had a breakdown. Gain NO stats, get -{temp_debuff} temporary debuff. Describe the painful failure."
+            else:  # 25% диво
+                stat_gain = 1
+                story_prompt = f"SYSTEM: Player fanatically trained '{skill_target}' while completely exhausted. Miraculously gained +1, but collapsed after. Describe this desperate push."
 
         return {
             "success": True,
             "skill": skill_target,
             "cost_gold": cost_gold,
             "cost_time": cost_time_days,
-            "stat_gain": random.randint(1, 5),
-            "story_prompt": f"SYSTEM: Player spends {cost_time_days} days and {cost_gold} gold training {skill_target}. Describe the grueling process."
+            "stat_gain": stat_gain,
+            "energy_cost": energy_cost,
+            "temp_debuff": temp_debuff,
+            "set_cooldown": new_cooldown_mins,  # Передаємо кулдаун у хвилинах
+            "story_prompt": story_prompt
         }
-    except:
+
+    except Exception as e:
+        print(f"⚠️ Training Error: {e}")
         return None
 
 
 def resolve_action_mechanics(user_input, profile):
     """
     Worker (4b): Оцінює складність дії та рахує всю механіку (Здоров'я, Час, Золото, Енергія, Годинники).
+    ІНТЕГРОВАНО: Система 2d50 (Roll-Over), Перевага/Недолік, Хардкорні Крити та Прокачка.
     Не пише художній текст!
     """
     import random
     from core.ai_client import model_worker, clean_and_parse_json
     import json
 
-    dice_roll = random.randint(1, 30)
+    def safe_int(val, default=10):
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return default
+
+    def roll_2d50():
+        return random.randint(1, 50) + random.randint(1, 50)
 
     skills = {
         "Бойові": safe_int(profile.get("Бойові навички", 10)),
@@ -421,7 +504,7 @@ def resolve_action_mechanics(user_input, profile):
 
     prompt = f"""
     YOU ARE THE SYSTEM ENGINE FOR A GRIMDARK RPG. 
-    Your ONLY job is to calculate the mechanical outcome of the player's action.
+    Your ONLY job is to calculate the mechanical outcome of the player's action using a ROLL-OVER system (Roll + Skill vs DC 100).
 
     === DATA ===
     Player Action: "{user_input}"
@@ -434,21 +517,20 @@ def resolve_action_mechanics(user_input, profile):
     === RULES & MATH (CRITICAL) ===
     1. CLASSIFY REQUIRED SKILL (STRICT RULES):
        - "Інтрига": Sneaking, hiding, stealing, lying, bluffing, persuasion, gathering rumors.
-       - "Військові навички": Tactics, commanding, assessing the battlefield, spotting ambushes.
-       - "Бойові навички": Direct physical combat, sword fighting, wrestling, attacking.
+       - "Військові": Tactics, commanding, assessing the battlefield, spotting ambushes.
+       - "Бойові": Direct physical combat, sword fighting, wrestling, attacking.
        - "Управління": Using noble status, bribery, trade, giving official orders.
        - "Немає": Basic dialogue, walking peacefully, looking around.
 
-    2. DETERMINE DIFFICULTY (0 to 90).
-       - None (Basic dialogue, safe walking, looking around): 0
-       - Easy (Lie to a peasant, sneak past sleeping guard): 1-20
-       - Medium (Sneak past awake guard, command a squad): 21-50
-       - Hard (Attack a trained knight, bribe a loyal lord): 51-90
-       - Impossible (Kill a dragon) 91-120
-    
-    3. INJECTED DICE ROLL: The player rolled a {dice_roll}.
-    4. Calculate Total: Skill Value + {dice_roll}. 
-    5. Compare: If Total >= Difficulty, OUTCOME is "SUCCESS". Else "FAILURE". (If Difficulty is 0, it's always SUCCESS).
+    2. DETERMINE CIRCUMSTANCE:
+       - "ADVANTAGE": Player has the upper hand, surprise, high ground, or great leverage.
+       - "NORMAL": Fair conditions, standard risk.
+       - "DISADVANTAGE": Player is injured, outnumbered, acting under extreme pressure, or doing something very difficult.
+
+    3. INTENT CLASSIFICATION: 
+       Is the player attempting to spend a long period of time to practice, study, or hone a specific skill? 
+       If YES -> set "action_type": "training".
+       If NO (it's a standard immediate action like combat, dialogue, or exploration) -> set "action_type": "standard".
     
     === TAGS GUIDE (STRICT VALUES REQUIRED) ===
         1. **minutes_passed** (Integer): Estimate the realistic duration of the player's current action in in-game minutes.
@@ -459,22 +541,22 @@ def resolve_action_mechanics(user_input, profile):
             - STRICT OVERRIDE: If the action involves ANY physical combat, dodging, running, or quick physical struggle, it MUST be 1 or 2.
 
         2. **health_impact** (Health consequences):
-           - “none” (no change)
-           - “heal_small” / “heal_full”
-           --- ONLY if the enemy successfully hit the player in the text ---
-           - “dmg_light” (bruise, scratch: -5 HP)
-           - “dmg_medium” (sword wound, burn: -15 HP)
-           - “dmg_heavy” (critical injury: -30 HP)
-           - “dmg_fatal” (death: -100 HP)
+           - "none" (no change)
+           - "heal_small" / "heal_full"
+           --- ONLY if the enemy successfully hit the player in the text, OR if there is a CRITICAL FAILURE in combat ---
+           - "dmg_light" (bruise, scratch: -5 HP)
+           - "dmg_medium" (sword wound, burn: -15 HP)
+           - "dmg_heavy" (critical injury: -30 HP)
+           - "dmg_fatal" (death: -100 HP)
 
         3. **gold_impact** (Economy):
-           - “none”
-           - “spend_small” (food, small items)
-           - “spend_medium” (weapons, clothing)
-           - “spend_large” (horses, houses)
-           - “earn_small” (found a coin)
-           - “earn_medium” (quest reward)
-           - “earn_large” (grand treasure)
+           - "none"
+           - "spend_small" (food, small items)
+           - "spend_medium" (weapons, clothing)
+           - "spend_large" (horses, houses)
+           - "earn_small" (found a coin)
+           - "earn_medium" (quest reward)
+           - "earn_large" (grand treasure)
 
         4. **inventory** - "inventory_new": ["Item Name"] (If obtained).
            - "inventory_lost": ["Item Name"] (If lost/eaten).
@@ -482,10 +564,9 @@ def resolve_action_mechanics(user_input, profile):
         5. **clocks_impact** (Tension & Event Management):
             - **Local Tension (Scenes/Dialogues):** IT IS STRICTLY FORBIDDEN to invent new names for tension clocks. Use ONLY the fixed key {{"Scene_Tension": 1}} to increase tension (max 3) if the player acts suspiciously, aggressively, or fails a skill check.
             - **Reset:** Use {{"Scene_Tension": "clear"}} to reset the tension when the conflict is resolved.
-            
+
         6. **"energy_impact"** (String): 
-            Evaluate the stamina cost of the action. 
-            Must be ONE of the following: 
+            Evaluate the stamina cost of the action. Must be ONE of the following: 
             - "none" (talking), 
             - "spend_small" (minor stress, short walk), 
             - "spend_medium" (argument, training, long walk), 
@@ -496,10 +577,9 @@ def resolve_action_mechanics(user_input, profile):
     
     OUTPUT EXACTLY IN THIS JSON FORMAT:
     {{
+        "action_type": "standard",
         "skill_used": "Name of skill or None",
-        "difficulty": 60,
-        "total_score": 75,
-        "outcome": "SUCCESS" or "FAILURE",
+        "circumstance": "ADVANTAGE" or "NORMAL" or "DISADVANTAGE",
         "verdict_text": "Short instruction for GM (e.g. 'Player successfully dodged' or 'Player failed and took damage. Scene tension +1.')",
         "updates": {{
              "minutes_passed": 15,
@@ -508,7 +588,7 @@ def resolve_action_mechanics(user_input, profile):
              "gold_impact": "none",
              "inventory_new": [new inventory],
              "inventory_lost": [lost inventory],
-             "clocks_impact": {{"Scene_Tension": "clear"}}
+             "clocks_impact": {{"Scene_Tension": "..."}}
         }}
     }}
     """
@@ -518,14 +598,79 @@ def resolve_action_mechanics(user_input, profile):
         data = clean_and_parse_json(resp.text)
         if not data: return "MECHANICAL VERDICT: AUTO_SUCCESS", {}
 
-        verdict_str = f"MECHANICAL VERDICT: {data.get('outcome', 'UNKNOWN')}! (Skill: {data.get('skill_used')}, Diff: {data.get('difficulty')}, Roll: {data.get('total_score')}). INSTRUCTION FOR GM: {data.get('verdict_text')}"
-
-        # --- НОВИЙ БЛОК: Прокидаємо дані кубика для UI ---
+        skill_used = data.get("skill_used", "None")
+        circumstance = data.get("circumstance", "NORMAL")
         updates = data.get("updates", {})
-        updates["skill_used"] = data.get("skill_used", "None")
-        updates["total_score"] = data.get("total_score", 0)
-        updates["difficulty"] = data.get("difficulty", 0)
-        updates["outcome"] = data.get("outcome", "UNKNOWN")
+        updates["action_type"] = data.get("action_type", "standard")
+
+        # -------------------------------------------------
+        # МАТЕМАТИКА 2d50 ТА КРИТІВ ВІДБУВАЄТЬСЯ ТУТ (В ПАЙТОНІ)
+        # -------------------------------------------------
+
+        # Якщо дія не потребує навички - автоуспіх
+        if skill_used == "None" or skill_used not in skills:
+            # Зберігаємо "костиль", щоб у логах не було порожнечі, якщо ШІ повернув None
+            updates["skill_used"] = "None"
+            updates["outcome"] = "SUCCESS"
+            return "MECHANICAL VERDICT: AUTO_SUCCESS! (No skill required).", updates
+
+        skill_val = skills[skill_used]
+
+        # Механіка Переваги / Недоліку (Більше = Краще)
+        roll_1 = roll_2d50()
+        roll_2 = roll_2d50()
+
+        if circumstance == "ADVANTAGE":
+            natural_roll = max(roll_1, roll_2)  # Беремо БІЛЬШИЙ
+            roll_str = f"[{roll_1}, {roll_2}] -> {natural_roll}"
+        elif circumstance == "DISADVANTAGE":
+            natural_roll = min(roll_1, roll_2)  # Беремо МЕНШИЙ
+            roll_str = f"[{roll_1}, {roll_2}] -> {natural_roll}"
+        else:
+            natural_roll = roll_1
+            roll_str = f"{natural_roll}"
+
+        total_score = natural_roll + skill_val
+
+        # Визначення результату (Більше = Краще)
+        if natural_roll >= 96:
+            outcome = "CRITICAL SUCCESS"
+        elif natural_roll <= 5:
+            outcome = "CRITICAL FAILURE"
+        elif total_score >= 100:
+            outcome = "SUCCESS"
+        else:
+            outcome = "FAILURE"
+
+        verdict_str = f"MECHANICAL VERDICT: {outcome}! (Skill: {skill_used} [{skill_val}], Roll: {natural_roll}, Total: {total_score} vs 100). GM INFO: {data.get('verdict_text')}"
+
+        # Прокидаємо дані кубика для відображення в інтерфейсі (в engine.py)
+        updates["skill_used"] = skill_used
+        updates["dice_roll"] = roll_str
+        updates["skill_val"] = skill_val
+        updates["total_score"] = total_score
+        updates["outcome"] = outcome
+        updates["circumstance"] = circumstance
+
+        # --- ХАРДКОРНА СИСТЕМА ТРАВМ ТА ПРОКАЧКИ ---
+        if outcome == "CRITICAL SUCCESS":
+            if "skill_impact" not in updates:
+                updates["skill_impact"] = {}
+            updates["skill_impact"][skill_used] = 1  # +1 назавжди
+
+        elif outcome == "CRITICAL FAILURE":
+            # 1. Тимчасовий дебаф (штраф 15-20)
+            temp_penalty = random.randint(15, 20)
+            if "temp_debuff" not in updates:
+                updates["temp_debuff"] = {}
+            updates["temp_debuff"][skill_used] = temp_penalty
+
+            # 2. Шрам: 50% шанс втратити -1 назавжди
+            if random.random() < 0.50:
+                if "skill_impact" not in updates:
+                    updates["skill_impact"] = {}
+                updates["skill_impact"][skill_used] = -1
+                updates["permanent_scar"] = True
         # -------------------------------------------------
 
         return verdict_str, updates
