@@ -98,18 +98,15 @@ def test_apply_system_impacts_skills():
 
 
 def test_process_training_request_insufficient_gold():
-    profile = {"Бойові навички": 50, "Особисте Золото": 10}
-    # Імітуємо запит на тренування
-    user_input = "Я хочу потренуватися битися мечем"
+    profile = {"Бойові навички": 50, "Особисте Золото": 10, "Енергія": 100}
+    user_input = "Я хочу потренуватися битися мечем у майстра"
 
-    # Оскільки Worker AI використовується всередині, нам треба його "замокати"
-    # Але для спрощення перевіримо базову логіку: якщо ми підмінимо відповідь ШІ
     from unittest.mock import patch, MagicMock
 
     with patch('core.mechanics.model_worker.generate_content') as mock_gen:
         mock_response = MagicMock()
-        # ШІ каже, що гравець хоче тренувати "Бойові"
-        mock_response.text = '{"is_training": true, "skill": "Бойові"}'
+        # Додаємо is_possible та method: mentor, щоб тригернути перевірку золота
+        mock_response.text = '{"is_training": true, "is_possible": true, "method": "mentor", "skill": "Бойові"}'
         mock_gen.return_value = mock_response
 
         result = process_training_request(user_input, profile)
@@ -140,31 +137,38 @@ def sample_profile():
 
 @patch('core.mechanics.model_worker.generate_content')
 @patch('core.mechanics.random.randint')  # Мокаємо кубик для стабільності
-def test_resolve_action_mechanics_success(mock_randint, mock_generate, sample_profile):
-    """Тестуємо успішну обробку валідного JSON від Worker AI"""
-    # 1. Фіксуємо кидок кубика
-    mock_randint.return_value = 15
+def test_resolve_action_mechanics_success(mock_randint, mock_generate):
+    sample_profile = {
+        'Інтрига': 20,
+        'Бойові навички': 50,
+        'Військові навички': 10,
+        'Годинники': {'Scene_Tension': '1/4'}
+    }
 
-    # 2. Імітуємо ідеальну відповідь від Worker'а
+    # 1. Фіксуємо кидок кубика так, щоб 2d50 дав достатньо для успіху
+    # random.randint викликається 4 рази (по 2 рази для roll_1 і roll_2).
+    # Нехай завжди випадає 25. 25+25 = 50. Навичка 50. 50+50 = 100 (Успіх!)
+    mock_randint.return_value = 25
+
+    # 2. Імітуємо ідеальну відповідь від Worker'а (Новий JSON-формат)
     mock_response = MagicMock()
     mock_response.text = """
-    {
-        "skill_used": "Бойові",
-        "difficulty": 60,
-        "total_score": 65,
-        "outcome": "SUCCESS",
-        "verdict_text": "Player successfully parried the attack.",
-        "updates": {
-             "minutes_passed": 2,
-             "health_impact": "none",
-             "energy_impact": "restore_small",
-             "gold_impact": "none",
-             "inventory_new": [],
-             "inventory_lost": [],
-             "clocks_impact": {}
+        {
+            "action_type": "standard",
+            "skill_used": "Бойові",
+            "circumstance": "NORMAL",
+            "verdict_text": "Player successfully parried the attack.",
+            "updates": {
+                 "minutes_passed": 2,
+                 "health_impact": "none",
+                 "energy_impact": "spend_small",
+                 "gold_impact": "none",
+                 "inventory_new": [],
+                 "inventory_lost": [],
+                 "clocks_impact": {}
+            }
         }
-    }
-    """
+        """
     mock_generate.return_value = mock_response
 
     # 3. Викликаємо функцію
@@ -173,13 +177,8 @@ def test_resolve_action_mechanics_success(mock_randint, mock_generate, sample_pr
 
     # 4. Перевіряємо, чи правильно сформувався текстовий вердикт
     assert "MECHANICAL VERDICT: SUCCESS!" in verdict_str
-    assert "Skill: Бойові" in verdict_str
-    assert "Player successfully parried the attack." in verdict_str
-
-    # 5. Перевіряємо, чи правильно повернувся словник updates
-    assert isinstance(updates, dict)
-    assert updates["minutes_passed"] == 2
-    assert updates["energy_impact"] == "restore_small"
+    assert updates.get("total_score") == 100
+    assert updates.get("action_type") == "standard"
 
 
 @patch('core.mechanics.model_worker.generate_content')

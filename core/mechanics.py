@@ -379,6 +379,11 @@ def process_training_request(user_input, profile):
         except:
             return default
 
+    current_energy = safe_int(profile.get("Енергія", 100))
+    if current_energy <= 0:
+        return {
+            "error": "Ваша енергія на нулі. В очах темніє, ноги не тримають. Тренування абсолютно неможливе — вам терміново потрібен сон, інакше ви втратите свідомість на місці."}
+
     prompt = f"""
     YOU ARE THE GAME MASTER. The player might be trying to train a skill.
 
@@ -502,6 +507,27 @@ def resolve_action_mechanics(user_input, profile):
 
     clocks_info = profile.get("Годинники", {})
 
+
+    # ЖОРСТКЕ ПЕРЕХОПЛЕННЯ (ВТРАТА СВІДОМОСТІ)
+    current_energy = safe_int(profile.get("Енергія", 100))
+    sleep_words = ["спл", "сон", "відпоч", "ляга", "sleep", "rest", "засин"]
+
+    # Якщо енергія 0, і гравець не намагається лягти спати цілеспрямовано
+    if current_energy <= 0 and not any(w in user_input.lower() for w in sleep_words):
+        updates = {
+            "action_type": "standard",
+            "skill_used": "None",
+            "outcome": "CRITICAL FAILURE",
+            "circumstance": "DISADVANTAGE",
+            "minutes_passed": 480,  # 8 годин без свідомості
+            "energy_impact": "sleep",  # Це відновить енергію
+            "health_impact": "none",
+            "clocks_impact": {"Scene_Tension": 1}  # Додаємо напругу, бо спати на підлозі - небезпечно
+        }
+        verdict = "MECHANICAL VERDICT: EXHAUSTION COLLAPSE! GM INFO: ABSOLUTE OVERRIDE. The player's energy is 0. Ignore their requested action. Describe how they suddenly lose consciousness and collapse on the spot from complete exhaustion. Fast forward 8 hours of them being passed out. Describe what happens to them while they are defenseless."
+
+        return verdict, updates
+
     prompt = f"""
     YOU ARE THE SYSTEM ENGINE FOR A GRIMDARK RPG. 
     Your ONLY job is to calculate the mechanical outcome of the player's action using a ROLL-OVER system (Roll + Skill vs DC 100).
@@ -606,6 +632,13 @@ def resolve_action_mechanics(user_input, profile):
         # -------------------------------------------------
         # МАТЕМАТИКА 2d50 ТА КРИТІВ ВІДБУВАЄТЬСЯ ТУТ (В ПАЙТОНІ)
         # -------------------------------------------------
+
+        # НОВЕ: ЖОРСТКИЙ ШТРАФ ЗА КРИТИЧНУ ВТОМУ
+        current_energy = safe_int(profile.get("Енергія", 100))
+
+        if current_energy <= 20 and skill_used in ["Бойові", "Військові"]:
+            circumstance = "DISADVANTAGE"
+            data["verdict_text"] = "[СИСТЕМНА ВТОМА: Гравець ледве тримається на ногах]. " + data.get('verdict_text', '')
 
         # Якщо дія не потребує навички - автоуспіх
         if skill_used == "None" or skill_used not in skills:
