@@ -46,9 +46,15 @@ def clean_and_parse_json(text):
 
         if start_index != -1 and end_index != -1 and end_index > start_index:
             json_str = text[start_index: end_index + 1]
-            return json.loads(json_str)
+
+            # === РІШЕННЯ: strict=False дозволяє переноси рядків ===
+            return json.loads(json_str, strict=False)
+
         return None
-    except json.JSONDecodeError:
+
+    except json.JSONDecodeError as e:
+        # Тепер ми будемо бачити, якщо JSON зламався!
+        print(f"⚠️ Помилка парсингу JSON (JSONDecodeError): {e}")
         return None
     except Exception as e:
         print(f"⚠️ Помилка парсингу: {e}")
