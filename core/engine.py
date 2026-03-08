@@ -172,7 +172,19 @@ def process_game_turn(chat_id, user_input):
            - Example: If Secret is "Is a spy", the NPC should ask too many questions, but NOT say "Hello, I am a spy."
         3. **RELATIONS:** Use 'Attitude to Player'. If it says 'Suspicious', the NPC will not be helpful without a bribe or persuasion.
         4. **STRICT ROSTER RULE (NO HALLUCINATIONS):** It is STRICTLY FORBIDDEN to invent characters on the fly. You must take them exclusively from those already generated in the world database. In the npc_updates block, the Name field must contain an exact, unmodified string from the database (character for character). It is forbidden to translate, abbreviate, or combine names. If a character is not in the current context of the database, do not mention it in updates.
-
+        === NPC INTERACTION RULES (CRITICAL) ===
+        1. **PRIORITY:** If the player says "I look around"...
+        2. **SECRETS:** Use the [SECRET] field...
+        3. **RELATIONS:** Use 'Attitude to Player'...
+        4. **STRICT ROSTER RULE...
+        5. **FULL NPC CONTEXT (CRITICAL):** Synthesize ALL provided data from the roster for every NPC. You MUST use these exact tags to guide their behavior:
+           - **Visual:** Use for their physical description, current injuries, or clothing.
+           - **Personality:** Defines their tone, vocabulary, and decision-making style.
+           - **Goal:** Drives their immediate actions in this turn.
+           - **Attitude to Player:** Dictates their base reaction to the hero.
+           - **Memory Anchor (WHY they feel this way):** Use as the context/reason for their attitude towards the player.
+           - **Attitude to other NPC:** Defines alliances, rivalries, and dialogue with others in the room.
+           - **[SECRET/GM ONLY]:** Guides their hidden motives. NEVER say this out loud, show it through subtle actions.
 
         === THE GOLDEN LAWS OF AGENCY (VIOLATION = FAILURE) ===
         1. **NEVER TOUCH THE PLAYER:** You control NPCs, Weather, and Physics. The Player controls ONLY their Hero.
@@ -257,10 +269,13 @@ def process_game_turn(chat_id, user_input):
             "npc_updates": [
                 {{
                     "Name": "Exact NPC Name",
-                    "Goal": "New Goal",
-                    "Secret": "New Secret",
-                    "Relation_Player": "New Attitude",
-                    "Memory_Anchor": "Short explanation of WHY they feel this way based on recent events (e.g., 'Grateful because player saved them', 'Angry because player insulted their house').",
+                    "Description": "Update Visual ONLY if physically changed or injured.",
+                    "Character": "Update Personality ONLY if drastically changed through events.",
+                    "Goal": "Update Goal ONLY if the situation forced them to change it.",
+                    "Relation_Player": "Update Attitude to Player ONLY if changed.",
+                    "Memory_Anchor": "Short explanation of WHY their attitude changed based on THIS turn's events.",
+                    "Relation_NPCs": "Update Attitude to other NPCs ONLY if changed.",
+                    "Secrets": "Update Secret ONLY if they gained new hidden information.",
                     "Status": "Active/Dead/Injured"
                 }}
             ]

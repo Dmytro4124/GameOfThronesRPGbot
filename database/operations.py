@@ -261,7 +261,7 @@ def update_npcs_in_db(updates):
 
         headers = [h.strip().lower() for h in all_values[0]]
         col_map = {}
-        target_cols = ["status", "relation_player", "memory_anchor", "goal", "secrets", "description", "character"]
+        target_cols = ["status", "relation_player", "memory_anchor", "goal", "secrets", "description", "character", "relation_npcs"]
 
         for target in target_cols:
             if target in headers:
