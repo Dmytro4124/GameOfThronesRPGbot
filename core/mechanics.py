@@ -546,7 +546,9 @@ def resolve_action_mechanics(user_input, profile):
        - "Військові": Tactics, commanding, assessing the battlefield, spotting ambushes.
        - "Бойові": Direct physical combat, sword fighting, wrestling, attacking.
        - "Управління": Using noble status, bribery, trade, giving official orders.
-       - "Немає": Basic dialogue, walking peacefully, looking around.
+       - "Немає": (MANDATORY FOR MUNDANE TASKS) Use this if the player is just walking, looking around, asking basic questions, picking up non-guarded items, or having a casual chat.
+       
+       🚨 THE "NO ROLL" RULE: If no NPC is actively trying to kill, stop, or deceive the player, and the environment is not extremely hazardous, YOU MUST SET "skill_used" TO "None". Do not punish players for basic exploration.
 
     2. DETERMINE CIRCUMSTANCE:
        - "ADVANTAGE": Player has the upper hand, surprise, high ground, or great leverage.
@@ -557,6 +559,14 @@ def resolve_action_mechanics(user_input, profile):
        Is the player attempting to spend a long period of time to practice, study, or hone a specific skill? 
        If YES -> set "action_type": "training".
        If NO (it's a standard immediate action like combat, dialogue, or exploration) -> set "action_type": "standard".
+       
+    4. ASSESS DIFFICULTY (Target Number): 
+    Evaluate how hard the action is in the realistic Grimdark world:
+       - 60 (Very Easy): Beating a weak, unarmed peasant.
+       - 80 (Easy): A basic task, fighting a drunk thug.
+       - 100 (Normal): Standard challenge, fighting a trained guard.
+       - 120 (Hard): Fighting a skilled knight (e.g., Barristan Selmy), sneaking into a heavily guarded keep.
+       - 140 (Extreme): Fighting multiple knights, attacking a dragon, surviving a deadly trap.
     
     === TAGS GUIDE (STRICT VALUES REQUIRED) ===
         1. **minutes_passed** (Integer): Estimate the realistic duration of the player's current action in in-game minutes.
@@ -604,7 +614,8 @@ def resolve_action_mechanics(user_input, profile):
     OUTPUT EXACTLY IN THIS JSON FORMAT:
     {{
         "action_type": "standard",
-        "skill_used": "Name of skill or None",
+        "skill_used": ""Бойові" or "Військові" or "Інтрига" or "Управління" or "Немає"",
+        "difficulty": 100,
         "circumstance": "ADVANTAGE" or "NORMAL" or "DISADVANTAGE",
         "verdict_text": "Short instruction for GM (e.g. 'Player successfully dodged' or 'Player failed and took damage. Scene tension +1.')",
         "updates": {{
@@ -629,21 +640,26 @@ def resolve_action_mechanics(user_input, profile):
         updates = data.get("updates", {})
         updates["action_type"] = data.get("action_type", "standard")
 
+        # === НОВЕ: ВИТЯГУЄМО СКЛАДНІСТЬ ДІЇ ВІД ШІ (Базова ціль - 100) ===
+        difficulty = safe_int(data.get("difficulty", 100))
+        # ================================================================
+
         # -------------------------------------------------
         # МАТЕМАТИКА 2d50 ТА КРИТІВ ВІДБУВАЄТЬСЯ ТУТ (В ПАЙТОНІ)
         # -------------------------------------------------
 
-        # НОВЕ: ЖОРСТКИЙ ШТРАФ ЗА КРИТИЧНУ ВТОМУ
+        # ЖОРСТКИЙ ШТРАФ ЗА КРИТИЧНУ ВТОМУ
         current_energy = safe_int(profile.get("Енергія", 100))
 
         if current_energy <= 20 and skill_used in ["Бойові", "Військові"]:
             circumstance = "DISADVANTAGE"
-            data["verdict_text"] = "[СИСТЕМНА ВТОМА: Гравець ледве тримається на ногах]. " + data.get('verdict_text', '')
+            data["verdict_text"] = "[СИСТЕМНА ВТОМА: Гравець ледве тримається на ногах]. " + data.get('verdict_text',
+                                                                                                      '')
 
         # Якщо дія не потребує навички - автоуспіх
-        if skill_used == "None" or skill_used not in skills:
+        if skill_used == "None" or "Немає" or skill_used not in skills:
             # Зберігаємо "костиль", щоб у логах не було порожнечі, якщо ШІ повернув None
-            updates["skill_used"] = "None"
+            updates["skill_used"] = "Немає"
             updates["outcome"] = "SUCCESS"
             return "MECHANICAL VERDICT: AUTO_SUCCESS! (No skill required).", updates
 
@@ -670,12 +686,14 @@ def resolve_action_mechanics(user_input, profile):
             outcome = "CRITICAL SUCCESS"
         elif natural_roll <= 5:
             outcome = "CRITICAL FAILURE"
-        elif total_score >= 100:
+        # === НОВЕ: ПОРІВНЮЄМО ТОТАЛ СКОР ЗІ СКЛАДНІСТЮ ===
+        elif total_score >= difficulty:
             outcome = "SUCCESS"
         else:
             outcome = "FAILURE"
 
-        verdict_str = f"MECHANICAL VERDICT: {outcome}! (Skill: {skill_used} [{skill_val}], Roll: {natural_roll}, Total: {total_score} vs 100). GM INFO: {data.get('verdict_text')}"
+        # Оновлено рядок вердикту, щоб передати Судді правильну ціль (DC)
+        verdict_str = f"MECHANICAL VERDICT: {outcome}! (Skill: {skill_used} [{skill_val}], Roll: {natural_roll}, Total: {total_score} vs DC {difficulty}). GM INFO: {data.get('verdict_text')}"
 
         # Прокидаємо дані кубика для відображення в інтерфейсі (в engine.py)
         updates["skill_used"] = skill_used
@@ -684,6 +702,7 @@ def resolve_action_mechanics(user_input, profile):
         updates["total_score"] = total_score
         updates["outcome"] = outcome
         updates["circumstance"] = circumstance
+        updates["difficulty"] = difficulty
 
         # --- ХАРДКОРНА СИСТЕМА ТРАВМ ТА ПРОКАЧКИ ---
         if outcome == "CRITICAL SUCCESS":

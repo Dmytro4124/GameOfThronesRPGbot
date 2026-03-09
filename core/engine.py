@@ -381,7 +381,8 @@ def process_game_turn(chat_id, user_input):
                 outcome_ua = "ПРОВАЛ"
 
             # Візуалізуємо формулу: Кидок + Навичка = Тотал
-            dice_log = f"{icon} {skill}{circ_ua}: Кидок {roll_str} + Навичка {skill_val} = {total_score} (Ціль: 100) -> {outcome_ua}"
+            target_dc = mechanical_updates.get("difficulty", 100)
+            dice_log = f"{icon} {skill}{circ_ua}: Кидок {roll_str} + Навичка {skill_val} = {total_score} (Ціль: {target_dc}) -> {outcome_ua}"
             logs.insert(0, dice_log)
 
             # === ЛОГУВАННЯ ХАРДКОРНИХ НАСЛІДКІВ ===
