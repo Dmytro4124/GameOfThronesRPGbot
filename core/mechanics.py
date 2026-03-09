@@ -179,28 +179,33 @@ def apply_system_impacts(profile, ai_impacts):
         profile["Здоров'я"] = new_hp
         logs.append(f"❤️ Здоров'я: {old_hp} -> {new_hp}")
 
-    # === 3. ОБРОБКА ЗОЛОТА ===
-    gold_tag = ai_impacts.get("gold_impact", "none")
-    gold_change = 0
+        # === 3. ОБРОБКА ЗОЛОТА ===
+        gold_tag = str(ai_impacts.get("gold_impact", "none")).strip()
+        gold_change = 0
 
-    if gold_tag == "spend_small":
-        gold_change = -random.randint(5, 15)
-    elif gold_tag == "spend_medium":
-        gold_change = -random.randint(50, 150)
-    elif gold_tag == "spend_large":
-        gold_change = -random.randint(300, 800)
-    elif gold_tag == "earn_small":
-        gold_change = random.randint(10, 30)
-    elif gold_tag == "earn_medium":
-        gold_change = random.randint(100, 300)
-    elif gold_tag == "earn_large":
-        gold_change = random.randint(1000, 2000)
+        # СПРОБА 1: Детермінована економіка (якщо ШІ передав точне число, наприклад "-5" або "10")
+        try:
+            gold_change = int(gold_tag)
+        except ValueError:
+            # СПРОБА 2: Якщо це текст (тег), використовуємо генеративну економіку
+            if gold_tag == "spend_small":
+                gold_change = -random.randint(5, 15)
+            elif gold_tag == "spend_medium":
+                gold_change = -random.randint(50, 150)
+            elif gold_tag == "spend_large":
+                gold_change = -random.randint(300, 800)
+            elif gold_tag == "earn_small":
+                gold_change = random.randint(10, 30)
+            elif gold_tag == "earn_medium":
+                gold_change = random.randint(100, 300)
+            elif gold_tag == "earn_large":
+                gold_change = random.randint(1000, 2000)
 
-    if gold_change != 0:
-        old_gold = safe_int(profile.get("Особисте Золото", 0))
-        new_gold = max(0, old_gold + gold_change)
-        profile["Особисте Золото"] = new_gold
-        logs.append(f"💰 Золото: {gold_change:+}")
+        if gold_change != 0:
+            old_gold = safe_int(profile.get("Особисте Золото", 0))
+            new_gold = max(0, old_gold + gold_change)
+            profile["Особисте Золото"] = new_gold
+            logs.append(f"💰 Золото: {gold_change:+}")
 
     # === 4. ОБРОБКА ІНВЕНТАРЯ ===
     current_inv_str = str(profile.get("Інвентар", ""))
@@ -586,13 +591,15 @@ def resolve_action_mechanics(user_input, profile):
            - "dmg_fatal" (death: -100 HP)
 
         3. **gold_impact** (Economy):
-           - "none"
-           - "spend_small" (food, small items)
-           - "spend_medium" (weapons, clothing)
-           - "spend_large" (horses, houses)
-           - "earn_small" (found a coin)
-           - "earn_medium" (quest reward)
-           - "earn_large" (grand treasure)
+           - EXACT NUMBER: If the player explicitly specifies an amount (e.g., "I give him 5 gold"), output EXACTLY that number as a string (e.g., "-5"). If they steal 10, output "10".
+           - VAGUE TAGS: If the amount is unspecified use this tags:
+                - "none"
+                - "spend_small" (food, small items)
+                - "spend_medium" (weapons, clothing)
+                - "spend_large" (horses, houses)
+                - "earn_small" (found a coin)
+                - "earn_medium" (quest reward)
+                - "earn_large" (grand treasure)
 
         4. **inventory** - "inventory_new": ["Item Name"] (If obtained).
            - "inventory_lost": ["Item Name"] (If lost/eaten).
@@ -614,7 +621,7 @@ def resolve_action_mechanics(user_input, profile):
     OUTPUT EXACTLY IN THIS JSON FORMAT:
     {{
         "action_type": "standard",
-        "skill_used": ""Бойові" or "Військові" or "Інтрига" or "Управління" or "Немає"",
+        "skill_used": Бойові або Військові або Інтрига або Управління або Немає,
         "difficulty": 100,
         "circumstance": "ADVANTAGE" or "NORMAL" or "DISADVANTAGE",
         "verdict_text": "Short instruction for GM (e.g. 'Player successfully dodged' or 'Player failed and took damage. Scene tension +1.')",
@@ -622,7 +629,7 @@ def resolve_action_mechanics(user_input, profile):
              "minutes_passed": 15,
              "health_impact": "none",
              "energy_impact": "spend_small",
-             "gold_impact": "none",
+             "gold_impact": "none" or "-5" or "spend_small",
              "inventory_new": [new inventory],
              "inventory_lost": [lost inventory],
              "clocks_impact": {{"Scene_Tension": "..."}}
@@ -657,10 +664,14 @@ def resolve_action_mechanics(user_input, profile):
                                                                                                       '')
 
         # Якщо дія не потребує навички - автоуспіх
-        if skill_used == "None" or "Немає" or skill_used not in skills:
-            # Зберігаємо "костиль", щоб у логах не було порожнечі, якщо ШІ повернув None
+        if skill_used in ["None", "Немає", "none", ""] or skill_used not in skills:
             updates["skill_used"] = "Немає"
             updates["outcome"] = "SUCCESS"
+            # Прокидаємо фіктивні значення, щоб логер не малював "0 + 0 = 0" при автоуспіху
+            updates["dice_roll"] = "-"
+            updates["skill_val"] = 0
+            updates["total_score"] = 0
+            updates["difficulty"] = 0
             return "MECHANICAL VERDICT: AUTO_SUCCESS! (No skill required).", updates
 
         skill_val = skills[skill_used]

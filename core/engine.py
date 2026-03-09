@@ -291,8 +291,9 @@ def process_game_turn(chat_id, user_input):
         3. End your text organically. You can ask "Що ви робите далі?" (What do you do next?) or simply describe the environment waiting for the player's reaction. DO NOT force a high-stakes "dilemma" at the end of every turn.
 
         === JSON GENERATION RULES (CRITICAL) ===
-        If a specific field (like Character, Goal, Secrets) has NOT changed, you MUST set its value to an empty string "". 
-        IT IS STRICTLY FORBIDDEN to write words like "no change", "same", or "без змін". Only use "".
+        1. If a specific field (like Character, Goal, Secrets) has NOT changed, you MUST set its value to an empty string "". 
+        2. **OBJECT PERMANENCE (CRITICAL):** If the player gives an NPC money, a weapon, or an item, or injures them, you MUST record physical items/gold in the "Inventory" field, and injuries in the "Description" field. Do not let items disappear!
+        3. IT IS STRICTLY FORBIDDEN to write words like "no change", "same", or "без змін". Only use "".
 
         RESPONSE FORMAT (JSON ONLY):
         {{
@@ -308,7 +309,8 @@ def process_game_turn(chat_id, user_input):
                     "Memory_Anchor": "Short explanation of WHY their attitude changed OR \"\" if no change.",
                     "Relation_NPCs": "New attitude to others OR \"\" if no change.",
                     "Secrets": "New secret OR \"\" if no change.",
-                    "Status": "Active/Dead/Injured"
+                    "Status": "Active/Dead/Injured",
+                    "Inventory": "List of physical items and gold the NPC holds OR \"\""
                 }}
             ]
         }}

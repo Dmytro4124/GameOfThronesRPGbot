@@ -189,6 +189,8 @@ def refresh_npc_database():
             if row.get("Memory_Anchor") and str(row.get("Memory_Anchor")).strip() != "-":
                 npc_card += f"- **Memory Anchor (WHY they feel this way):** {row.get('Memory_Anchor')}\n"
             if row.get("Relation_NPCs"): npc_card += f"- **Attitude to other NPC:** {row.get('Relation_NPCs')}\n"
+            if row.get("Inventory") and str(row.get("Inventory")).strip() not in ["", "-"]:
+                npc_card += f"- **Inventory (Items & Gold):** {row.get('Inventory')}\n"
             if row.get(
                 "Secrets"): npc_card += f"- **[SECRET/GM ONLY]:** (GUIDE BEHAVIOR, DO NOT REVEAL): {row.get('Secrets')}\n"
 
@@ -311,8 +313,7 @@ def update_npcs_in_db(updates, legal_names_list_deprecated=None):
 
         headers = [h.strip().lower() for h in all_values[0]]
         col_map = {}
-        target_cols = ["status", "relation_player", "memory_anchor", "goal", "secrets", "description", "character",
-                       "relation_npcs"]
+        target_cols = ["status", "relation_player", "memory_anchor", "goal", "secrets", "description", "character", "relation_npcs", "inventory"]
 
         for target in target_cols:
             if target in headers:
