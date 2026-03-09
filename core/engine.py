@@ -64,7 +64,7 @@ def process_game_turn(chat_id, user_input):
     curr_loc = profile.get("Поточне місцезнаходження", "")
 
     context_knowledge = get_relevant_context(user_input, curr_loc)
-    npc_context_text = get_location_npcs(curr_loc)
+    npc_context_text, legal_npc_names = get_location_npcs(curr_loc)
 
     duration = time.time() - t_start
     debug_log += f"\n⏱️ [DATA LOAD] зайняло: {duration:.2f}s"
@@ -412,10 +412,10 @@ def process_game_turn(chat_id, user_input):
 
         # Фонове збереження
         def background_task(chat_id_arg, user_id_arg, profile_arg, char_name_arg, input_arg, story_arg,
-                            npc_changes_arg):
+                            npc_changes_arg, legal_names_arg):
             try:
                 save_user_data(user_id_arg, profile_arg, char_name_arg)
-                if npc_changes_arg: update_npcs_in_db(npc_changes_arg)
+                if npc_changes_arg: update_npcs_in_db(npc_changes_arg, legal_names_arg)
 
                 short_hist_turn = summarize_turn(story_arg)
                 short_user_inp = summarize_turn(input_arg)
@@ -448,7 +448,8 @@ def process_game_turn(chat_id, user_input):
                 print(f"❌ [BG ERROR] {exept}")
 
         Thread(target=background_task,
-               args=(chat_id, user_id, profile, profile.get("Ім'я"), user_input, story, npc_changes)).start()
+               args=(
+               chat_id, user_id, profile, profile.get("Ім'я"), user_input, story, npc_changes, legal_npc_names)).start()
 
         duration = time.time() - t_start
         timing_details.append(f"💾 Save: {duration:.2f}s")

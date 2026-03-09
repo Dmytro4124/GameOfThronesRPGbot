@@ -1,6 +1,7 @@
 import json
 import gspread
 import difflib
+import re
 
 from database.sheets import db
 from config import (
@@ -205,7 +206,7 @@ def refresh_npc_database():
 
 
 def get_location_npcs(current_location):
-    """Повертає текст з описом NPC для поточної локації."""
+    """Повертає текст з описом NPC для поточної локації ТА список легальних імен."""
     found_npcs = []
 
     for loc_key, npcs_list in NPC_CACHE.items():
@@ -215,15 +216,32 @@ def get_location_npcs(current_location):
     if "GLOBAL" in NPC_CACHE:
         found_npcs.extend(NPC_CACHE["GLOBAL"])
 
+    # Якщо нікого немає - повертаємо ДВА порожніх значення
     if not found_npcs:
-        return ""
+        return "", []
+
+    legal_names = []
+
+    # Витягуємо чисті імена (як у твоїй таблиці)
+    for npc_string in found_npcs:
+        # Шукаємо текст до першої двокрапки (ігноруючи дефіси чи зірочки на початку)
+        match = re.search(r'^[-*\s]*([^:]+):', npc_string)
+        if match:
+            clean_name = match.group(1).strip()
+            legal_names.append(clean_name)
+        else:
+            # Fallback: якщо раптом немає двокрапки, беремо перші 2-3 слова
+            words = npc_string.replace("-", "").strip().split()
+            clean_name = " ".join(words[:2])  # Беремо перші два слова (напр. "Джон Сноу")
+            legal_names.append(clean_name)
 
     npc_block = "=== 👥 VISIBLE NPC ROSTER (PRIORITY USE!) ===\n"
     npc_block += "GM INSTRUCTION: If player interacts with someone, PICK FROM THIS LIST first.\n"
     npc_block += "DO NOT HALLUCINATE NEW CHARACTERS IF A SUITABLE ONE IS HERE.\n\n"
     npc_block += "\n".join(found_npcs)
 
-    return npc_block
+    # Повертаємо кортеж: текст для промпту + список ["Дейнеріс Таргарієн", "Ілліріо Мопатіс", ...]
+    return npc_block, legal_names
 
 
 # ================= ДОПОМІЖНІ ФУНКЦІЇ ДЛЯ БАЗИ =================
@@ -270,9 +288,13 @@ def find_best_match(query_name, distinct_names, threshold=0.75):
     return None
 
 
-def update_npcs_in_db(updates, current_location="GLOBAL"):
-    """Приймає список змін для NPC і записує їх у базу. Якщо NPC немає — створює його."""
-    if not updates: return
+def update_npcs_in_db(updates, legal_names_list, current_location="GLOBAL"):
+    """
+    Приймає список змін для NPC і записує їх у базу.
+    БЛОКУЄ створення нових (галюцинованих) NPC завдяки legal_names_list.
+    """
+    if not updates or not legal_names_list:
+        return
 
     print(f"📝 [NPC UPDATE] Обробка змін: {json.dumps(updates, ensure_ascii=False)}")
 
@@ -284,7 +306,6 @@ def update_npcs_in_db(updates, current_location="GLOBAL"):
 
         headers = [h.strip().lower() for h in all_values[0]]
         col_map = {}
-        # Оновлений список колонок (включаючи memory_anchor та relation_npcs)
         target_cols = ["status", "relation_player", "memory_anchor", "goal", "secrets", "description", "character",
                        "relation_npcs"]
 
@@ -292,6 +313,7 @@ def update_npcs_in_db(updates, current_location="GLOBAL"):
             if target in headers:
                 col_map[target] = headers.index(target) + 1
 
+        # Створюємо мапу: канонічне ім'я -> номер рядка в таблиці
         db_names_map = {}
         for i, row in enumerate(all_values[1:], start=2):
             raw_name = str(row[1]).strip()
@@ -299,73 +321,61 @@ def update_npcs_in_db(updates, current_location="GLOBAL"):
                 db_names_map[raw_name] = i
 
         cells_to_update = []
-        rows_to_append = []  # Список для нових (незнайдених) NPC
-        available_names_list = list(db_names_map.keys())
 
         for update in updates:
             target_name = str(update.get("Name")).strip()
-            best_match = find_best_match(target_name, available_names_list)
+            if not target_name:
+                continue
 
-            if best_match:
-                row_idx = db_names_map[best_match]
-                print(f"✅ [MATCH] '{target_name}' ототожнено з '{best_match}' (Рядок {row_idx})")
+            # ====================================================
+            # МАГІЯ РОЗПІЗНАВАННЯ (Fuzzy Matching + Білий список)
+            # ====================================================
+            # Шукаємо збіг ТІЛЬКИ серед легальних імен поточної локації
+            matches = difflib.get_close_matches(target_name, legal_names_list, n=1, cutoff=0.65)
 
-                for field, new_val in update.items():
-                    field_key = field.lower()
-                    if field_key == "name": continue
+            if matches:
+                best_match = matches[0]  # Канонічне ім'я з нашого списку
 
-                    val_str = str(new_val).strip()
+                # Перевіряємо, чи є це ім'я у самій Google Таблиці
+                if best_match in db_names_map:
+                    row_idx = db_names_map[best_match]
 
-                    # === АРХІТЕКТУРНИЙ ФІЛЬТР СМІТТЯ ===
-                    # Якщо поле пусте (як ми просили в промпті), або це базові технічні заглушки
-                    if not val_str or val_str.lower() in ["", "-", "none", "null", "same", "без змін"]:
-                        continue  # Ігноруємо, зберігаючи канонічні дані в БД
+                    if target_name != best_match:
+                        print(
+                            f"🔧 [АВТОКОРЕКЦІЯ] '{target_name}' виправлено на канонічне '{best_match}' (Рядок {row_idx})")
+                    else:
+                        print(f"✅ [MATCH] '{best_match}' знайдено (Рядок {row_idx})")
 
-                    # Додатковий захист від "коротких" відписок (якщо LLM все ж написала "Ні" чи "Так")
-                    # Статус може бути коротким (наприклад "Dead"), тому його пропускаємо
-                    if len(val_str) < 3 and field_key not in ["status"]:
-                        continue
-                    # ====================================
+                    for field, new_val in update.items():
+                        field_key = field.lower()
+                        if field_key == "name": continue
 
-                    if field_key in col_map:
-                        col_idx = col_map[field_key]
-                        cells_to_update.append(gspread.Cell(row_idx, col_idx, val_str))
+                        val_str = str(new_val).strip()
+
+                        # === АРХІТЕКТУРНИЙ ФІЛЬТР СМІТТЯ (Твій код) ===
+                        if not val_str or val_str.lower() in ["", "-", "none", "null", "same", "без змін"]:
+                            continue
+
+                        if len(val_str) < 3 and field_key not in ["status"]:
+                            continue
+                        # ====================================
+
+                        if field_key in col_map:
+                            col_idx = col_map[field_key]
+                            cells_to_update.append(gspread.Cell(row_idx, col_idx, val_str))
+                else:
+                    print(f"⚠️ [ПОМИЛКА БАЗИ] Ім'я '{best_match}' є в легальному списку, але відсутнє в таблиці.")
             else:
                 # ==========================================
-                # ЛОГІКА: СТВОРЕННЯ ТИМЧАСОВОГО NPC (NO MATCH)
+                # БЛОКУВАННЯ ГАЛЮЦИНАЦІЙ
                 # ==========================================
-                print(f"⚠️ [NO MATCH] Не знайдено '{target_name}'. Створюю нового NPC у {current_location}!")
-
-                # Допоміжна перевірка: якщо LLM повернула пустий рядок, пишемо "-" замість пустоти для нових NPC
-                def get_val(key, default="-"):
-                    v = update.get(key, "").strip()
-                    return v if v and v.lower() not in ["", "-", "none"] else default
-
-                # Порядок колонок: ["Location", "Name", "Description", "Character", "Goal", "Secrets", "Relation_Player", "Memory_Anchor", "Relation_NPCs", "Status", "Is_Canon"]
-                new_row = [
-                    current_location,
-                    target_name,
-                    get_val("Description", "Тимчасовий персонаж"),
-                    get_val("Character"),
-                    get_val("Goal"),
-                    get_val("Secrets", get_val("Secret")),  # Підтримка обох варіантів ключа
-                    get_val("Relation_Player", "Ворожа"),
-                    get_val("Memory_Anchor", "З'явився в результаті останніх подій."),
-                    get_val("Relation_NPCs"),
-                    get_val("Status", "Injured"),
-                    "FALSE"  # Це не канон
-                ]
-                rows_to_append.append(new_row)
+                # Замість створення нових рядків, ми просто ігноруємо вигадки ШІ
+                print(f"🛡️ [БЛОКУВАННЯ ГАЛЮЦИНАЦІЇ] ШІ придумав NPC '{target_name}'. Ігноруємо!")
+                continue
 
         if cells_to_update:
             worksheet.update_cells(cells_to_update)
             print(f"💾 [SAVED] Оновлено {len(cells_to_update)} полів існуючих NPC.")
-
-        if rows_to_append:
-            worksheet.append_rows(rows_to_append)
-            print(f"➕ [SPAWNED] Створено {len(rows_to_append)} нових динамічних NPC.")
-
-        if cells_to_update or rows_to_append:
             refresh_npc_database()  # Оновлюємо кеш у пам'яті
 
     except Exception as e:

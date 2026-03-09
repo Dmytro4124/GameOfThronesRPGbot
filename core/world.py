@@ -1,4 +1,5 @@
 # core/world.py
+import difflib
 import json
 from database.sheets import db
 from database.operations import refresh_npc_database, find_best_match
@@ -208,10 +209,12 @@ def background_canon_generation(context_text, excluded_name=None):
 
 
 def populate_contextual_npcs(location, situation_context="Normal day, calm atmosphere", excluded_name=None):
-    """Генерує NPC, які відповідають ПОТОЧНІЙ СИТУАЦІЇ в локації."""
+    """Генерує NPC, які відповідають ПОТОЧНІЙ СИТУАЦІЇ в локації. Блокує канонічні імена."""
     print(f"🏘️ [LOCAL POP] Аналізую локацію: {location}...")
     worksheet = db.get_sheet(TAB_NPC)
     if not worksheet: return
+
+    canon_names = []  # Збираємо чорний список імен
 
     try:
         all_rows = worksheet.get_all_values()
@@ -222,6 +225,10 @@ def populate_contextual_npcs(location, situation_context="Normal day, calm atmos
         for row in all_rows[1:]:
             if len(row) > canon_col_idx and str(row[canon_col_idx]).upper() == "TRUE":
                 preserved_rows.append(row)
+                # Зберігаємо ім'я канонічного персонажа (колонка Name зазвичай має індекс 1)
+                canon_name = str(row[1]).strip()
+                if canon_name:
+                    canon_names.append(canon_name)
 
         worksheet.clear()
         worksheet.update(preserved_rows)
@@ -229,12 +236,21 @@ def populate_contextual_npcs(location, situation_context="Normal day, calm atmos
         print(f"❌ [LOCAL POP ERROR] Cleanup failed: {e}")
         return
 
+    # Формуємо рядок чорного списку для промпту (беремо перші 50, щоб не перевантажити промпт, або всі)
+    blacklist_str = ", ".join(canon_names)
+
     prompt = f"""
         ROLE: Narrative Designer for Game of Thrones (Grimdark Fantasy).
         TASK: Populate the current location: "{location}" with 10-12 background NPCs.
 
         === CURRENT SITUATION (CRITICAL) ===
         {situation_context}
+
+        === CRITICAL NAMING RULES (ANTI-CANON) ===
+        1. BACKGROUND ONLY: You are generating nobodies, commoners, guards, or local minor merchants. DO NOT generate main characters from the books/show.
+        2. NO GREAT HOUSES: It is STRICTLY FORBIDDEN to use these surnames: Stark, Lannister, Targaryen, Baratheon, Tyrell, Greyjoy, Martell, Arryn, Tully, Bolton, Mormont.
+        3. BLACKLIST: Absolutely DO NOT use any of these specific names or variations of them: {blacklist_str}.
+        4. LORE-FRIENDLY: Generate original, region-appropriate names (e.g., Pentoshi names for Pentos, Northmen names for the North).
 
         INSTRUCTION:
         1. **Adapt to the Situation:** - If context says "War/Siege" -> Generate wounded soldiers, starving refugees, looting mercenaries.
@@ -249,8 +265,7 @@ def populate_contextual_npcs(location, situation_context="Normal day, calm atmos
         - Output 'Location' field in UKRAINIAN language (e.g., 'Вінтерфел', 'Пентос', 'Стіна').
 
         === LANGUAGE REQUIREMENT (CRITICAL) ===
-
-            Responce should be in UKRAINIAN language only
+        Responce should be in UKRAINIAN language only
 
         OUTPUT JSON ARRAY ONLY:
         [
@@ -262,11 +277,12 @@ def populate_contextual_npcs(location, situation_context="Normal day, calm atmos
             "Secrets": "Hidden info",
             "Relation_Player": "Initial reaction",
             "Memory_Anchor": "-",
-            "Re'lation_NPCs": "Connection to local groups"
+            "Relation_NPCs": "Connection to local groups"
           }}
         ]
         """
     try:
+        # Виклик моделі
         response = model.generate_content(prompt)
         npc_list = clean_and_parse_json(response.text)
 
@@ -274,9 +290,32 @@ def populate_contextual_npcs(location, situation_context="Normal day, calm atmos
 
         new_rows = []
         for npc in npc_list:
-            ai_gen_name = npc.get("Name", "Unknown")
+            ai_gen_name = npc.get("Name", "Unknown").strip()
+
+            # 1. Перевірка на excluded_name (Ім'я Гравця)
             if excluded_name and find_best_match(ai_gen_name, [excluded_name], threshold=0.8):
                 continue
+
+            # 2. АНТИ-КАНОН ФІЛЬТР (Fuzzy Matching)
+            # Перевіряємо, чи не згенерував ШІ щось дуже схоже на канонічне ім'я (наприклад "Джон Сноу" або "Арія")
+            is_canon_clone = False
+            if canon_names:
+                # cutoff=0.7 означає 70% схожості. Відловить "Робб Старк" якщо є "Роб Старк".
+                matches = difflib.get_close_matches(ai_gen_name, canon_names, n=1, cutoff=0.7)
+                if matches:
+                    is_canon_clone = True
+                    print(
+                        f"🛡️ [ANTI-CANON FILTER] Заблоковано генерацію '{ai_gen_name}'. Занадто схоже на канон '{matches[0]}'.")
+
+            # Перевірка на заборонені прізвища (на випадок, якщо ШІ вигадає "Васю Ланністера")
+            forbidden_houses = ["старк", "ланністер", "таргарієн", "баратеон", "тірелл", "грейджой", "мартелл", "аррен",
+                                "таллі", "болтон", "мормонт", "кхал"]
+            if any(house in ai_gen_name.lower() for house in forbidden_houses):
+                is_canon_clone = True
+                print(f"🛡️ [ANTI-CANON FILTER] Заблоковано '{ai_gen_name}' через використання прізвища Великого Дому.")
+
+            if is_canon_clone:
+                continue  # Пропускаємо цього NPC і не додаємо в базу!
 
             row = [
                 location, ai_gen_name, npc.get("Description", "-"), npc.get("Character", "-"),
@@ -285,8 +324,12 @@ def populate_contextual_npcs(location, situation_context="Normal day, calm atmos
             ]
             new_rows.append(row)
 
-        worksheet.append_rows(new_rows)
-        print(f"✅ [LOCAL POP] Локацію {location} заселено ({len(new_rows)} NPC).")
-        refresh_npc_database()
+        if new_rows:
+            worksheet.append_rows(new_rows)
+            print(f"✅ [LOCAL POP] Локацію {location} заселено ({len(new_rows)} нових NPC).")
+            refresh_npc_database()
+        else:
+            print(f"⚠️ [LOCAL POP] ШІ не згенерував жодного валідного NPC для {location}.")
+
     except Exception as e:
         print(f"❌ [LOCAL POP AI ERROR] {e}")
