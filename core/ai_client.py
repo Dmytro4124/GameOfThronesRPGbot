@@ -2,7 +2,8 @@
 import json
 import time
 from google import genai
-from config import GEMINI_API_KEY, MODEL_MAIN_NAME, MODEL_WORKER_NAME
+from google.genai import types
+from config import GEMINI_API_KEY, MODEL_MAIN_NAME, MODEL_WORKER_NAME, MODEL_MAIN_TEMP, MODEL_WORKER_TEMP
 
 # Ініціалізація нового клієнта
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -14,20 +15,24 @@ class AIWrapper:
     Дозволяє використовувати .generate_content() без змін в інших файлах.
     """
 
-    def __init__(self, model_name):
+    def __init__(self, model_name, temperature=0.7):
         self.model_name = model_name
+        self.temperature = temperature
 
     def generate_content(self, prompt):
-        # Виклик через новий SDK
+        # Виклик через новий SDK з конфігурацією температури
         return client.models.generate_content(
             model=self.model_name,
-            contents=prompt
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=self.temperature
+            )
         )
 
 
-# Створюємо екземпляри моделей
-model = AIWrapper(MODEL_MAIN_NAME)
-model_worker = AIWrapper(MODEL_WORKER_NAME)
+# Створюємо екземпляри моделей з налаштованою температурою
+model = AIWrapper(MODEL_MAIN_NAME, temperature=MODEL_MAIN_TEMP)
+model_worker = AIWrapper(MODEL_WORKER_NAME, temperature=MODEL_WORKER_TEMP)
 
 
 def clean_and_parse_json(text):

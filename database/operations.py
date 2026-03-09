@@ -288,12 +288,17 @@ def find_best_match(query_name, distinct_names, threshold=0.75):
     return None
 
 
-def update_npcs_in_db(updates, legal_names_list, current_location="GLOBAL"):
+import difflib
+import json
+import gspread
+
+
+def update_npcs_in_db(updates, legal_names_list_deprecated=None):
     """
-    Приймає список змін для NPC і записує їх у базу.
-    БЛОКУЄ створення нових (галюцинованих) NPC завдяки legal_names_list.
+    Оновлює існуючих NPC.
+    Вбудовано жорстку нормалізацію регістру та апострофів для difflib.
     """
-    if not updates or not legal_names_list:
+    if not updates:
         return
 
     print(f"📝 [NPC UPDATE] Обробка змін: {json.dumps(updates, ensure_ascii=False)}")
@@ -313,70 +318,68 @@ def update_npcs_in_db(updates, legal_names_list, current_location="GLOBAL"):
             if target in headers:
                 col_map[target] = headers.index(target) + 1
 
-        # Створюємо мапу: канонічне ім'я -> номер рядка в таблиці
+        # Створюємо дві мапи: одну для БД, іншу для нормалізованого пошуку
         db_names_map = {}
+        legal_names_lower_map = {}
+
         for i, row in enumerate(all_values[1:], start=2):
             raw_name = str(row[1]).strip()
             if raw_name:
                 db_names_map[raw_name] = i
 
+                # НОРМАЛІЗАЦІЯ: нижній регістр + заміна всіх видів апострофів
+                norm_name = raw_name.lower().replace("’", "'").replace("`", "'").replace("‘", "'")
+                legal_names_lower_map[norm_name] = raw_name
+
         cells_to_update = []
+        global_legal_norm_names = list(legal_names_lower_map.keys())
 
         for update in updates:
             target_name = str(update.get("Name")).strip()
             if not target_name:
                 continue
 
-            # ====================================================
-            # МАГІЯ РОЗПІЗНАВАННЯ (Fuzzy Matching + Білий список)
-            # ====================================================
-            # Шукаємо збіг ТІЛЬКИ серед легальних імен поточної локації
-            matches = difflib.get_close_matches(target_name, legal_names_list, n=1, cutoff=0.65)
+            # Нормалізуємо ім'я, яке прийшло від ШІ
+            norm_target = target_name.lower().replace("’", "'").replace("`", "'").replace("‘", "'")
+
+            # Шукаємо збіг за НОРМАЛІЗОВАНИМИ рядками
+            matches = difflib.get_close_matches(norm_target, global_legal_norm_names, n=1, cutoff=0.65)
 
             if matches:
-                best_match = matches[0]  # Канонічне ім'я з нашого списку
+                best_norm_match = matches[0]
+                # Відновлюємо оригінальне канонічне ім'я з бази
+                real_original_name = legal_names_lower_map[best_norm_match]
+                row_idx = db_names_map[real_original_name]
 
-                # Перевіряємо, чи є це ім'я у самій Google Таблиці
-                if best_match in db_names_map:
-                    row_idx = db_names_map[best_match]
-
-                    if target_name != best_match:
-                        print(
-                            f"🔧 [АВТОКОРЕКЦІЯ] '{target_name}' виправлено на канонічне '{best_match}' (Рядок {row_idx})")
-                    else:
-                        print(f"✅ [MATCH] '{best_match}' знайдено (Рядок {row_idx})")
-
-                    for field, new_val in update.items():
-                        field_key = field.lower()
-                        if field_key == "name": continue
-
-                        val_str = str(new_val).strip()
-
-                        # === АРХІТЕКТУРНИЙ ФІЛЬТР СМІТТЯ (Твій код) ===
-                        if not val_str or val_str.lower() in ["", "-", "none", "null", "same", "без змін"]:
-                            continue
-
-                        if len(val_str) < 3 and field_key not in ["status"]:
-                            continue
-                        # ====================================
-
-                        if field_key in col_map:
-                            col_idx = col_map[field_key]
-                            cells_to_update.append(gspread.Cell(row_idx, col_idx, val_str))
+                if target_name != real_original_name:
+                    print(f"🔧 [АВТОКОРЕКЦІЯ] '{target_name}' виправлено на '{real_original_name}'")
                 else:
-                    print(f"⚠️ [ПОМИЛКА БАЗИ] Ім'я '{best_match}' є в легальному списку, але відсутнє в таблиці.")
+                    print(f"✅ [MATCH] '{real_original_name}' знайдено.")
+
+                for field, new_val in update.items():
+                    field_key = field.lower()
+                    if field_key == "name": continue
+
+                    val_str = str(new_val).strip()
+
+                    # Фільтр пустоти
+                    if not val_str or val_str.lower() in ["", "-", "none", "null", "same", "без змін"]:
+                        continue
+
+                    if len(val_str) < 3 and field_key not in ["status"]:
+                        continue
+
+                    if field_key in col_map:
+                        col_idx = col_map[field_key]
+                        cells_to_update.append(gspread.Cell(row_idx, col_idx, val_str))
             else:
-                # ==========================================
-                # БЛОКУВАННЯ ГАЛЮЦИНАЦІЙ
-                # ==========================================
-                # Замість створення нових рядків, ми просто ігноруємо вигадки ШІ
+                # Галюцинація підтверджена
                 print(f"🛡️ [БЛОКУВАННЯ ГАЛЮЦИНАЦІЇ] ШІ придумав NPC '{target_name}'. Ігноруємо!")
-                continue
 
         if cells_to_update:
             worksheet.update_cells(cells_to_update)
             print(f"💾 [SAVED] Оновлено {len(cells_to_update)} полів існуючих NPC.")
-            refresh_npc_database()  # Оновлюємо кеш у пам'яті
+            refresh_npc_database()
 
     except Exception as e:
         print(f"❌ [UPDATE ERROR] {e}")
