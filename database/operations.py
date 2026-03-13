@@ -125,16 +125,33 @@ def get_house_stats_data(house_name):
 
 # ================= РОБОТА З ЛОРОМ (RAG / KnowledgeBase) =================
 import numpy as np
-from sentence_transformers import SentenceTransformer
+from google import genai
+from config import GEMINI_API_KEY
+
+# Ініціалізація клієнта Gemini для векторів
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Глобальні змінні
-EMBEDDING_MODEL = None
 LORE_VECTORS = None
+LORE_CACHE = []
+
+
+def get_embedding(text: str):
+    """Отримує вектор тексту через безкоштовне API Gemini"""
+    try:
+        response = gemini_client.models.embed_content(
+            model='text-embedding-004',
+            contents=text
+        )
+        return response.embeddings[0].values
+    except Exception as e:
+        print(f"⚠️ Помилка отримання вектора від Gemini: {e}")
+        return None
 
 
 def load_lore_data():
-    """Завантажує базу знань, векторизує її (Numpy) при старті"""
-    global LORE_CACHE, LORE_VECTORS, EMBEDDING_MODEL
+    """Завантажує базу знань і векторизує її через Google API"""
+    global LORE_CACHE, LORE_VECTORS
     try:
         sheet = db.get_sheet(TAB_KNOWLEDGE)
         if not sheet: return
@@ -146,22 +163,24 @@ def load_lore_data():
             print("⚠️ База лору порожня.")
             return
 
-        print(f"📚 Завантажено {len(LORE_CACHE)} записів лору. Ініціалізація RAG...")
-
-        if EMBEDDING_MODEL is None:
-            print("🧠 Завантаження моделі SentenceTransformer (зачекайте)...")
-            EMBEDDING_MODEL = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+        print(f"📚 Завантажено {len(LORE_CACHE)} записів лору. Відправка на векторизацію в Google...")
 
         texts_to_embed = [
             f"{row.get('Ключові слова', '')} {row.get('Інформація', '')}"
             for row in LORE_CACHE
         ]
 
-        print("🔢 Обчислення векторів (Embeddings)...")
-        # Зберігаємо вектори як звичайний Numpy масив
-        LORE_VECTORS = EMBEDDING_MODEL.encode(texts_to_embed, convert_to_numpy=True)
+        # Отримуємо вектори батчем (щоб було швидко)
+        response = gemini_client.models.embed_content(
+            model='text-embedding-004',
+            contents=texts_to_embed
+        )
 
-        print(f"✅ [RAG] Вектори успішно створено для {len(LORE_CACHE)} записів!")
+        # Перетворюємо список векторів у Numpy масив
+        embeddings_list = [emb.values for emb in response.embeddings]
+        LORE_VECTORS = np.array(embeddings_list)
+
+        print(f"✅ [RAG] Вектори успішно створено через Gemini для {len(LORE_CACHE)} записів!")
 
     except Exception as e:
         print(f"⚠️ Не вдалося ініціалізувати векторну базу KnowledgeBase: {e}")
@@ -170,26 +189,30 @@ def load_lore_data():
 
 
 def get_relevant_context(user_text, current_location):
-    """Семантичний пошук найрелевантнішого лору через Numpy L2 Distance"""
-    if LORE_VECTORS is None or EMBEDDING_MODEL is None or not LORE_CACHE:
+    """Семантичний пошук найрелевантнішого лору"""
+    if LORE_VECTORS is None or not LORE_CACHE:
         return "Немає особливих відомостей."
 
     try:
         search_query = f"{current_location}. {user_text}"
-        query_vector = EMBEDDING_MODEL.encode([search_query], convert_to_numpy=True)
+        query_vector_list = get_embedding(search_query)
 
-        # Рахуємо L2 дистанцію (Евклідову відстань) між запитом і всією базою
-        # Це математичний аналог того, що робив FAISS IndexFlatL2
+        if not query_vector_list:
+            return "Немає особливих відомостей."
+
+        query_vector = np.array(query_vector_list)
+
+        # Рахуємо дистанцію між масивами
         distances = np.linalg.norm(LORE_VECTORS - query_vector, axis=1)
 
-        # Отримуємо індекси 3 найменших дистанцій (найбільш схожі)
+        # Топ-3 результати
         top_k = 3
         top_indices = np.argsort(distances)[:top_k]
 
         found_info = []
         for idx in top_indices:
-            # Відсіюємо "сміття", дистанція > 15.0 означає відсутність смислового зв'язку
-            if distances[idx] < 15.0:
+            # Для Gemini embeddings дистанція зазвичай менша, ставимо поріг ~1.2
+            if distances[idx] < 1.2:
                 content = LORE_CACHE[idx].get('Інформація', '')
                 found_info.append(f"- {content}")
 
@@ -201,7 +224,6 @@ def get_relevant_context(user_text, current_location):
     except Exception as e:
         print(f"⚠️ Помилка векторного пошуку: {e}")
         return "Немає особливих відомостей."
-
 
 # ================= РОБОТА З NPC =================
 
