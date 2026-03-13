@@ -533,110 +533,89 @@ def resolve_action_mechanics(user_input, profile):
 
         return verdict, updates
 
-    prompt = f"""
-    YOU ARE THE SYSTEM ENGINE FOR A GRIMDARK RPG. 
-    Your ONLY job is to calculate the mechanical outcome of the player's action using a ROLL-OVER system (Roll + Skill vs DC 100).
+    prompt = f"""<system>
+        You are the System Engine for a Grimdark RPG (Game of Thrones).
+        Your ONLY job is to calculate the mechanical outcome of the player's action using a ROLL-OVER system (Roll + Skill vs DC).
+        </system>
 
-    === DATA ===
-    Player Action: "{user_input}"
-    Player Skills: {json.dumps(skills, ensure_ascii=False)}
-    Active Clocks (Tension): {json.dumps(clocks_info, ensure_ascii=False)}
+        <data>
+        Player Action: "{user_input}"
+        Player Skills: {json.dumps(skills, ensure_ascii=False)}
+        Active Clocks (Tension): {json.dumps(clocks_info, ensure_ascii=False)}
+        </data>
 
-    === ACTIVE CLOCKS RULES ===
-        If a clock reaches its maximum, e.g., 4/4, the threat happens immediately! Do not spawn threats if clock is 0 or 1.
+        <rules>
+        1. CLASSIFY REQUIRED SKILL (STRICT):
+           - "Інтрига": Sneaking, hiding, stealing, lying, bluffing, persuasion.
+           - "Військові": Tactics, commanding, assessing battlefield, spotting ambushes.
+           - "Бойові": Direct physical combat, sword fighting, wrestling.
+           - "Управління": Using noble status, bribery, trade, official orders.
+           - "None": Mundane tasks (walking, looking, casual chat). 🚨 THE "NO ROLL" RULE: If no NPC is actively attacking/stopping the player, use "None".
 
-    === RULES & MATH (CRITICAL) ===
-    1. CLASSIFY REQUIRED SKILL (STRICT RULES):
-       - "Інтрига": Sneaking, hiding, stealing, lying, bluffing, persuasion, gathering rumors.
-       - "Військові": Tactics, commanding, assessing the battlefield, spotting ambushes.
-       - "Бойові": Direct physical combat, sword fighting, wrestling, attacking.
-       - "Управління": Using noble status, bribery, trade, giving official orders.
-       - "Немає": (MANDATORY FOR MUNDANE TASKS) Use this if the player is just walking, looking around, asking basic questions, picking up non-guarded items, or having a casual chat.
-       
-       🚨 THE "NO ROLL" RULE: If no NPC is actively trying to kill, stop, or deceive the player, and the environment is not extremely hazardous, YOU MUST SET "skill_used" TO "None". Do not punish players for basic exploration.
+        2. DETERMINE CIRCUMSTANCE:
+           - "ADVANTAGE": Surprise, high ground, great leverage.
+           - "NORMAL": Fair conditions, standard risk.
+           - "DISADVANTAGE": Injured, outnumbered, extreme pressure.
 
-    2. DETERMINE CIRCUMSTANCE:
-       - "ADVANTAGE": Player has the upper hand, surprise, high ground, or great leverage.
-       - "NORMAL": Fair conditions, standard risk.
-       - "DISADVANTAGE": Player is injured, outnumbered, acting under extreme pressure, or doing something very difficult.
+        3. ASSESS DIFFICULTY (Target DC):
+           - 60 (Very Easy): Beating a weak, unarmed peasant.
+           - 80 (Easy): A basic task, fighting a drunk thug.
+           - 100 (Normal): Standard challenge, fighting a trained guard.
+           - 120 (Hard): Fighting a skilled knight, sneaking into heavily guarded keep.
+           - 140 (Extreme): Dragon, multiple knights, deadly trap.
 
-    3. INTENT CLASSIFICATION: 
-       Is the player attempting to spend a long period of time to practice, study, or hone a specific skill? 
-       If YES -> set "action_type": "training".
-       If NO (it's a standard immediate action like combat, dialogue, or exploration) -> set "action_type": "standard".
-       
-    4. ASSESS DIFFICULTY (Target Number): 
-    Evaluate how hard the action is in the realistic Grimdark world:
-       - 60 (Very Easy): Beating a weak, unarmed peasant.
-       - 80 (Easy): A basic task, fighting a drunk thug.
-       - 100 (Normal): Standard challenge, fighting a trained guard.
-       - 120 (Hard): Fighting a skilled knight (e.g., Barristan Selmy), sneaking into a heavily guarded keep.
-       - 140 (Extreme): Fighting multiple knights, attacking a dragon, surviving a deadly trap.
-    
-    === TAGS GUIDE (STRICT VALUES REQUIRED) ===
-        1. **minutes_passed** (Integer): Estimate the realistic duration of the player's current action in in-game minutes.
-            - 1-2 (combat turn, quick action), 
-            - 15-30 (conversation, lockpicking), 
-            - 60-120 (travel, exploring), 
-            - 480-600 (sleeping, waiting until morning).
-            - STRICT OVERRIDE: If the action involves ANY physical combat, dodging, running, or quick physical struggle, it MUST be 1 or 2.
+        4. INTENT CLASSIFICATION:
+           - If player attempts to spend a long period practicing/studying a specific skill -> "training".
+           - Otherwise -> "standard".
 
-        2. **health_impact** (Health consequences):
-           - "none" (no change)
-           - "heal_small" / "heal_full"
-           --- ONLY if the enemy successfully hit the player in the text, OR if there is a CRITICAL FAILURE in combat ---
-           - "dmg_light" (bruise, scratch: -5 HP)
-           - "dmg_medium" (sword wound, burn: -15 HP)
-           - "dmg_heavy" (critical injury: -30 HP)
-           - "dmg_fatal" (death: -100 HP)
+        5. TAGS GUIDE (STRICT VALUES REQUIRED):
+           - minutes_passed: 1-2 (combat/quick action - STRICT OVERRIDE), 15-30 (conversation/lockpicking), 60-120 (travel), 480-600 (sleep).
+           - health_impact: "none", "heal_small", "dmg_light" (-5 HP), "dmg_medium" (-15 HP), "dmg_heavy" (-30 HP), "dmg_fatal" (-100 HP). Apply ONLY if enemy hits player or critical failure.
+           - gold_impact: EXACT NUMBER as string (e.g., "-5", "10") IF specified. Otherwise: "none", "spend_small", "spend_medium", "spend_large", "earn_small", "earn_medium", "earn_large".
+           - energy_impact: "none", "spend_small" (minor stress/walk), "spend_medium" (argument, training), "spend_large" (combat, labor), "restore_small" (food/fire), "restore_medium" (tavern bed), "restore_full" (sleep).
+           - clocks_impact: {{"Scene_Tension": 1}} (if suspicious/aggressive/fail), {{"Scene_Tension": "clear"}} (if peaceful). Max is 4.
+        </rules>
 
-        3. **gold_impact** (Economy):
-           - EXACT NUMBER: If the player explicitly specifies an amount (e.g., "I give him 5 gold"), output EXACTLY that number as a string (e.g., "-5"). If they steal 10, output "10".
-           - VAGUE TAGS: If the amount is unspecified use this tags:
-                - "none"
-                - "spend_small" (food, small items)
-                - "spend_medium" (weapons, clothing)
-                - "spend_large" (horses, houses)
-                - "earn_small" (found a coin)
-                - "earn_medium" (quest reward)
-                - "earn_large" (grand treasure)
-
-        4. **inventory** - "inventory_new": ["Item Name"] (If obtained).
-           - "inventory_lost": ["Item Name"] (If lost/eaten).
-
-        5. **clocks_impact** (Tension & Event Management):
-            - **Local Tension (Scenes/Dialogues):** IT IS STRICTLY FORBIDDEN to invent new names for tension clocks. Use ONLY the fixed key {{"Scene_Tension": 1}} to increase tension (max 3) if the player acts suspiciously, aggressively, or fails a skill check.
-            - **Reset:** Use {{"Scene_Tension": "clear"}} to reset the tension when the conflict is resolved.
-
-        6. **"energy_impact"** (String): 
-            Evaluate the stamina cost of the action. Must be ONE of the following: 
-            - "none" (talking), 
-            - "spend_small" (minor stress, short walk), 
-            - "spend_medium" (argument, training, long walk), 
-            - "spend_large" (combat, heavy labor), 
-            - "restore_full" (sleep),
-            - "restore_small" (relaxing by the campfire, hearty food or lying in the bed),
-            - "restore_medium" (rest in tavern or brothel, having bath).
-    
-    OUTPUT EXACTLY IN THIS JSON FORMAT:
-    {{
-        "reasoning": "Lockpicking requires fine manipulation and stealth. Skill: Інтрига. The guard is distracted, granting ADVANTAGE. A standard lock is Normal difficulty (100). Takes a few minutes.",
-        "action_type": "standard",
-        "skill_used": Бойові або Військові або Інтрига або Управління або Немає,
-        "difficulty": 100,
-        "circumstance": "ADVANTAGE" or "NORMAL" or "DISADVANTAGE",
-        "verdict_text": "Short instruction for GM (e.g. 'Player successfully dodged' or 'Player failed and took damage. Scene tension +1.')",
-        "updates": {{
-             "minutes_passed": 15,
-             "health_impact": "none",
-             "energy_impact": "spend_small",
-             "gold_impact": "none" or "-5" or "spend_small",
-             "inventory_new": [new inventory],
-             "inventory_lost": [lost inventory],
-             "clocks_impact": {{"Scene_Tension": "..."}}
+        <example_output>
+        {{
+            "step1_tot_brainstorming": "Branch 1: Player is carefully lockpicking (Intrigue, DC 100, spend_small energy, 15 mins). Branch 2: Player forces the door (Combat, DC 80, spend_medium energy, 2 mins).",
+            "step2_adversarial_validation": "Rules Keeper: Player explicitly said 'I quietly pick the lock', so Branch 1 is correct. Sadist GM: The guard is nearby, so the player should have DISADVANTAGE. Tension must increase if they fail.",
+            "action_type": "standard",
+            "skill_used": "Інтрига",
+            "difficulty": 100,
+            "circumstance": "DISADVANTAGE",
+            "verdict_text": "Player attempts to pick the lock under pressure. If failed, the pick breaks and tension +1.",
+            "updates": {{
+                 "minutes_passed": 15,
+                 "health_impact": "none",
+                 "energy_impact": "spend_small",
+                 "gold_impact": "none",
+                 "inventory_new": [],
+                 "inventory_lost": [],
+                 "clocks_impact": {{}}
+            }}
         }}
-    }}
-    """
+        </example_output>
+
+        OUTPUT IN STRICT JSON FORMAT ONLY:
+        {{
+            "step1_tot_brainstorming": "Generate 2 distinct mechanical interpretations (Branches) of the action.",
+            "step2_adversarial_validation": "Have 'The Sadist GM' and 'Rules Keeper' critique the branches for realism and grimdark difficulty. Select the best one.",
+            "action_type": "standard",
+            "skill_used": "Бойові або Військові або Інтрига або Управління або None",
+            "difficulty": 100,
+            "circumstance": "ADVANTAGE" or "NORMAL" or "DISADVANTAGE",
+            "verdict_text": "Short instruction for GM",
+            "updates": {{
+                 "minutes_passed": 15,
+                 "health_impact": "none",
+                 "energy_impact": "spend_small",
+                 "gold_impact": "none" or "-5" or "spend_small",
+                 "inventory_new": [new inventory],
+                 "inventory_lost": [lost inventory],
+                 "clocks_impact": {{"Scene_Tension": "..."}}
+            }}
+        }}"""
 
     try:
         resp = model_worker.generate_content(prompt + "\n\nВАЖЛИВО: Відповідай ТІЛЬКИ JSON.")
