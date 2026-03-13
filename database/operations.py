@@ -3,7 +3,6 @@ import gspread
 import difflib
 import re
 import numpy as np
-from sentence_transformers import SentenceTransformer
 
 from database.sheets import db
 from config import (
