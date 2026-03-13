@@ -1,6 +1,7 @@
 # main.py
 import os
 import time
+import threading
 import telebot
 from flask import Flask, request
 
@@ -36,14 +37,22 @@ def webhook():
         return 'Forbidden', 403
 
 
+def background_loader():
+    """Функція для фонового завантаження важких баз та ШІ-моделей"""
+    print("⏳ [Background] Початок завантаження лору та бази NPC...")
+    refresh_npc_database()
+    load_lore_data()
+    print("✅ [Background] Всі бази та RAG моделі успішно завантажені!")
+
+
 if __name__ == "__main__":
     print("🤖 Запуск системи... Valar Morghulis.")
 
-    # 1. Завантажуємо дані з Google Sheets у кеш
-    load_lore_data()
-    refresh_npc_database()
+    # 1. Запускаємо важкі процеси в окремому фоновому потоці, щоб не блокувати сервер!
+    loader_thread = threading.Thread(target=background_loader)
+    loader_thread.start()
 
-    # 2. Отримуємо URL твого додатку на Render (наприклад: https://got-rpg-bot.onrender.com)
+    # 2. Отримуємо URL твого додатку на Render
     WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
     if WEBHOOK_URL:
@@ -53,11 +62,12 @@ if __name__ == "__main__":
         bot.set_webhook(url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}")
         print(f"🔗 Webhook встановлено на: {WEBHOOK_URL}")
 
-        # Запускаємо сервер
+        # Запускаємо сервер (це відбудеться миттєво, і Render буде задоволений)
         port = int(os.environ.get("PORT", 8080))
+        print(f"🚀 Запуск веб-сервера на порту {port}...")
         app.run(host='0.0.0.0', port=port)
     else:
-        # Режим Polling для локального тестування (на твоєму ПК)
+        # Режим Polling для локального тестування
         print("⚠️ Змінну WEBHOOK_URL не знайдено. Запуск у режимі Polling...")
         bot.remove_webhook()
         bot.infinity_polling()
