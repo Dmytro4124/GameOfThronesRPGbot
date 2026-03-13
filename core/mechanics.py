@@ -620,6 +620,7 @@ def resolve_action_mechanics(user_input, profile):
     
     OUTPUT EXACTLY IN THIS JSON FORMAT:
     {{
+        "reasoning": "Lockpicking requires fine manipulation and stealth. Skill: Інтрига. The guard is distracted, granting ADVANTAGE. A standard lock is Normal difficulty (100). Takes a few minutes.",
         "action_type": "standard",
         "skill_used": Бойові або Військові або Інтрига або Управління або Немає,
         "difficulty": 100,
