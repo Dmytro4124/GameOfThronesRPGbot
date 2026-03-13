@@ -418,7 +418,7 @@ def update_npcs_in_db(updates, legal_names_list_deprecated=None):
                     if field_key in col_map:
                         col_idx = col_map[field_key]
                         cells_to_update.append(gspread.Cell(row_idx, col_idx, val_str))
-                        else:
+                    else:
                         # ПЕРЕВІРКА ЧЕРЕЗ ЗОВНІШНЄ API (Замість сліпого блокування)
                         from core.external_api import fetch_character_from_api
 
