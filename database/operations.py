@@ -2,6 +2,8 @@ import json
 import gspread
 import difflib
 import re
+import numpy as np
+from sentence_transformers import SentenceTransformer
 
 from database.sheets import db
 from config import (
@@ -121,41 +123,84 @@ def get_house_stats_data(house_name):
         return {}
 
 
-# ================= РОБОТА З ЛОРОМ (KnowledgeBase) =================
+# ================= РОБОТА З ЛОРОМ (RAG / KnowledgeBase) =================
+import numpy as np
+from sentence_transformers import SentenceTransformer
+
+# Глобальні змінні
+EMBEDDING_MODEL = None
+LORE_VECTORS = None
+
 
 def load_lore_data():
-    """Завантажує базу знань у пам'ять бота при старті"""
-    global LORE_CACHE
+    """Завантажує базу знань, векторизує її (Numpy) при старті"""
+    global LORE_CACHE, LORE_VECTORS, EMBEDDING_MODEL
     try:
         sheet = db.get_sheet(TAB_KNOWLEDGE)
         if not sheet: return
 
         records = sheet.get_all_records()
-        LORE_CACHE = records
-        print(f"📚 Завантажено {len(records)} записів лору.")
+        LORE_CACHE = [row for row in records if str(row.get('Інформація', '')).strip()]
+
+        if not LORE_CACHE:
+            print("⚠️ База лору порожня.")
+            return
+
+        print(f"📚 Завантажено {len(LORE_CACHE)} записів лору. Ініціалізація RAG...")
+
+        if EMBEDDING_MODEL is None:
+            print("🧠 Завантаження моделі SentenceTransformer (зачекайте)...")
+            EMBEDDING_MODEL = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+
+        texts_to_embed = [
+            f"{row.get('Ключові слова', '')} {row.get('Інформація', '')}"
+            for row in LORE_CACHE
+        ]
+
+        print("🔢 Обчислення векторів (Embeddings)...")
+        # Зберігаємо вектори як звичайний Numpy масив
+        LORE_VECTORS = EMBEDDING_MODEL.encode(texts_to_embed, convert_to_numpy=True)
+
+        print(f"✅ [RAG] Вектори успішно створено для {len(LORE_CACHE)} записів!")
+
     except Exception as e:
-        print(f"⚠️ Не вдалося завантажити KnowledgeBase: {e}")
+        print(f"⚠️ Не вдалося ініціалізувати векторну базу KnowledgeBase: {e}")
         LORE_CACHE = []
+        LORE_VECTORS = None
 
 
 def get_relevant_context(user_text, current_location):
-    """Шукає в базі інформацію, яка відповідає словам гравця або локації."""
-    found_info = []
-    search_text = (user_text + " " + current_location).lower()
+    """Семантичний пошук найрелевантнішого лору через Numpy L2 Distance"""
+    if LORE_VECTORS is None or EMBEDDING_MODEL is None or not LORE_CACHE:
+        return "Немає особливих відомостей."
 
-    for row in LORE_CACHE:
-        keywords = str(row.get('Ключові слова', '')).lower().split(',')
-        content = row.get('Інформація', '')
+    try:
+        search_query = f"{current_location}. {user_text}"
+        query_vector = EMBEDDING_MODEL.encode([search_query], convert_to_numpy=True)
 
-        for key in keywords:
-            key = key.strip()
-            if key and key in search_text:
+        # Рахуємо L2 дистанцію (Евклідову відстань) між запитом і всією базою
+        # Це математичний аналог того, що робив FAISS IndexFlatL2
+        distances = np.linalg.norm(LORE_VECTORS - query_vector, axis=1)
+
+        # Отримуємо індекси 3 найменших дистанцій (найбільш схожі)
+        top_k = 3
+        top_indices = np.argsort(distances)[:top_k]
+
+        found_info = []
+        for idx in top_indices:
+            # Відсіюємо "сміття", дистанція > 15.0 означає відсутність смислового зв'язку
+            if distances[idx] < 15.0:
+                content = LORE_CACHE[idx].get('Інформація', '')
                 found_info.append(f"- {content}")
-                break
 
-    if found_info:
-        return "\n".join(found_info[:5])
-    return "Немає особливих відомостей."
+        if found_info:
+            return "\n".join(found_info)
+
+        return "Немає особливих відомостей."
+
+    except Exception as e:
+        print(f"⚠️ Помилка векторного пошуку: {e}")
+        return "Немає особливих відомостей."
 
 
 # ================= РОБОТА З NPC =================
@@ -373,9 +418,42 @@ def update_npcs_in_db(updates, legal_names_list_deprecated=None):
                     if field_key in col_map:
                         col_idx = col_map[field_key]
                         cells_to_update.append(gspread.Cell(row_idx, col_idx, val_str))
-            else:
-                # Галюцинація підтверджена
-                print(f"🛡️ [БЛОКУВАННЯ ГАЛЮЦИНАЦІЇ] ШІ придумав NPC '{target_name}'. Ігноруємо!")
+                        else:
+                        # ПЕРЕВІРКА ЧЕРЕЗ ЗОВНІШНЄ API (Замість сліпого блокування)
+                        from core.external_api import fetch_character_from_api
+
+                        print(f"🔍 [API CHECK] Персонажа '{target_name}' немає локально. Шукаємо в API Ice & Fire...")
+                        api_npc = fetch_character_from_api(target_name)
+
+                        if api_npc:
+                            print(f"🌐 [API SUCCESS] Знайдено канонічного персонажа: {api_npc['Name']}! Додаємо в базу.")
+
+                            # Збираємо дані у масив для запису в кінець таблиці.
+                            # УВАГА: Переконайся, що порядок цих змінних відповідає порядку колонок у твоїй Google Таблиці (NPC)
+                            new_row = [
+                                api_npc["Status"],
+                                api_npc["Name"],
+                                api_npc["Location"],
+                                api_npc["Description"],
+                                api_npc["Character"],
+                                api_npc["Goal"],
+                                api_npc["Relation_Player"],
+                                api_npc["Memory_Anchor"],
+                                api_npc["Relation_NPCs"],
+                                api_npc["Secrets"],
+                                api_npc["Is_Canon"],
+                                api_npc["Inventory"]
+                            ]
+
+                            try:
+                                worksheet.append_row(new_row)
+                                print(f"💾 [SAVED] {api_npc['Name']} успішно завантажений у Вестерос.")
+                            except Exception as append_err:
+                                print(
+                                    f"❌ [API SAVE ERROR] Не вдалося записати {api_npc['Name']} у таблицю: {append_err}")
+                        else:
+                            # Якщо немає ні в нас, ні в API - це 100% галюцинація
+                            print(f"🛡️ [БЛОКУВАННЯ ГАЛЮЦИНАЦІЇ] ШІ придумав NPC '{target_name}'. Ігноруємо!")
 
         if cells_to_update:
             worksheet.update_cells(cells_to_update)

@@ -8,3 +8,6 @@ protobuf~=5.29.5
 telebot~=0.0.5
 google-api-python-client~=2.188.0
 requests~=2.32.5
+pytest~=9.0.2
+numpy~=2.4.3
+sentence-transformers~=5.3.0

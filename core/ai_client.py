@@ -12,21 +12,28 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 class AIWrapper:
     """
     Обгортка для сумісності зі старим кодом.
-    Дозволяє використовувати .generate_content() без змін в інших файлах.
+    Використовує нативний JSON Mode від Google Gemini для 100% стабільності парсингу.
     """
 
     def __init__(self, model_name, temperature=0.7):
         self.model_name = model_name
         self.temperature = temperature
 
-    def generate_content(self, prompt):
-        # Виклик через новий SDK з конфігурацією температури
+    def generate_content(self, prompt, require_json=True):
+        # Налаштовуємо конфігурацію
+        config_args = {
+            "temperature": self.temperature
+        }
+
+        # ВАЖЛИВО: Змушуємо API повертати виключно валідний JSON!
+        if require_json:
+            config_args["response_mime_type"] = "application/json"
+
+        # Виклик через новий SDK
         return client.models.generate_content(
             model=self.model_name,
             contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=self.temperature
-            )
+            config=types.GenerateContentConfig(**config_args)
         )
 
 
@@ -36,30 +43,19 @@ model_worker = AIWrapper(MODEL_WORKER_NAME, temperature=MODEL_WORKER_TEMP)
 
 
 def clean_and_parse_json(text):
-    """Витягує JSON з тексту. Підтримує і словники {}, і списки []."""
+    """
+    Безпечно парсить JSON.
+    Оскільки тепер ми використовуємо application/json, складні регулярні вирази більше не потрібні.
+    """
     try:
-        text = text.replace("```json", "").replace("```", "").strip()
-        start_obj = text.find('{')
-        start_arr = text.find('[')
+        # На всякий випадок чистимо від можливих markdown-тегів (хоча API має їх блокувати)
+        clean_text = text.replace("```json", "").replace("```", "").strip()
 
-        possible_starts = [i for i in [start_obj, start_arr] if i != -1]
-        if not possible_starts:
-            return None
-
-        start_index = min(possible_starts)
-        end_index = text.rfind('}') if start_index == start_obj else text.rfind(']')
-
-        if start_index != -1 and end_index != -1 and end_index > start_index:
-            json_str = text[start_index: end_index + 1]
-
-            # === РІШЕННЯ: strict=False дозволяє переноси рядків ===
-            return json.loads(json_str, strict=False)
-
-        return None
+        # strict=False дозволяє переноси рядків (\n) всередині тексту
+        return json.loads(clean_text, strict=False)
 
     except json.JSONDecodeError as e:
-        # Тепер ми будемо бачити, якщо JSON зламався!
-        print(f"⚠️ Помилка парсингу JSON (JSONDecodeError): {e}")
+        print(f"⚠️ Помилка парсингу JSON (JSONDecodeError): {e}\nТекст: {text[:150]}...")
         return None
     except Exception as e:
         print(f"⚠️ Помилка парсингу: {e}")
@@ -67,22 +63,21 @@ def clean_and_parse_json(text):
 
 
 def ask_gemini(prompt, use_worker=False):
-    """Універсальна функція запиту з повторними спробами та очищенням JSON."""
+    """Універсальна функція запиту з повторними спробами."""
     retries = 3
     delay = 2
     active_model = model_worker if use_worker else model
 
-    strict_prompt = prompt + "\n\nВАЖЛИВО: Відповідай ТІЛЬКИ валідним JSON кодом. Без Markdown. Без слів 'Ось ваш JSON'."
-
     for attempt in range(retries):
         try:
-            response = active_model.generate_content(strict_prompt)
+            # Модель вже знає, що треба повертати JSON завдяки обгортці AIWrapper
+            response = active_model.generate_content(prompt, require_json=True)
             result = clean_and_parse_json(response.text)
 
             if result:
                 return result
 
-            print(f"⚠️ Спроба {attempt + 1}: Отримано не JSON. Текст: {response.text[:50]}...")
+            print(f"⚠️ Спроба {attempt + 1}: Помилка парсингу нативного JSON.")
             time.sleep(delay)
 
         except Exception as e:
@@ -90,5 +85,5 @@ def ask_gemini(prompt, use_worker=False):
             time.sleep(delay)
             delay += 2
 
-    print("❌ Не вдалося отримати JSON від AI.")
+    print("❌ Не вдалося отримати валідний JSON від AI.")
     return None

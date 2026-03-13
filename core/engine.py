@@ -180,7 +180,7 @@ def process_game_turn(chat_id, user_input):
     <scene_state>
     CURRENT TIME: {current_time_str}
     CURRENT LOCATION: {curr_loc}
-    VISIBLE NPC ROSTER (STRICT RULE: DO NOT hallucinate characters. Use ONLY these):
+    VISIBLE NPC ROSTER (Current characters in the scene):
     {npc_context_text}
     </scene_state>
 
@@ -227,7 +227,7 @@ def process_game_turn(chat_id, user_input):
     1. OBJECT PERMANENCE: If physical items or gold are exchanged, you MUST update the NPC's "Inventory" field.
     2. EMPTY STRINGS: If a specific field has NOT changed, you MUST set its value to exactly "". 
     3. FORBIDDEN WORDS: Do not write "no change", "same", or "без змін". Use "".
-    4. EXACT NAMES: The "Name" field must be an exact copy from the VISIBLE NPC ROSTER.
+    4. NPC SUMMONING RULE: You MUST use exact names from the VISIBLE NPC ROSTER. HOWEVER, if the story logically requires a famous canonical Game of Thrones character to appear (e.g., Lord Stark, Oberyn), you MAY introduce them by outputting their exact canonical Full Name in the "Name" field. NEVER invent fake names.
     </json_generation_rules>
 
     <example_output>
