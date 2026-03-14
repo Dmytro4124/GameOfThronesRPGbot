@@ -6,13 +6,19 @@ import re
 # Імпортуємо нашого ШІ-клієнта для функцій, які потребують суддівства
 from core.ai_client import model_worker, clean_and_parse_json
 
+# === КОНСТАНТИ СИСТЕМИ ===
+MINUTES_IN_DAY = 1440
+DEFAULT_ENERGY = 100
+DAYS_IN_MONTH = 30
+MONTHS_IN_YEAR = 12
 
-def safe_int(value):
-    """Допоміжна функція: перетворює будь-що на ціле число або повертає 0"""
+
+def safe_int(value, default=0):
+    """Допоміжна функція: перетворює будь-що на ціле число або повертає default"""
     try:
         return int(float(str(value)))
     except (ValueError, TypeError):
-        return 0
+        return default
 
 
 def apply_system_impacts(profile, ai_impacts):
@@ -23,17 +29,12 @@ def apply_system_impacts(profile, ai_impacts):
     logs = []
 
     # === 1. ОБРОБКА ЧАСУ ТА КАЛЕНДАРЯ ===
-    # Константи календаря
-    DAYS_IN_MONTH = 30
-    MONTHS_IN_YEAR = 12
-
     time_str = profile.get("Ігровий час", "298 рік В.Е., 1-й місяць, День 1, 08:00")
     minutes_passed = ai_impacts.get("minutes_passed", 0)
     energy_impact = ai_impacts.get("energy_impact", "none")
 
     if minutes_passed > 0 or energy_impact == "sleep":
-        # Витягуємо поточний рік, місяць та день за допомогою регулярного виразу
-        # Очікуваний формат: "298 рік В.Е., 1-й місяць, День 1..."
+        # Витягуємо поточний рік, місяць та день
         date_match = re.search(r'(\d+)\s*рік.*?(\d+)-й\s*місяць.*?День\s*(\d+)', time_str)
 
         if date_match:
@@ -41,7 +42,6 @@ def apply_system_impacts(profile, ai_impacts):
             current_month = int(date_match.group(2))
             current_day = int(date_match.group(3))
         else:
-            # Fallback, якщо рядок зламаний
             current_year, current_month, current_day = 298, 1, 1
 
         # Витягуємо поточні хвилини
@@ -52,16 +52,14 @@ def apply_system_impacts(profile, ai_impacts):
             if time_match:
                 current_minutes = int(time_match.group(1)) * 60 + int(time_match.group(2))
             else:
-                current_minutes = 8 * 60  # За замовчуванням 08:00
+                current_minutes = 8 * 60
 
         old_time_str = f"{current_minutes // 60:02d}:{current_minutes % 60:02d}"
 
         # Логіка сну: мотаємо час до 08:00 наступного ранку
         if energy_impact == "sleep":
-            # (Хвилин до кінця поточної доби) + (8 годин наступної доби)
-            sleep_minutes = (1440 - current_minutes) + (8 * 60)
-            minutes_passed = max(minutes_passed, sleep_minutes)  # Беремо більше значення
-
+            sleep_minutes = (MINUTES_IN_DAY - current_minutes) + (8 * 60)
+            minutes_passed = max(minutes_passed, sleep_minutes)
 
         # Зменшення кулдаунів тренування
         if minutes_passed > 0:
@@ -75,31 +73,23 @@ def apply_system_impacts(profile, ai_impacts):
                     else:
                         cooldowns[skill_name] = new_time
 
-                # Видаляємо кулдауни, які завершилися
                 for skill_name in keys_to_remove:
                     del cooldowns[skill_name]
 
                 profile["training_cooldowns"] = cooldowns
-        # ===================================================
 
         # --- МАТЕМАТИКА ЧАСУ ---
         new_total_minutes = current_minutes + minutes_passed
 
-        # 1. Рахуємо нові години та хвилини
-        days_passed = new_total_minutes // 1440
-        new_minutes_of_day = new_total_minutes % 1440
-
+        days_passed = new_total_minutes // MINUTES_IN_DAY
+        new_minutes_of_day = new_total_minutes % MINUTES_IN_DAY
         exact_time_str = f"{new_minutes_of_day // 60:02d}:{new_minutes_of_day % 60:02d}"
 
-        # 2. Рахуємо нові дні, місяці та роки
-        # Переводимо в 0-індексовану систему для зручності ділення (День 1 = 0, Місяць 1 = 0)
         total_days = (current_day - 1) + days_passed
-
         new_day = (total_days % DAYS_IN_MONTH) + 1
         months_passed = total_days // DAYS_IN_MONTH
 
         total_months = (current_month - 1) + months_passed
-
         new_month = (total_months % MONTHS_IN_YEAR) + 1
         years_passed = total_months // MONTHS_IN_YEAR
 
@@ -121,9 +111,8 @@ def apply_system_impacts(profile, ai_impacts):
 
     # === 1.1. ОБРОБКА ЕНЕРГІЇ ===
     if energy_impact != "none" or energy_impact == "sleep":
-        current_energy = safe_int(profile.get("Енергія", 100))
+        current_energy = safe_int(profile.get("Енергія", DEFAULT_ENERGY), DEFAULT_ENERGY)
 
-        # Задаємо діапазони: (мінімум, максимум)
         energy_ranges_negative = {
             "spend_small": (1, 3),
             "spend_medium": (4, 8),
@@ -135,15 +124,11 @@ def apply_system_impacts(profile, ai_impacts):
         }
 
         delta = 0
-
-        # Обробка повного відновлення (сон або повний відпочинок)
         if energy_impact in ["sleep", "restore_full"]:
             delta = 100 - current_energy
-        # Обробка часткового відновлення
         elif energy_impact in energy_ranges_positive:
             min_cost, max_cost = energy_ranges_positive[energy_impact]
             delta = random.randint(min_cost, max_cost)
-        # Обробка витрати енергії
         elif energy_impact in energy_ranges_negative:
             min_cost, max_cost = energy_ranges_negative[energy_impact]
             delta = -random.randint(min_cost, max_cost)
@@ -152,7 +137,6 @@ def apply_system_impacts(profile, ai_impacts):
 
         if new_energy != current_energy:
             profile["Енергія"] = new_energy
-            # Форматуємо знак для красивого логу (+15 або -5)
             sign = "+" if delta > 0 else ""
             logs.append(f"⚡ Енергія: {current_energy} -> {new_energy} ({sign}{delta})")
 
@@ -160,21 +144,15 @@ def apply_system_impacts(profile, ai_impacts):
     damage_tag = ai_impacts.get("health_impact", "none")
     hp_change = 0
 
-    if damage_tag == "heal_small":
-        hp_change = random.randint(5, 25)
-    elif damage_tag == "heal_full":
-        hp_change = 100
-    elif damage_tag == "dmg_light":
-        hp_change = -random.randint(1, 5)
-    elif damage_tag == "dmg_medium":
-        hp_change = -random.randint(5, 25)
-    elif damage_tag == "dmg_heavy":
-        hp_change = -random.randint(25, 50)
-    elif damage_tag == "dmg_fatal":
-        hp_change = -100
+    if damage_tag == "heal_small": hp_change = random.randint(5, 25)
+    elif damage_tag == "heal_full": hp_change = 100
+    elif damage_tag == "dmg_light": hp_change = -random.randint(1, 5)
+    elif damage_tag == "dmg_medium": hp_change = -random.randint(5, 25)
+    elif damage_tag == "dmg_heavy": hp_change = -random.randint(25, 50)
+    elif damage_tag == "dmg_fatal": hp_change = -100
 
     if hp_change != 0:
-        old_hp = safe_int(profile.get("Здоров'я", 100))
+        old_hp = safe_int(profile.get("Здоров'я", 100), 100)
         new_hp = max(0, min(100, old_hp + hp_change))
         profile["Здоров'я"] = new_hp
         logs.append(f"❤️ Здоров'я: {old_hp} -> {new_hp}")
@@ -183,26 +161,18 @@ def apply_system_impacts(profile, ai_impacts):
         gold_tag = str(ai_impacts.get("gold_impact", "none")).strip()
         gold_change = 0
 
-        # СПРОБА 1: Детермінована економіка (якщо ШІ передав точне число, наприклад "-5" або "10")
         try:
             gold_change = int(gold_tag)
         except ValueError:
-            # СПРОБА 2: Якщо це текст (тег), використовуємо генеративну економіку
-            if gold_tag == "spend_small":
-                gold_change = -random.randint(5, 15)
-            elif gold_tag == "spend_medium":
-                gold_change = -random.randint(50, 150)
-            elif gold_tag == "spend_large":
-                gold_change = -random.randint(300, 800)
-            elif gold_tag == "earn_small":
-                gold_change = random.randint(10, 30)
-            elif gold_tag == "earn_medium":
-                gold_change = random.randint(100, 300)
-            elif gold_tag == "earn_large":
-                gold_change = random.randint(1000, 2000)
+            if gold_tag == "spend_small": gold_change = -random.randint(5, 15)
+            elif gold_tag == "spend_medium": gold_change = -random.randint(50, 150)
+            elif gold_tag == "spend_large": gold_change = -random.randint(300, 800)
+            elif gold_tag == "earn_small": gold_change = random.randint(10, 30)
+            elif gold_tag == "earn_medium": gold_change = random.randint(100, 300)
+            elif gold_tag == "earn_large": gold_change = random.randint(1000, 2000)
 
         if gold_change != 0:
-            old_gold = safe_int(profile.get("Особисте Золото", 0))
+            old_gold = safe_int(profile.get("Особисте Золото", 0), 0)
             new_gold = max(0, old_gold + gold_change)
             profile["Особисте Золото"] = new_gold
             logs.append(f"💰 Золото: {gold_change:+}")
@@ -225,8 +195,9 @@ def apply_system_impacts(profile, ai_impacts):
     if lost_items:
         if isinstance(lost_items, str): lost_items = [lost_items]
         for item in lost_items:
+            # Точний збіг без урахування регістру для уникнення багів підрядків
             for existing_item in inventory_list:
-                if item.lower() in existing_item.lower():
+                if item.strip().lower() == existing_item.strip().lower():
                     inventory_list.remove(existing_item)
                     logs.append(f"➖ Втрачено: {existing_item}")
                     break
@@ -239,12 +210,15 @@ def apply_system_impacts(profile, ai_impacts):
         for skill_name, val in skill_updates.items():
             target_key = None
             for key in profile.keys():
-                if skill_name in key:
+                clean_skill = skill_name.strip().lower()
+                clean_key = key.strip().lower()
+                # Перевіряємо точний збіг ключа (або з ігноруванням слова "навички")
+                if clean_skill == clean_key or f"{clean_skill} навички" == clean_key:
                     target_key = key
                     break
 
             if target_key:
-                old_val = safe_int(profile[target_key])
+                old_val = safe_int(profile[target_key], 10)
                 new_val = min(100, old_val + val)
                 profile[target_key] = new_val
                 logs.append(f"📈 {skill_name}: +{val} (Стало {new_val})")
@@ -262,12 +236,12 @@ def apply_system_impacts(profile, ai_impacts):
                     del current_clocks[clock_name]
                     logs.append(f"⏱️ Годинник '{clock_name}' скинуто.")
             else:
-                current_val, max_val = 0, 4  # Годинник на 4 кроки за замовчуванням
+                current_val, max_val = 0, 4
                 if clock_name in current_clocks:
                     parts = current_clocks[clock_name].split('/')
                     current_val, max_val = int(parts[0]), int(parts[1])
 
-                new_val = min(max_val, current_val + safe_int(change))
+                new_val = min(max_val, current_val + safe_int(change, 0))
                 current_clocks[clock_name] = f"{new_val}/{max_val}"
                 logs.append(f"⏱️ Годинник '{clock_name}': {new_val}/{max_val}")
 
@@ -281,6 +255,10 @@ def validate_action(user_input, profile):
     Окрема функція-фільтр (Цензор).
     Перевіряє, чи не намагається гравець зламати гру чітами, анахронізмами чи діями за когось іншого.
     """
+    # Жорстка перевірка смерті ДО виклику ШІ
+    if safe_int(profile.get("Здоров'я", 100), 100) <= 0:
+        return False, "Ви мертві. Ваша історія завершена, і ви не можете діяти."
+
     char_name = profile.get("Ім'я", "Герой")
 
     prompt = f"""
@@ -329,14 +307,9 @@ def validate_action(user_input, profile):
            - ❌ "I tell him to leave and he does." ("...and he does" is the violation).
            - ✅ CORRECT: "I tell him to leave." (Stop there).
 
-
         === PROHIBITION CRITERIA (RETURN is_valid: false) ===
         1. **Anachronisms:** Mention of modern technologies (F-16, telephone, automatic weapon, internet, NATO, Biden).
         2. **ANTI-GOD-MODING (REALITY CHECK):** If the player attempts to invent reality (e.g., "I find a chest of infinite gold", "I suddenly have a Valyrian sword", "I instantly kill the boss"), you MUST automatically classify the OUTCOME as "FAILURE". 
-            - Set "gold_impact" to "none".
-            - Set "inventory_new" to [].
-            - Add to "clocks_impact": {{"Scene_Tension": 1}}.
-            - In "verdict_text", explain that the universe rejects their delusion (e.g., "Player tried to hallucinate gold, but found only dirt.").
         3. **Meta-gaming:** Attempts to control the plot as an author (“I want a dragon to fly in and save everyone,” “Skip to the end of the game”).
         4. **Absurdity:** Actions that are physically impossible for a human (unless it is magic available in the lore, e.g., wargs).
 
@@ -347,9 +320,6 @@ def validate_action(user_input, profile):
 
         === YOUR VERDICT ===
         If the player describes the RESULT, reject the action.
-
-        === FORBID TO PLAY AFTER DEATH ===
-        If {profile.get("Здоров'я", 100) < 0} Game is ended and player can not continue.
 
         RESPONSE (JSON):
         {{
@@ -374,20 +344,11 @@ def process_training_request(user_input, profile):
     """
     Worker (Тренування): Хардкорна система (+1 бал), Гібрид Енергії та Кулдаунів (Асиміляція).
     """
-    import json
-    import random
-    from core.ai_client import model_worker, clean_and_parse_json
-
-    def safe_int(val, default=10):
-        try:
-            return int(val)
-        except:
-            return default
-
-    current_energy = safe_int(profile.get("Енергія", 100))
+    current_energy = safe_int(profile.get("Енергія", DEFAULT_ENERGY), DEFAULT_ENERGY)
     if current_energy <= 0:
         return {
-            "error": "Ваша енергія на нулі. В очах темніє, ноги не тримають. Тренування абсолютно неможливе — вам терміново потрібен сон, інакше ви втратите свідомість на місці."}
+            "error": "Ваша енергія на нулі. В очах темніє, ноги не тримають. Тренування абсолютно неможливе — вам терміново потрібен сон, інакше ви втратите свідомість на місці."
+        }
 
     prompt = f"""
     YOU ARE THE GAME MASTER. The player might be trying to train a skill.
@@ -409,79 +370,81 @@ def process_training_request(user_input, profile):
     }}
     """
 
+    # Виклик ШІ обгорнутий локально
     try:
         resp = model_worker.generate_content(prompt)
         data = clean_and_parse_json(resp.text)
-
-        if not data or not data.get("is_training"): return None
-        if not data.get("is_possible"):
-            return {
-                "error": f"Зараз неможливо розпочати тренування: {data.get('reason_if_failed', 'Небезпечна ситуація.')}"}
-
-        skill_target = data.get("skill")
-        method = data.get("method", "solo")
-
-        # === ПЕРЕВІРКА КУЛДАУНУ (АСИМІЛЯЦІЇ) ===
-        cooldowns = profile.get("training_cooldowns", {})
-        current_cooldown_mins = safe_int(cooldowns.get(skill_target, 0), 0)
-
-        if current_cooldown_mins > 0:
-            days_left = max(1, current_cooldown_mins // 1440)
-            return {
-                "error": f"Ваше тіло та розум ще засвоюють попередні уроки з навички '{skill_target}'. Нервовій системі потрібен час на відновлення. Зачекайте ще приблизно {days_left} ігрових днів, перш ніж тренувати це знову."}
-
-        current_val = safe_int(profile.get(f"{skill_target} навички", profile.get(skill_target, 10)))
-        user_gold = safe_int(profile.get("Особисте Золото", 0))
-        current_energy = safe_int(profile.get("Енергія", 100))
-
-        # Математика Часу та Золота
-        if method == "solo":
-            if current_val >= 50:
-                return {
-                    "error": f"Навичка '{skill_target}' вже {current_val}. Межа самостійного навчання досягнута. Шукайте майстра."}
-            cost_gold = 0
-            cost_time_days = 3 + (current_val // 10)
-        else:  # mentor
-            cost_gold = current_val * 2
-            cost_time_days = 2 + (current_val // 15)
-            if user_gold < cost_gold:
-                return {"error": f"Не вистачає золота. Потрібно {cost_gold} 🪙, а є {user_gold} 🪙."}
-
-        # Гібридна система Енергії та Перетренування
-        energy_cost = 40
-        stat_gain = 0
-        temp_debuff = 0
-
-        # Встановлюємо новий кулдаун: час самого тренування + 7 днів відпочинку (у хвилинах)
-        new_cooldown_mins = (cost_time_days + 7) * 1440
-
-        if current_energy >= energy_cost:
-            stat_gain = 1
-            story_prompt = f"SYSTEM: Player spends {cost_time_days} days and {cost_gold} gold practicing '{skill_target}' ({method}). They gain +1 to the skill but lose 40 Energy. Describe the grueling process."
-        else:
-            if random.random() < 0.75:  # 75% травма
-                temp_debuff = random.randint(15, 20)
-                new_cooldown_mins = 14 * 1440  # 14 днів кулдауну через травму
-                story_prompt = f"SYSTEM: Player tried to train '{skill_target}' while exhausted. IT WAS A DISASTER. They tore a muscle/had a breakdown. Gain NO stats, get -{temp_debuff} temporary debuff. Describe the painful failure."
-            else:  # 25% диво
-                stat_gain = 1
-                story_prompt = f"SYSTEM: Player fanatically trained '{skill_target}' while completely exhausted. Miraculously gained +1, but collapsed after. Describe this desperate push."
-
-        return {
-            "success": True,
-            "skill": skill_target,
-            "cost_gold": cost_gold,
-            "cost_time": cost_time_days,
-            "stat_gain": stat_gain,
-            "energy_cost": energy_cost,
-            "temp_debuff": temp_debuff,
-            "set_cooldown": new_cooldown_mins,  # Передаємо кулдаун у хвилинах
-            "story_prompt": story_prompt
-        }
-
     except Exception as e:
         print(f"⚠️ Training Error: {e}")
         return None
+
+    if not data or not data.get("is_training"): return None
+    if not data.get("is_possible"):
+        return {
+            "error": f"Зараз неможливо розпочати тренування: {data.get('reason_if_failed', 'Небезпечна ситуація.')}"
+        }
+
+    skill_target = data.get("skill")
+    method = data.get("method", "solo")
+
+    # === ПЕРЕВІРКА КУЛДАУНУ (АСИМІЛЯЦІЇ) ===
+    cooldowns = profile.get("training_cooldowns", {})
+    current_cooldown_mins = safe_int(cooldowns.get(skill_target, 0), 0)
+
+    if current_cooldown_mins > 0:
+        days_left = max(1, current_cooldown_mins // MINUTES_IN_DAY)
+        return {
+            "error": f"Ваше тіло та розум ще засвоюють попередні уроки з навички '{skill_target}'. Нервовій системі потрібен час на відновлення. Зачекайте ще приблизно {days_left} ігрових днів, перш ніж тренувати це знову."
+        }
+
+    current_val = safe_int(profile.get(f"{skill_target} навички", profile.get(skill_target, 10)), 10)
+    user_gold = safe_int(profile.get("Особисте Золото", 0), 0)
+
+    # Математика Часу та Золота
+    if method == "solo":
+        if current_val >= 50:
+            return {
+                "error": f"Навичка '{skill_target}' вже {current_val}. Межа самостійного навчання досягнута. Шукайте майстра."
+            }
+        cost_gold = 0
+        cost_time_days = 3 + (current_val // 10)
+    else:  # mentor
+        cost_gold = current_val * 2
+        cost_time_days = 2 + (current_val // 15)
+        if user_gold < cost_gold:
+            return {"error": f"Не вистачає золота. Потрібно {cost_gold} 🪙, а є {user_gold} 🪙."}
+
+    # Гібридна система Енергії та Перетренування
+    energy_cost = 40
+    stat_gain = 0
+    temp_debuff = 0
+
+    # Встановлюємо новий кулдаун: час самого тренування + 7 днів відпочинку (у хвилинах)
+    new_cooldown_mins = (cost_time_days + 7) * MINUTES_IN_DAY
+
+    if current_energy >= energy_cost:
+        stat_gain = 1
+        story_prompt = f"SYSTEM: Player spends {cost_time_days} days and {cost_gold} gold practicing '{skill_target}' ({method}). They gain +1 to the skill but lose 40 Energy. Describe the grueling process."
+    else:
+        if random.random() < 0.75:  # 75% травма
+            temp_debuff = random.randint(15, 20)
+            new_cooldown_mins = 14 * MINUTES_IN_DAY  # 14 днів кулдауну через травму
+            story_prompt = f"SYSTEM: Player tried to train '{skill_target}' while exhausted. IT WAS A DISASTER. They tore a muscle/had a breakdown. Gain NO stats, get -{temp_debuff} temporary debuff. Describe the painful failure."
+        else:  # 25% диво
+            stat_gain = 1
+            story_prompt = f"SYSTEM: Player fanatically trained '{skill_target}' while completely exhausted. Miraculously gained +1, but collapsed after. Describe this desperate push."
+
+    return {
+        "success": True,
+        "skill": skill_target,
+        "cost_gold": cost_gold,
+        "cost_time": cost_time_days,
+        "stat_gain": stat_gain,
+        "energy_cost": energy_cost,
+        "temp_debuff": temp_debuff,
+        "set_cooldown": new_cooldown_mins,
+        "story_prompt": story_prompt
+    }
 
 
 def resolve_action_mechanics(user_input, profile):
@@ -490,47 +453,34 @@ def resolve_action_mechanics(user_input, profile):
     ІНТЕГРОВАНО: Система 2d50 (Roll-Over), Перевага/Недолік, Хардкорні Крити та Прокачка.
     Не пише художній текст!
     """
-    import random
-    from core.ai_client import model_worker, clean_and_parse_json
-    import json
-
-    def safe_int(val, default=10):
-        try:
-            return int(val)
-        except (ValueError, TypeError):
-            return default
-
     def roll_2d50():
         return random.randint(1, 50) + random.randint(1, 50)
 
     skills = {
-        "Бойові": safe_int(profile.get("Бойові навички", 10)),
-        "Військові": safe_int(profile.get("Військові навички", 10)),
-        "Інтрига": safe_int(profile.get("Інтрига", 10)),
-        "Управління": safe_int(profile.get("Управління", 10))
+        "Бойові": safe_int(profile.get("Бойові навички", 10), 10),
+        "Військові": safe_int(profile.get("Військові навички", 10), 10),
+        "Інтрига": safe_int(profile.get("Інтрига", 10), 10),
+        "Управління": safe_int(profile.get("Управління", 10), 10)
     }
 
     clocks_info = profile.get("Годинники", {})
 
-
-    # ЖОРСТКЕ ПЕРЕХОПЛЕННЯ (ВТРАТА СВІДОМОСТІ)
-    current_energy = safe_int(profile.get("Енергія", 100))
+    # ЖОРСТКЕ ПЕРЕХОПЛЕННЯ (ВТРАТА СВІДОМОСТІ ДО ШІ)
+    current_energy = safe_int(profile.get("Енергія", DEFAULT_ENERGY), DEFAULT_ENERGY)
     sleep_words = ["спл", "сон", "відпоч", "ляга", "sleep", "rest", "засин"]
 
-    # Якщо енергія 0, і гравець не намагається лягти спати цілеспрямовано
     if current_energy <= 0 and not any(w in user_input.lower() for w in sleep_words):
         updates = {
             "action_type": "standard",
             "skill_used": "None",
             "outcome": "CRITICAL FAILURE",
             "circumstance": "DISADVANTAGE",
-            "minutes_passed": 480,  # 8 годин без свідомості
-            "energy_impact": "sleep",  # Це відновить енергію
+            "minutes_passed": 480,
+            "energy_impact": "sleep",
             "health_impact": "none",
-            "clocks_impact": {"Scene_Tension": 1}  # Додаємо напругу, бо спати на підлозі - небезпечно
+            "clocks_impact": {"Scene_Tension": 1}
         }
         verdict = "MECHANICAL VERDICT: EXHAUSTION COLLAPSE! GM INFO: ABSOLUTE OVERRIDE. The player's energy is 0. Ignore their requested action. Describe how they suddenly lose consciousness and collapse on the spot from complete exhaustion. Fast forward 8 hours of them being passed out. Describe what happens to them while they are defenseless."
-
         return verdict, updates
 
     prompt = f"""<system>
@@ -617,107 +567,93 @@ def resolve_action_mechanics(user_input, profile):
             }}
         }}"""
 
+    # Виклик до ШІ ізольований
     try:
         resp = model_worker.generate_content(prompt + "\n\nВАЖЛИВО: Відповідай ТІЛЬКИ JSON.")
         data = clean_and_parse_json(resp.text)
-        if not data: return "MECHANICAL VERDICT: AUTO_SUCCESS", {}
+    except Exception as e:
+        print(f"⚠️ AI Worker Error: {e}")
+        data = None
 
-        skill_used = data.get("skill_used", "None")
-        circumstance = data.get("circumstance", "NORMAL")
-        updates = data.get("updates", {})
-        updates["action_type"] = data.get("action_type", "standard")
+    if not data:
+        # Безпечний фолбек у разі падіння API ШІ
+        return "MECHANICAL VERDICT: AUTO_SUCCESS", {"minutes_passed": 5, "skill_used": "Немає", "outcome": "SUCCESS", "difficulty": 0}
 
-        # === НОВЕ: ВИТЯГУЄМО СКЛАДНІСТЬ ДІЇ ВІД ШІ (Базова ціль - 100) ===
-        difficulty = safe_int(data.get("difficulty", 100))
-        # ================================================================
+    skill_used = data.get("skill_used", "None")
+    circumstance = data.get("circumstance", "NORMAL")
+    updates = data.get("updates", {})
+    updates["action_type"] = data.get("action_type", "standard")
+    difficulty = safe_int(data.get("difficulty", 100), 100)
 
-        # -------------------------------------------------
-        # МАТЕМАТИКА 2d50 ТА КРИТІВ ВІДБУВАЄТЬСЯ ТУТ (В ПАЙТОНІ)
-        # -------------------------------------------------
+    # -------------------------------------------------
+    # МАТЕМАТИКА 2d50 ТА КРИТІВ ВІДБУВАЄТЬСЯ ТУТ
+    # -------------------------------------------------
 
-        # ЖОРСТКИЙ ШТРАФ ЗА КРИТИЧНУ ВТОМУ
-        current_energy = safe_int(profile.get("Енергія", 100))
+    if current_energy <= 20 and skill_used in ["Бойові", "Військові"]:
+        circumstance = "DISADVANTAGE"
+        data["verdict_text"] = "[СИСТЕМНА ВТОМА: Гравець ледве тримається на ногах]. " + data.get('verdict_text', '')
 
-        if current_energy <= 20 and skill_used in ["Бойові", "Військові"]:
-            circumstance = "DISADVANTAGE"
-            data["verdict_text"] = "[СИСТЕМНА ВТОМА: Гравець ледве тримається на ногах]. " + data.get('verdict_text',
-                                                                                                      '')
+    if skill_used in ["None", "Немає", "none", ""] or skill_used not in skills:
+        updates["skill_used"] = "Немає"
+        updates["outcome"] = "SUCCESS"
+        updates["dice_roll"] = "-"
+        updates["skill_val"] = 0
+        updates["total_score"] = 0
+        updates["difficulty"] = 0
+        return "MECHANICAL VERDICT: AUTO_SUCCESS! (No skill required).", updates
 
-        # Якщо дія не потребує навички - автоуспіх
-        if skill_used in ["None", "Немає", "none", ""] or skill_used not in skills:
-            updates["skill_used"] = "Немає"
-            updates["outcome"] = "SUCCESS"
-            # Прокидаємо фіктивні значення, щоб логер не малював "0 + 0 = 0" при автоуспіху
-            updates["dice_roll"] = "-"
-            updates["skill_val"] = 0
-            updates["total_score"] = 0
-            updates["difficulty"] = 0
-            return "MECHANICAL VERDICT: AUTO_SUCCESS! (No skill required).", updates
+    skill_val = skills[skill_used]
 
-        skill_val = skills[skill_used]
+    roll_1 = roll_2d50()
+    roll_2 = roll_2d50()
 
-        # Механіка Переваги / Недоліку (Більше = Краще)
-        roll_1 = roll_2d50()
-        roll_2 = roll_2d50()
+    if circumstance == "ADVANTAGE":
+        natural_roll = max(roll_1, roll_2)
+        roll_str = f"[{roll_1}, {roll_2}] -> {natural_roll}"
+    elif circumstance == "DISADVANTAGE":
+        natural_roll = min(roll_1, roll_2)
+        roll_str = f"[{roll_1}, {roll_2}] -> {natural_roll}"
+    else:
+        natural_roll = roll_1
+        roll_str = f"{natural_roll}"
 
-        if circumstance == "ADVANTAGE":
-            natural_roll = max(roll_1, roll_2)  # Беремо БІЛЬШИЙ
-            roll_str = f"[{roll_1}, {roll_2}] -> {natural_roll}"
-        elif circumstance == "DISADVANTAGE":
-            natural_roll = min(roll_1, roll_2)  # Беремо МЕНШИЙ
-            roll_str = f"[{roll_1}, {roll_2}] -> {natural_roll}"
-        else:
-            natural_roll = roll_1
-            roll_str = f"{natural_roll}"
+    total_score = natural_roll + skill_val
 
-        total_score = natural_roll + skill_val
+    if natural_roll >= 96:
+        outcome = "CRITICAL SUCCESS"
+    elif natural_roll <= 5:
+        outcome = "CRITICAL FAILURE"
+    elif total_score >= difficulty:
+        outcome = "SUCCESS"
+    else:
+        outcome = "FAILURE"
 
-        # Визначення результату (Більше = Краще)
-        if natural_roll >= 96:
-            outcome = "CRITICAL SUCCESS"
-        elif natural_roll <= 5:
-            outcome = "CRITICAL FAILURE"
-        # === НОВЕ: ПОРІВНЮЄМО ТОТАЛ СКОР ЗІ СКЛАДНІСТЮ ===
-        elif total_score >= difficulty:
-            outcome = "SUCCESS"
-        else:
-            outcome = "FAILURE"
+    verdict_str = f"MECHANICAL VERDICT: {outcome}! (Skill: {skill_used} [{skill_val}], Roll: {natural_roll}, Total: {total_score} vs DC {difficulty}). GM INFO: {data.get('verdict_text')}"
 
-        # Оновлено рядок вердикту, щоб передати Судді правильну ціль (DC)
-        verdict_str = f"MECHANICAL VERDICT: {outcome}! (Skill: {skill_used} [{skill_val}], Roll: {natural_roll}, Total: {total_score} vs DC {difficulty}). GM INFO: {data.get('verdict_text')}"
+    updates["skill_used"] = skill_used
+    updates["dice_roll"] = roll_str
+    updates["skill_val"] = skill_val
+    updates["total_score"] = total_score
+    updates["outcome"] = outcome
+    updates["circumstance"] = circumstance
+    updates["difficulty"] = difficulty
 
-        # Прокидаємо дані кубика для відображення в інтерфейсі (в engine.py)
-        updates["skill_used"] = skill_used
-        updates["dice_roll"] = roll_str
-        updates["skill_val"] = skill_val
-        updates["total_score"] = total_score
-        updates["outcome"] = outcome
-        updates["circumstance"] = circumstance
-        updates["difficulty"] = difficulty
+    # --- ХАРДКОРНА СИСТЕМА ТРАВМ ТА ПРОКАЧКИ ---
+    if outcome == "CRITICAL SUCCESS":
+        if "skill_impact" not in updates:
+            updates["skill_impact"] = {}
+        updates["skill_impact"][skill_used] = 1
 
-        # --- ХАРДКОРНА СИСТЕМА ТРАВМ ТА ПРОКАЧКИ ---
-        if outcome == "CRITICAL SUCCESS":
+    elif outcome == "CRITICAL FAILURE":
+        temp_penalty = random.randint(15, 20)
+        if "temp_debuff" not in updates:
+            updates["temp_debuff"] = {}
+        updates["temp_debuff"][skill_used] = temp_penalty
+
+        if random.random() < 0.50:
             if "skill_impact" not in updates:
                 updates["skill_impact"] = {}
-            updates["skill_impact"][skill_used] = 1  # +1 назавжди
+            updates["skill_impact"][skill_used] = -1
+            updates["permanent_scar"] = True
 
-        elif outcome == "CRITICAL FAILURE":
-            # 1. Тимчасовий дебаф (штраф 15-20)
-            temp_penalty = random.randint(15, 20)
-            if "temp_debuff" not in updates:
-                updates["temp_debuff"] = {}
-            updates["temp_debuff"][skill_used] = temp_penalty
-
-            # 2. Шрам: 50% шанс втратити -1 назавжди
-            if random.random() < 0.50:
-                if "skill_impact" not in updates:
-                    updates["skill_impact"] = {}
-                updates["skill_impact"][skill_used] = -1
-                updates["permanent_scar"] = True
-        # -------------------------------------------------
-
-        return verdict_str, updates
-
-    except Exception as e:
-        print(f"⚠️ Worker Error: {e}")
-        return "MECHANICAL VERDICT: AUTO_SUCCESS", {"minutes_passed": 5}
+    return verdict_str, updates

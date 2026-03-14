@@ -36,9 +36,7 @@ model_worker = AIWrapper(MODEL_WORKER_NAME, temperature=MODEL_WORKER_TEMP)
 def clean_and_parse_json(text):
     """Витягує JSON з тексту. Підтримує і словники {}, і списки []."""
     try:
-        # Чистимо від markdown
         text = text.replace("```json", "").replace("```", "").strip()
-
         start_obj = text.find('{')
         start_arr = text.find('[')
 
@@ -58,7 +56,8 @@ def clean_and_parse_json(text):
         return None
 
     except json.JSONDecodeError as e:
-        print(f"⚠️ Помилка парсингу JSON (JSONDecodeError): {e}\nТекст: {text[:150]}...")
+        # Тепер ми будемо бачити, якщо JSON зламався!
+        print(f"⚠️ Помилка парсингу JSON (JSONDecodeError): {e}")
         return None
     except Exception as e:
         print(f"⚠️ Помилка парсингу: {e}")
