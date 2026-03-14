@@ -1,35 +1,26 @@
-# core/ai_client.py
 import json
 import time
 from google import genai
 from google.genai import types
 from config import GEMINI_API_KEY, MODEL_MAIN_NAME, MODEL_WORKER_NAME, MODEL_MAIN_TEMP, MODEL_WORKER_TEMP
 
-# Ініціалізація нового клієнта
+# Ініціалізація клієнта
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 class AIWrapper:
-    """
-    Обгортка для сумісності зі старим кодом.
-    Використовує нативний JSON Mode від Google Gemini для 100% стабільності парсингу.
-    """
+    """Обгортка для моделі без використання нативного JSON Mode, щоб уникнути помилки 400."""
 
     def __init__(self, model_name, temperature=0.7):
         self.model_name = model_name
         self.temperature = temperature
 
-    def generate_content(self, prompt, require_json=True):
-        # Налаштовуємо конфігурацію
+    def generate_content(self, prompt):
         config_args = {
             "temperature": self.temperature
         }
 
-        # ВАЖЛИВО: Змушуємо API повертати виключно валідний JSON!
-        if require_json:
-            config_args["response_mime_type"] = "application/json"
-
-        # Виклик через новий SDK
+        # Жодних response_mime_type. Працюємо як з класичним текстом.
         return client.models.generate_content(
             model=self.model_name,
             contents=prompt,
@@ -37,22 +28,34 @@ class AIWrapper:
         )
 
 
-# Створюємо екземпляри моделей з налаштованою температурою
+# Створюємо екземпляри моделей
 model = AIWrapper(MODEL_MAIN_NAME, temperature=MODEL_MAIN_TEMP)
 model_worker = AIWrapper(MODEL_WORKER_NAME, temperature=MODEL_WORKER_TEMP)
 
 
 def clean_and_parse_json(text):
-    """
-    Безпечно парсить JSON.
-    Оскільки тепер ми використовуємо application/json, складні регулярні вирази більше не потрібні.
-    """
+    """Витягує JSON з тексту. Підтримує і словники {}, і списки []."""
     try:
-        # На всякий випадок чистимо від можливих markdown-тегів (хоча API має їх блокувати)
-        clean_text = text.replace("```json", "").replace("```", "").strip()
+        # Чистимо від markdown
+        text = text.replace("```json", "").replace("```", "").strip()
 
-        # strict=False дозволяє переноси рядків (\n) всередині тексту
-        return json.loads(clean_text, strict=False)
+        start_obj = text.find('{')
+        start_arr = text.find('[')
+
+        possible_starts = [i for i in [start_obj, start_arr] if i != -1]
+        if not possible_starts:
+            return None
+
+        start_index = min(possible_starts)
+        end_index = text.rfind('}') if start_index == start_obj else text.rfind(']')
+
+        if start_index != -1 and end_index != -1 and end_index > start_index:
+            json_str = text[start_index: end_index + 1]
+
+            # === РІШЕННЯ: strict=False дозволяє переноси рядків ===
+            return json.loads(json_str, strict=False)
+
+        return None
 
     except json.JSONDecodeError as e:
         print(f"⚠️ Помилка парсингу JSON (JSONDecodeError): {e}\nТекст: {text[:150]}...")
@@ -63,21 +66,23 @@ def clean_and_parse_json(text):
 
 
 def ask_gemini(prompt, use_worker=False):
-    """Універсальна функція запиту з повторними спробами."""
+    """Універсальна функція запиту з повторними спробами та очищенням JSON."""
     retries = 3
     delay = 2
     active_model = model_worker if use_worker else model
 
+    strict_prompt = prompt + "\n\nВАЖЛИВО: Відповідай ТІЛЬКИ валідним JSON кодом. Без Markdown. Без слів 'Ось ваш JSON'."
+
     for attempt in range(retries):
         try:
-            # Модель вже знає, що треба повертати JSON завдяки обгортці AIWrapper
-            response = active_model.generate_content(prompt, require_json=True)
+            # Зверни увагу: ми БІЛЬШЕ НЕ передаємо require_json=True
+            response = active_model.generate_content(strict_prompt)
             result = clean_and_parse_json(response.text)
 
             if result:
                 return result
 
-            print(f"⚠️ Спроба {attempt + 1}: Помилка парсингу нативного JSON.")
+            print(f"⚠️ Спроба {attempt + 1}: Отримано не JSON. Текст: {response.text[:50]}...")
             time.sleep(delay)
 
         except Exception as e:
@@ -85,5 +90,5 @@ def ask_gemini(prompt, use_worker=False):
             time.sleep(delay)
             delay += 2
 
-    print("❌ Не вдалося отримати валідний JSON від AI.")
+    print("❌ Не вдалося отримати JSON від AI.")
     return None

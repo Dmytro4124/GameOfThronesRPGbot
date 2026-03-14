@@ -43,47 +43,77 @@ def generate_initial_stats(char_name, house_name, house_data):
     print(f"🎲 Генерую статистику для {char_name}...")
 
     prompt = f"""
-    Create a starting profile for the RPG “Game of Thrones.”
-    TIME CONTEXT: {GAME_ERA_CONTEXT}
+    <role>
+Ти — Архімейстер Цитаделі та провідний Game Balance Designer для RPG "Game of Thrones". Твоя експертиза — глибоке знання лору (канону) та жорсткий математичний баланс ігрової системи. 
+</role>
 
-    CHARACTER: {char_name}
-    HOUSE: {house_name} (Origin: {origin_region})
+<execution_mode>
+ТИ ВИКОНУЄШ ЦЕЙ ПРОМПТ ЯК ПРОГРАМУ, КРОК ЗА КРОКОМ.
+</execution_mode>
 
-    === LOCATION RULES (CRITICAL) ===
-    Determine “Current Location” based on the CANON of the first book (298 CE), not the region of origin.
-    Examples: Jorah Mormont -> Pentos. Theon Greyjoy -> Winterfell.
+<input_data>
+TIME CONTEXT: {GAME_ERA_CONTEXT}
+CHARACTER: {char_name}
+HOUSE: {house_name} (Origin: {origin_region})
+</input_data>
 
-    Заповни JSON Українською:
-    {{
-        "Ім'я": "{char_name}",
-        "Дім": "{house_name}",
-        "Титул": "Лорд/Леді/Бастард/Лицар/Вигнанець",
-        "Поточне місцезнаходження": "Назва локації (Замок або Місто)",
-        "Володіння": "Назва замку або -",
-        "Світогляд": "Короткий опис характеру",
-        "Здоров'я": 100,
-        "Живучість": 100,
-        "Енергія": 100,
-        "Особисте Золото": "Integer (100-5000 в залежності від статусу)",
-        "Бойові навички": "Integer (0-100)",
-        "Військові навички": "Integer (0-100)",
-        "Інтрига": "Integer (0-100)",
-        "Управління": "Integer (0-100)",
-        "Риси": "2-3 риси характеру(Позитивні)",
-        "Вади": "1-2 вади",
-        "Репутація (Рідний регіон)": "Integer (0-100)",
-        "Репутація (Столиця)": "Integer (-50 до 100)",
-        "Репутація (Інші регіони)": "Integer (-50 до 100)",
-        "Статус при дворі": "Текст",
-        "Зброя": "Текст",
-        "Броня": "Текст",
-        "Транспорт": "Текст",
-        "Інвентар": "Список речей через кому",
-        "Ігровий час": "298 рік В.Е., 1-й місяць, День 1 (Ранок)",
-        "Вороги": "Імена або фракції",
-        "Друзі": "Імена або фракції",
-        "Важливі події": "Текст, на початку пусто"
-    }}
+<system_rules>
+1. LOCATION RULES (CRITICAL): Визначай "Поточне місцезнаходження" СУВОРО за каноном першої книги (298 CE), а не за регіоном походження. (Наприклад: Jorah Mormont -> Pentos, Theon Greyjoy -> Winterfell).
+2. PERMISSION TO FAIL: Якщо {char_name} є неканонічним або повністю вигаданим, не галюцинуй. Прямо скажи "Персонаж не канонічний" в аналізі та згенеруй йому стандартний профіль для його {origin_region} без історичних зв'язків.
+3. МАТЕМАТИКА РУШІЯ:
+   - Особисте Золото: Лорд (3000-5000), Еліта (1000-2999), Лицар (500-999), Інші (10-200).
+   - Навички (0-100): 90-100 (Легенда), 70-89 (Еліта), 50-69 (Добрий рівень), 20-49 (Середній), 0-19 (Некомпетентний). Не став 100 випадково.
+</system_rules>
+
+<output_requirements>
+- Твоя відповідь має бути ВИКЛЮЧНО валідним JSON-об'єктом. Жодного тексту до чи після фігурних дужок.
+- Використовуй тільки одинарні лапки (') всередині текстових значень.
+- Першим ключем у JSON ЗАВЖДИ має бути "thought_process", де ти виконаєш логічну перевірку перед заповненням полів.
+</output_requirements>
+
+<thought_algorithm>
+Ти маєш застосувати ToT (Tree of Thoughts) та Adversarial Validation у ключі "thought_process":
+1. Branch 1 (Lore Master): Визначає статус та канонічну локацію на вказаний час.
+2. Branch 2 (System Balancer): Пропонує цифри статів на основі статусу (Математика Рушія).
+3. Adversarial Check: Критикує гілки ("Чи не забагато золота для бастарда?", "Чи точно він у 298 році тут?").
+4. Синтез: Фінальне рішення для JSON.
+</thought_algorithm>
+
+<few_shot_example>
+{
+    "thought_process": "Branch 1: Jorah Mormont у 298 році — вигнанець у Пентосі. Branch 2: Як колишній лорд і лицар, має високі бойові навички (80), військовий досвід (65), але як вигнанець має мало золота (150). Adversarial Check: 150 золота підходить під правило 'Інші (10-200)'. Локація Пентос є каноном. Синтез успішний.",
+    "Ім'я": "Джорах Мормонт",
+    "Дім": "Мормонт",
+    "Титул": "Вигнанець / Лицар",
+    "Поточне місцезнаходження": "Пентос",
+    "Володіння": "-",
+    "Світогляд": "Відданий, меланхолійний, шукає спокути",
+    "Здоров'я": 100,
+    "Живучість": 100,
+    "Енергія": 100,
+    "Особисте Золото": 150,
+    "Бойові навички": 80,
+    "Військові навички": 65,
+    "Інтрига": 40,
+    "Управління": 50,
+    "Риси": "Досвідчений воїн, Поліглот",
+    "Вади": "Знеславлений, Вигнанець",
+    "Репутація (Рідний регіон)": -50,
+    "Репутація (Столиця)": -30,
+    "Репутація (Інші регіони)": 10,
+    "Статус при дворі": "Відсутній",
+    "Зброя": "Довгий меч (звичайна сталь)",
+    "Броня": "Кільчуга і пластини",
+    "Транспорт": "Звичайний бойовий кінь",
+    "Інвентар": "Похідний мішок, бурдюк, монети",
+    "Ігровий час": "298 рік В.Е., 1-й місяць, День 1 (Ранок)",
+    "Вороги": "Еддард Старк",
+    "Друзі": "Ілліріо Мопатіс, Візеріс Таргарієн",
+    "Важливі події": ""
+}
+</few_shot_example>
+
+Заповни JSON Українською мовою для наступного запиту:
     """
     profile = ask_gemini(prompt)
     if profile:
@@ -100,56 +130,58 @@ def get_narrative_intro(profile):
     current_location = profile.get("Поточне місцезнаходження", "Вестерос")
 
     prompt = f"""
-        YOU ARE THE AUTHOR OF THE NOVEL “A GAME OF THRONES” (GEORGE MARTIN).
-        Your goal: Write the first scene for the character (Prologue).
+        <role>
+Ти — Джордж Р. Р. Мартін, майстер похмурого фентезі (grimdark) та суворий Game Master RPG "Game of Thrones". Твоя мета — написати ідеальний, атмосферний пролог для гравця, суворо дотримуючись канону.
+</role>
 
-        === HERO ===
-        {profile_json}
+<execution_mode>
+ТИ ВИКОНУЄШ ЦЕЙ ПРОМПТ ЯК ПРОГРАМУ, КРОК ЗА КРОКОМ.
+</execution_mode>
 
-        === START LOCATION ===
-        {current_location}
-        (Describe this location as atmospherically as possible, using the canon of 298 B.E.)
+<input_data>
+HERO_PROFILE: {profile_json}
+START_LOCATION: {current_location}
+TIME_CONTEXT: {GAME_ERA_CONTEXT}
+</input_data>
 
-        === TIME CONTEXT ===
-        {GAME_ERA_CONTEXT}
+<system_rules>
+1. ATMOSPHERE (GRIMDARK): Реалізм. Жодних "дружніх купців" чи казковості. Сенсорика обов'язкова: запах моря, гною, крові, сталі, пахощі Пентоса або льодяний холод Півночі.
+2. CANON PLOT HOOKS (CRITICAL): Сцена ПОВИННА бути прив'язана до реальних подій початку першої книги (298 рік):
+   - NORTH (Winterfell): Підготовка до страти дезертира Нічної Варти (Ґареда) АБО прибуття королівського кортежу.
+   - ESSOS (Pentos): Ілліріо Мопатіс готує Дейнеріс до оглядин Кхалом Дрого АБО параноя Візеріса.
+   - KING'S LANDING: Траур за Джоном Арреном, чутки про отруту, політичні інтриги щодо посади Правиці.
+   - THE WALL: Прибуття нових рекрутів (з Тіріоном) АБО зникнення розвідників у Зачарованому Лісі.
+3. CHARACTER INTEGRATION & PERMISSION TO FAIL:
+   - Якщо герой КАНОНІЧНИЙ: Починай точно зі сцени його першої появи в книзі.
+   - Якщо герой НЕКАНОНІЧНИЙ (вигаданий): Не вигадуй йому великої історії. Зроби його свідком або дрібним учасником вищезгаданих канонічних подій.
+4. AGENCY PRESERVATION (DON'TS):
+   - НІКОЛИ не пиши дії за гравця (наприклад: "Ви дістали меч і пішли").
+   - Зупиняй сцену рівно в той момент, коли виникає напруга і потрібна реакція гравця.
+</system_rules>
 
-        === TEXT REQUIREMENTS (GRIMDARK INTRO) ===
-        1. **Atmosphere:** Start with sensory details. Smell (sea, manure, incense, steel), temperature (the cold of the North or the heat of Essos), sounds.
-        2. **Style:** Gloomy realism. No “friendly merchants.” If it's Pentos, it smells of spices and slavery. If it's Winterfell, it smells of wolves and winter.
-        3. **The character's situation:** - If it's an outcast (like Jorah), emphasize their longing for home or poverty.
-    - If it's a lord, emphasize the burden of responsibility and the hypocrisy of the court.
+<output_requirements>
+- ВИКЛЮЧНО валідний JSON.
+- Усі значення текстових полів мають бути Українською мовою.
+- Жодного тексту поза фігурними дужками.
+- НІКОЛИ не використовуй подвійні лапки (") всередині значень. Замінюй їх на одинарні (').
+- Формат JSON має містити три ключі: "scene_planning" (твої думки), "narrative_text" (сам текст прологу, 3 абзаци) та "action_prompt" (питання до гравця).
+</output_requirements>
 
-    4. **PLOT HOOK (INCITING INCIDENT) - CANON:**
-           You must tie the scene to REAL events from the beginning of the first book, depending on the location:
+<thought_algorithm>
+У ключі "scene_planning" ти ПОВИНЕН виконати Tree of Thoughts:
+1. Sensory Anchor: Які 3 головні запахи/звуки цієї локації?
+2. Canon Integration: Яка подія з правил підходить цій локації та як логічно вписати туди профіль героя?
+3. Agency Check: У якій точці напруги текст має обірватися, щоб дати гравцю вибір?
+Після цього заповнюй інші ключі.
+</thought_algorithm>
 
-    - **NORTH (WINTERFELL):** * Main event: Lord Eddard prepares to execute a deserter from the Night's Watch (Gareth). 
-             * Or: News arrives that King Robert's huge procession is on its way.
-
-           - **ESSOS (Pentos):** * Main event: Illyrio Mopatis prepares Daenerys for her viewing by Khal Drogo.
-             * Or: Viserys is nervous about the delay of the wedding.
-
-    - **KING'S LANDING:** * Main event: The court is in mourning. Hand of the King Jon Arryn has died suddenly. Rumors of poison.
-             * Or: Intrigue over who will become the new Hand of the King.
-
-           - **THE WALL (Black Castle):** * Main event: Arrival of new recruits (including Tyrion as a guest).
-             * Or: Scouts have disappeared in the Haunted Forest. Strange corpses have been found.
-
-           **IF THIS IS A CANON CHARACTER ({profile.get("Ім'я")}):** Start with the scene where we first meet him in the book.
-
-           **IF IT IS A FICTIONAL CHARACTER:**
-           Include him in these events as a witness or participant (for example, he stands in the crowd during the execution or serves at court during the mourning).
-
-        5. **DON'TS:**
-           - NEVER write actions for the character (“You took the sword”).
-           - Stop the scene at the exact moment when the character has to react.
-
-        === FINALE (CRITICALLY IMPORTANT) ===
-        Your response MUST end with a QUESTION that presents the player with a specific choice.
-    - BAD: “What do you do?” (Too vague).
-    - GOOD: "The guard squints suspiciously, waiting for an explanation. Will you show him the House seal or try to bribe him?"
-    - GOOD: “The screams are getting closer. Will you hide in the shadows or face the danger?”
-
-    Write a creative text (3 paragraphs), Ukrainian language only.
+<few_shot_example>
+{
+  "scene_planning": "Локація: Вінтерфелл. Сенсорика: холод, запах мокрої вовни, іржа та кров. Подія: Страта Ґареда. Герой: вигаданий найманець. Інтеграція: герой стоїть у натовпі свідків. Точка зупинки: Нед Старк заносить меч, а герой помічає злодія в натовпі.",
+  "narrative_text": "Ранковий холод Півночі пробирає до самих кісток, проникаючи крізь товстий вовняний плащ. Повітря важке, воно пахне розтопленим снігом, кінським потом та вогкістю каміння. Ви стоїте на внутрішньому дворі Вінтерфелла, де зібрався мовчазний натовп. У центрі, на дерев'яній пласі, лежить змарнілий чоловік у чорному одязі — дезертир з Нічної Варти, який незв'язно бурмоче про білих блукачів.\n\nЛорд Еддард Старк височіє над ним, його обличчя нагадує витесаний з сірого граніту монумент. Він мовчки знімає з плечей важкий дворучний меч. Валирійська сталь 'Льоду' немов поглинає тьмяне світло півночі. Тиша стає абсолютною, перериваючись лише різким карканням ворон на старих мурах.\n\nРаптом, краєм ока, ви помічаєте швидкий рух. Поруч із вами хирлявий чоловік у брудному лахмітті непомітно тягнеться до кинджала під курткою, не зводячи погляду зі спини молодого Робба Старка. Сталь Еддарда злітає вгору для смертельного удару.",
+  "action_prompt": "Невідомий ось-ось вихопить зброю. Викликнете варту, спробуєте знешкодити його самостійно чи розчинитесь у натовпі, уникаючи зайвих проблем?"
+}
+</few_shot_example>
         """
     try:
         response = model.generate_content(prompt)

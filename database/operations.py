@@ -2,6 +2,7 @@ import json
 import gspread
 import difflib
 import re
+import time
 import numpy as np
 
 from database.sheets import db
@@ -139,7 +140,7 @@ def get_embedding(text: str):
     """Отримує вектор тексту через безкоштовне API Gemini"""
     try:
         response = gemini_client.models.embed_content(
-            model='text-embedding-004',
+            model='gemini-embedding-2-preview',
             contents=text
         )
         return response.embeddings[0].values
@@ -149,7 +150,7 @@ def get_embedding(text: str):
 
 
 def load_lore_data():
-    """Завантажує базу знань і векторизує її через Google API"""
+    """Завантажує базу знань і векторизує її через Google API з обходом квот (RPM 100)"""
     global LORE_CACHE, LORE_VECTORS
     try:
         sheet = db.get_sheet(TAB_KNOWLEDGE)
@@ -162,22 +163,36 @@ def load_lore_data():
             print("⚠️ База лору порожня.")
             return
 
-        print(f"📚 Завантажено {len(LORE_CACHE)} записів лору. Відправка на векторизацію в Google...")
+        print(f"📚 Завантажено {len(LORE_CACHE)} записів лору. Починаю повільну векторизацію (обхід лімітів)...")
 
         texts_to_embed = [
             f"{row.get('Ключові слова', '')} {row.get('Інформація', '')}"
             for row in LORE_CACHE
         ]
 
-        # Отримуємо вектори батчем (щоб було швидко)
-        response = gemini_client.models.embed_content(
-            model='text-embedding-004',
-            contents=texts_to_embed
-        )
+        all_embeddings = []
+        batch_size = 90  # Безпечний ліміт: 90 текстів за раз (квота 100/хв)
 
-        # Перетворюємо список векторів у Numpy масив
-        embeddings_list = [emb.values for emb in response.embeddings]
-        LORE_VECTORS = np.array(embeddings_list)
+        # Розбиваємо список текстів на пакети по 90 штук
+        for i in range(0, len(texts_to_embed), batch_size):
+            batch = texts_to_embed[i:i + batch_size]
+
+            response = gemini_client.models.embed_content(
+                model='gemini-embedding-001',
+                contents=batch
+            )
+
+            # Додаємо отримані вектори до загального списку
+            all_embeddings.extend([emb.values for emb in response.embeddings])
+
+            # Якщо це не останній пакет — чекаємо хвилину, щоб скинути квоту Google
+            if i + batch_size < len(texts_to_embed):
+                print(
+                    f"⏳ Векторизовано {i + len(batch)} / {len(texts_to_embed)}. Пауза 60 сек для скидання квоти API...")
+                time.sleep(60)
+
+        # Перетворюємо загальний список векторів у Numpy масив
+        LORE_VECTORS = np.array(all_embeddings)
 
         print(f"✅ [RAG] Вектори успішно створено через Gemini для {len(LORE_CACHE)} записів!")
 
