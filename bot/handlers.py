@@ -297,4 +297,6 @@ async def handle_general_messages(message: Message, bot: Bot):
             response = await process_game_turn(chat_id, user_text)
             await send_game_response(bot, chat_id, response, reply_to_message_id=msg_id)
         except Exception as e:
-            await message.answer("⚠️ Сталася помилка. Спробуйте ще раз.")
+            import traceback
+            traceback.print_exc()
+            await message.answer(f"⚠️ ТЕХНІЧНА ПОМИЛКА: {str(e)}")
