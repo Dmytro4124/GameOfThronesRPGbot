@@ -36,7 +36,6 @@ def apply_system_impacts(profile, ai_impacts):
     energy_impact = ai_impacts.get("energy_impact", "none")
 
     if minutes_passed > 0 or energy_impact == "sleep":
-        # Витягуємо поточний рік, місяць та день
         date_match = re.search(r'(\d+)\s*рік.*?(\d+)-й\s*місяць.*?День\s*(\d+)', time_str)
 
         if date_match:
@@ -46,7 +45,6 @@ def apply_system_impacts(profile, ai_impacts):
         else:
             current_year, current_month, current_day = 298, 1, 1
 
-        # Витягуємо поточні хвилини
         if "Час_хвилини" in profile:
             current_minutes = profile["Час_хвилини"]
         else:
@@ -58,12 +56,10 @@ def apply_system_impacts(profile, ai_impacts):
 
         old_time_str = f"{current_minutes // 60:02d}:{current_minutes % 60:02d}"
 
-        # Логіка сну: мотаємо час до 08:00 наступного ранку
         if energy_impact == "sleep":
             sleep_minutes = (MINUTES_IN_DAY - current_minutes) + (8 * 60)
             minutes_passed = max(minutes_passed, sleep_minutes)
 
-        # Зменшення кулдаунів тренування
         if minutes_passed > 0:
             cooldowns = profile.get("training_cooldowns", {})
             if cooldowns:
@@ -80,9 +76,7 @@ def apply_system_impacts(profile, ai_impacts):
 
                 profile["training_cooldowns"] = cooldowns
 
-        # --- МАТЕМАТИКА ЧАСУ ---
         new_total_minutes = current_minutes + minutes_passed
-
         days_passed = new_total_minutes // MINUTES_IN_DAY
         new_minutes_of_day = new_total_minutes % MINUTES_IN_DAY
         exact_time_str = f"{new_minutes_of_day // 60:02d}:{new_minutes_of_day % 60:02d}"
@@ -97,11 +91,9 @@ def apply_system_impacts(profile, ai_impacts):
 
         new_year = current_year + years_passed
 
-        # --- ЗБЕРЕЖЕННЯ ---
         profile["Час_хвилини"] = new_minutes_of_day
         profile["Ігровий час"] = f"{new_year} рік В.Е., {new_month}-й місяць, День {new_day}, {exact_time_str}"
 
-        # --- ЛОГУВАННЯ ---
         if years_passed > 0:
             logs.append(f"⏳ З Новим Роком! Тепер {new_year} рік В.Е.")
         elif months_passed > 0:
@@ -159,25 +151,25 @@ def apply_system_impacts(profile, ai_impacts):
         profile["Здоров'я"] = new_hp
         logs.append(f"❤️ Здоров'я: {old_hp} -> {new_hp}")
 
-        # === 3. ОБРОБКА ЗОЛОТА ===
-        gold_tag = str(ai_impacts.get("gold_impact", "none")).strip()
-        gold_change = 0
+    # === 3. ОБРОБКА ЗОЛОТА ===
+    gold_tag = str(ai_impacts.get("gold_impact", "none")).strip()
+    gold_change = 0
 
-        try:
-            gold_change = int(gold_tag)
-        except ValueError:
-            if gold_tag == "spend_small": gold_change = -random.randint(5, 15)
-            elif gold_tag == "spend_medium": gold_change = -random.randint(50, 150)
-            elif gold_tag == "spend_large": gold_change = -random.randint(300, 800)
-            elif gold_tag == "earn_small": gold_change = random.randint(10, 30)
-            elif gold_tag == "earn_medium": gold_change = random.randint(100, 300)
-            elif gold_tag == "earn_large": gold_change = random.randint(1000, 2000)
+    try:
+        gold_change = int(gold_tag)
+    except ValueError:
+        if gold_tag == "spend_small": gold_change = -random.randint(5, 15)
+        elif gold_tag == "spend_medium": gold_change = -random.randint(50, 150)
+        elif gold_tag == "spend_large": gold_change = -random.randint(300, 800)
+        elif gold_tag == "earn_small": gold_change = random.randint(10, 30)
+        elif gold_tag == "earn_medium": gold_change = random.randint(100, 300)
+        elif gold_tag == "earn_large": gold_change = random.randint(1000, 2000)
 
-        if gold_change != 0:
-            old_gold = safe_int(profile.get("Особисте Золото", 0), 0)
-            new_gold = max(0, old_gold + gold_change)
-            profile["Особисте Золото"] = new_gold
-            logs.append(f"💰 Золото: {gold_change:+}")
+    if gold_change != 0:
+        old_gold = safe_int(profile.get("Особисте Золото", 0), 0)
+        new_gold = max(0, old_gold + gold_change)
+        profile["Особисте Золото"] = new_gold
+        logs.append(f"💰 Золото: {gold_change:+}")
 
     # === 4. ОБРОБКА ІНВЕНТАРЯ ===
     current_inv_str = str(profile.get("Інвентар", ""))
@@ -197,7 +189,6 @@ def apply_system_impacts(profile, ai_impacts):
     if lost_items:
         if isinstance(lost_items, str): lost_items = [lost_items]
         for item in lost_items:
-            # Точний збіг без урахування регістру для уникнення багів підрядків
             for existing_item in inventory_list:
                 if item.strip().lower() == existing_item.strip().lower():
                     inventory_list.remove(existing_item)
@@ -214,7 +205,6 @@ def apply_system_impacts(profile, ai_impacts):
             for key in profile.keys():
                 clean_skill = skill_name.strip().lower()
                 clean_key = key.strip().lower()
-                # Перевіряємо точний збіг ключа (або з ігноруванням слова "навички")
                 if clean_skill == clean_key or f"{clean_skill} навички" == clean_key:
                     target_key = key
                     break
@@ -248,6 +238,21 @@ def apply_system_impacts(profile, ai_impacts):
                 logs.append(f"⏱️ Годинник '{clock_name}': {new_val}/{max_val}")
 
         profile["Годинники"] = current_clocks
+
+    # === 7. ОБРОБКА ПЕРЕМІЩЕННЯ (ГЛОБАЛЬНА ЛОКАЦІЯ ТА ЛОКАЛЬНА СЦЕНА) ===
+    new_location = ai_impacts.get("location_impact", "none")
+    if new_location and str(new_location).lower() not in ["none", "немає", "без змін", "", "null"]:
+        old_location = profile.get("Поточне місцезнаходження", "Невідомо")
+        if old_location != new_location:
+            profile["Поточне місцезнаходження"] = str(new_location).strip()
+            logs.append(f"🗺️ Регіон: {old_location} -> {new_location}")
+
+    new_scene = ai_impacts.get("scene_impact", "none")
+    if new_scene and str(new_scene).lower() not in ["none", "немає", "без змін", "", "null"]:
+        old_scene = profile.get("Поточна сцена", "Невідомо")
+        if old_scene != new_scene:
+            profile["Поточна сцена"] = str(new_scene).strip()
+            logs.append(f"🚪 Сцена: {old_scene} -> {new_scene}")
 
     return profile, logs
 
@@ -454,7 +459,7 @@ async def process_training_request(user_input, profile):
 
 async def resolve_action_mechanics(user_input, profile):
     """
-    Асинхронний Worker (4b): Оцінює складність дії та рахує всю механіку (Здоров'я, Час, Золото, Енергія, Годинники).
+    Асинхронний Worker (4b): Оцінює складність дії та рахує всю механіку (Здоров'я, Час, Золото, Енергія, Годинники, Локація).
     ІНТЕГРОВАНО: Система 2d50 (Roll-Over), Перевага/Недолік, Хардкорні Крити та Прокачка.
     Не пише художній текст!
     """
@@ -483,6 +488,8 @@ async def resolve_action_mechanics(user_input, profile):
             "minutes_passed": 480,
             "energy_impact": "sleep",
             "health_impact": "none",
+            "location_impact": "none",
+            "scene_impact": "none",
             "clocks_impact": {"Scene_Tension": 1}
         }
         verdict = "MECHANICAL VERDICT: EXHAUSTION COLLAPSE! GM INFO: ABSOLUTE OVERRIDE. The player's energy is 0. Ignore their requested action. Describe how they suddenly lose consciousness and collapse on the spot from complete exhaustion. Fast forward 8 hours of them being passed out. Describe what happens to them while they are defenseless."
@@ -529,19 +536,26 @@ async def resolve_action_mechanics(user_input, profile):
            - gold_impact: EXACT NUMBER as string (e.g., "-5", "10") IF specified. Otherwise: "none", "spend_small", "spend_medium", "spend_large", "earn_small", "earn_medium", "earn_large".
            - energy_impact: "none", "spend_small" (minor stress/walk), "spend_medium" (argument, training), "spend_large" (combat, labor), "restore_small" (food/fire), "restore_medium" (tavern bed), "restore_full" (sleep).
            - clocks_impact: {{"Scene_Tension": 1}} (if suspicious/aggressive/fail), {{"Scene_Tension": "clear"}} (if peaceful). Max is 4.
+
+        6. MOVEMENT AND LOCATIONS (CRITICAL): 
+           - If the player explicitly leaves a room, building, or travels locally, you MUST output the new micro-location in "scene_impact" (e.g., "Гавань", "Вулиці", "Таверна"). 
+           - If they travel to an entirely new city or region, update "location_impact" (e.g., "Браавос", "Королівська Гавань") AND update "scene_impact" to a logical starting point there. 
+           - If they stay in the current scene, output "none" for both.
         </rules>
 
         <example_output>
         {{
-            "step1_tot_brainstorming": "Branch 1: Player is carefully lockpicking (Intrigue, DC 100, spend_small energy, 15 mins). Branch 2: Player forces the door (Combat, DC 80, spend_medium energy, 2 mins).",
-            "step2_adversarial_validation": "Rules Keeper: Player explicitly said 'I quietly pick the lock', so Branch 1 is correct. Sadist GM: The guard is nearby, so the player should have DISADVANTAGE. Tension must increase if they fail.",
+            "step1_tot_brainstorming": "Branch 1: Player stays (scene_impact: none). Branch 2: Player forces the door and goes outside (scene_impact: Вулиці).",
+            "step2_adversarial_validation": "Rules Keeper: Player explicitly said 'I go outside', so Branch 2 is correct.",
             "action_type": "standard",
             "skill_used": "Інтрига",
             "difficulty": 100,
-            "circumstance": "DISADVANTAGE",
-            "verdict_text": "Player attempts to pick the lock under pressure. If failed, the pick breaks and tension +1.",
+            "circumstance": "NORMAL",
+            "verdict_text": "Player walks outside.",
             "updates": {{
                  "minutes_passed": 15,
+                 "location_impact": "none",
+                 "scene_impact": "Вулиці",
                  "health_impact": "none",
                  "energy_impact": "spend_small",
                  "gold_impact": "none",
@@ -554,8 +568,8 @@ async def resolve_action_mechanics(user_input, profile):
 
         OUTPUT IN STRICT JSON FORMAT ONLY:
         {{
-            "step1_tot_brainstorming": "Generate 2 distinct mechanical interpretations (Branches) of the action.",
-            "step2_adversarial_validation": "Have 'The Sadist GM' and 'Rules Keeper' critique the branches for realism and grimdark difficulty. Select the best one.",
+            "step1_tot_brainstorming": "Generate 2 distinct mechanical interpretations.",
+            "step2_adversarial_validation": "Have 'The Sadist GM' critique the branches.",
             "action_type": "standard",
             "skill_used": "Бойові або Військові або Інтрига або Управління або None",
             "difficulty": 100,
@@ -563,6 +577,8 @@ async def resolve_action_mechanics(user_input, profile):
             "verdict_text": "Short instruction for GM",
             "updates": {{
                  "minutes_passed": 15,
+                 "location_impact": "none" or "Браавос",
+                 "scene_impact": "none" or "Гавань",
                  "health_impact": "none",
                  "energy_impact": "spend_small",
                  "gold_impact": "none" or "-5" or "spend_small",

@@ -285,7 +285,7 @@ async def get_relevant_context(user_text, current_location):
 # ================= РОБОТА З NPC =================
 
 async def refresh_npc_database():
-    """Асинхронно завантажує NPC з Google Sheets у пам'ять бота"""
+    """Асинхронно завантажує NPC з Google Sheets у пам'ять бота (З урахуванням Сцени)"""
     global NPC_CACHE
 
     def _sync_refresh():
@@ -302,6 +302,7 @@ async def refresh_npc_database():
                 if status.lower() != "active": continue
 
                 loc = str(row.get("Location", "GLOBAL")).strip()
+                scene = str(row.get("Scene", "Невідомо")).strip()  # ДОДАНО СЦЕНУ
                 name = str(row.get("Name", "Unknown")).strip()
                 is_canon = str(row.get("Is_Canon", "FALSE")).upper() == "TRUE"
 
@@ -313,16 +314,22 @@ async def refresh_npc_database():
                 if row.get("Goal"): npc_card += f"- **Goal:** {row.get('Goal')}\n"
                 if row.get("Relation_Player"): npc_card += f"- **Attitude to Player:** {row.get('Relation_Player')}\n"
                 if row.get("Memory_Anchor") and str(row.get("Memory_Anchor")).strip() != "-":
-                    npc_card += f"- **Memory Anchor (WHY they feel this way):** {row.get('Memory_Anchor')}\n"
+                    npc_card += f"- **Memory Anchor:** {row.get('Memory_Anchor')}\n"
                 if row.get("Relation_NPCs"): npc_card += f"- **Attitude to other NPC:** {row.get('Relation_NPCs')}\n"
                 if row.get("Inventory") and str(row.get("Inventory")).strip() not in ["", "-"]:
                     npc_card += f"- **Inventory (Items & Gold):** {row.get('Inventory')}\n"
                 if row.get("Secrets"):
-                    npc_card += f"- **[SECRET/GM ONLY]:** (GUIDE BEHAVIOR, DO NOT REVEAL): {row.get('Secrets')}\n"
+                    npc_card += f"- **[SECRET/GM ONLY]:** {row.get('Secrets')}\n"
 
                 if loc not in new_cache:
                     new_cache[loc] = []
-                new_cache[loc].append(npc_card)
+
+                # Зберігаємо структуру, щоб мати змогу фільтрувати за сценою пізніше
+                new_cache[loc].append({
+                    "name": name,
+                    "scene": scene,
+                    "card": npc_card
+                })
                 count += 1
 
             return new_cache, count
@@ -338,34 +345,39 @@ async def refresh_npc_database():
     return False
 
 
-def get_location_npcs(current_location):
-    """Синхронна функція (працює лише з оперативною пам'яттю). Повертає опис NPC та список легальних імен."""
+def get_location_npcs(current_location, current_scene):
+    """Синхронна функція. Повертає опис NPC та список легальних імен за Локацією ТА Сценою."""
     found_npcs = []
+    legal_names = []
 
+    target_loc = str(current_location).strip().lower()
+    target_scene = str(current_scene).strip().lower()
+
+    if not target_scene:
+        target_scene = "невідомо"
+
+    # Фільтрація з кешу за двома параметрами
     for loc_key, npcs_list in NPC_CACHE.items():
-        if loc_key.lower() in current_location.lower():
-            found_npcs.extend(npcs_list)
+        if loc_key.lower() == target_loc:
+            for npc_data in npcs_list:
+                npc_scene = str(npc_data.get("scene", "невідомо")).strip().lower()
 
+                # Жорсткий збіг сцени. Глобальних NPC без сцени також пропускаємо.
+                if npc_scene == target_scene or npc_scene == "global" or npc_scene == "":
+                    found_npcs.append(npc_data["card"])
+                    legal_names.append(npc_data["name"])
+
+    # Завжди додаємо абсолютно глобальних NPC (якщо такі є в архітектурі)
     if "GLOBAL" in NPC_CACHE:
-        found_npcs.extend(NPC_CACHE["GLOBAL"])
+        for npc_data in NPC_CACHE["GLOBAL"]:
+            found_npcs.append(npc_data["card"])
+            legal_names.append(npc_data["name"])
 
     if not found_npcs:
         return "", []
 
-    legal_names = []
-
-    for npc_string in found_npcs:
-        match = re.search(r'^[-*\s]*([^:]+):', npc_string)
-        if match:
-            clean_name = match.group(1).strip()
-            legal_names.append(clean_name)
-        else:
-            words = npc_string.replace("-", "").strip().split()
-            clean_name = " ".join(words[:2])
-            legal_names.append(clean_name)
-
-    npc_block = "=== 👥 VISIBLE NPC ROSTER (PRIORITY USE!) ===\n"
-    npc_block += "GM INSTRUCTION: If player interacts with someone, PICK FROM THIS LIST first.\n"
+    npc_block = "=== 👥 VISIBLE NPC ROSTER (STRICTLY IN THIS SCENE) ===\n"
+    npc_block += "GM INSTRUCTION: Only these characters are physically present here.\n"
     npc_block += "DO NOT HALLUCINATE NEW CHARACTERS IF A SUITABLE ONE IS HERE.\n\n"
     npc_block += "\n".join(found_npcs)
 
@@ -429,7 +441,8 @@ async def update_npcs_in_db(updates, legal_names_list_deprecated=None):
 
         headers = [h.strip().lower() for h in all_values[0]]
         col_map = {}
-        target_cols = ["status", "relation_player", "memory_anchor", "goal", "secrets", "description", "character",
+        target_cols = ["status", "location", "scene", "relation_player", "memory_anchor", "goal", "secrets",
+                       "description", "character",
                        "relation_npcs", "inventory"]
 
         for target in target_cols:

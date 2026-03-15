@@ -53,12 +53,18 @@ async def process_game_turn(chat_id, user_input):
     history = session.get('history', [])
 
     history_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in history[-40:]])
-    old_location = profile.get("Поточне місцезнаходження", "")
-    profile_json = json.dumps(profile, ensure_ascii=False, indent=2)
-    curr_loc = profile.get("Поточне місцезнаходження", "")
 
+    # === ОНОВЛЕНО: Читаємо локацію та сцену ===
+    old_location = profile.get("Поточне місцезнаходження", "Невідомо")
+    old_scene = profile.get("Поточна сцена", "Невідомо")
+    profile_json = json.dumps(profile, ensure_ascii=False, indent=2)
+
+    curr_loc = profile.get("Поточне місцезнаходження", "Невідомо")
+    curr_scene = profile.get("Поточна сцена", "Невідомо")
+
+    # === ОНОВЛЕНО: Передаємо і локацію, і сцену для жорсткої фільтрації ===
     context_knowledge = await get_relevant_context(user_input, curr_loc)
-    npc_context_text, legal_npc_names = get_location_npcs(curr_loc)
+    npc_context_text, legal_npc_names = get_location_npcs(curr_loc, curr_scene)
 
     duration = time.time() - t_start
     timing_details.append(f"📚 Data: {duration:.2f}s")
@@ -109,6 +115,17 @@ async def process_game_turn(chat_id, user_input):
 
         mechanical_updates["skill_used"] = "None"
 
+    # === [SECURITY AUDIT] САНІТИЗАЦІЯ LLM INJECTION ===
+    # Гарантуємо, що ШІ не згалюцинував зміну навичок в обхід правил
+    is_valid_training = mechanical_updates.get("action_type") == "training"
+    is_critical_success = mechanical_updates.get("outcome") == "CRITICAL SUCCESS"
+    is_critical_failure = mechanical_updates.get("outcome") == "CRITICAL FAILURE"
+
+    if not (is_valid_training or is_critical_success or is_critical_failure):
+        if "skill_impact" in mechanical_updates:
+            print(f"⚠️ [SECURITY] Видалено нелегальну галюцинацію навичок від ШІ: {mechanical_updates['skill_impact']}")
+            mechanical_updates.pop("skill_impact", None)
+
     profile, impact_logs = apply_system_impacts(profile, mechanical_updates)
     logs.extend(impact_logs)
 
@@ -150,8 +167,9 @@ async def process_game_turn(chat_id, user_input):
 
     <scene_state>
     CURRENT TIME: {current_time_str}
-    CURRENT LOCATION: {curr_loc}
-    VISIBLE NPC ROSTER (Current characters in the scene):
+    CURRENT CITY: {profile.get("Поточне місцезнаходження", "")}
+    CURRENT SCENE: {profile.get("Поточна сцена", "")}
+    VISIBLE NPC ROSTER (Only characters physically present in this exact scene):
     {npc_context_text}
     </scene_state>
 
@@ -169,7 +187,8 @@ async def process_game_turn(chat_id, user_input):
     3. NO VENTRILOQUISM: You are FORBIDDEN from writing dialogue lines for the Hero.
     4. INTENT vs RESULT: Player describes INTENT. You determine RESULT based on the mechanical verdict.
     5. THE STOP SIGNAL: You MUST stop writing immediately after the NPC reacts. Leave the ball in the player's court.
-    6. ANTI-RAILROADING: If the player leaves the scene, the scene MUST end.
+    6. SCENE EXIT OVERRIDE (CRITICAL): If the player's action is to LEAVE, WALK AWAY, or CHANGE LOCATION, the current scene IMMEDIATELY ENDS. You are STRICTLY FORBIDDEN from describing the reactions, thoughts, or actions of the NPCs the player is leaving behind. Describe ONLY the transition and the new environment.
+    7. COMPANION MOVEMENT: If the player moves to a new Scene/Location, you MUST update the "Scene" and "Location" fields in the npc_updates JSON for any allied NPCs who are actively following the player. Characters left behind MUST NOT be updated.
     </golden_laws_of_agency>
 
     <history>
@@ -197,6 +216,8 @@ async def process_game_turn(chat_id, user_input):
         "npc_updates": [
             {{
                 "Name": "Exact Name from Roster",
+                "Location": "",
+                "Scene": "",
                 "Description": "",
                 "Character": "",
                 "Goal": "",
@@ -279,6 +300,7 @@ async def process_game_turn(chat_id, user_input):
             logs.insert(0, dice_log)
 
         new_location = profile.get("Поточне місцезнаходження", "")
+        # Модифіковано: Тепер генерація канонічних NPC враховує і зміну сцени (якщо треба)
         if old_location != new_location and len(new_location) > 3:
             current_char_name = profile.get("Ім'я", "")
 
@@ -294,7 +316,7 @@ async def process_game_turn(chat_id, user_input):
                     situation = "A tense day in Westeros."
                 await populate_contextual_npcs(new_loc, situation, excluded_name=char_name)
 
-            asyncio.create_task(travel_population_task(new_location, current_char_name))
+            await asyncio.create_task(travel_population_task(new_location, current_char_name))
 
         async def background_task(chat_id_arg, user_id_arg, profile_arg, char_name_arg, input_arg, story_arg,
                                   npc_changes_arg, legal_names_arg):
@@ -345,7 +367,6 @@ async def process_game_turn(chat_id, user_input):
 
         change_log = "\n\n📊 " + " | ".join(logs) if logs else ""
 
-        # Повертаємо кортеж
         return story + change_log, suggested_actions
 
     except Exception as e:

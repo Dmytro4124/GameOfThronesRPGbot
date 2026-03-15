@@ -213,8 +213,9 @@ async def background_canon_generation(context_text, excluded_name=None):
 
         try:
             worksheet.clear()
-            headers = ["Location", "Name", "Description", "Character", "Goal", "Secrets",
-                       "Relation_Player", "Memory_Anchor", "Relation_NPCs", "Status", "Is_Canon"]
+            # ОНОВЛЕНО: Додано Scene та Inventory у заголовки
+            headers = ["Location", "Scene", "Name", "Description", "Character", "Goal", "Secrets",
+                       "Relation_Player", "Memory_Anchor", "Relation_NPCs", "Status", "Is_Canon", "Inventory"]
             worksheet.append_row(headers)
         except Exception as e:
             print(f"❌ [CANON GEN ERROR] Clear failed: {e}")
@@ -226,8 +227,10 @@ async def background_canon_generation(context_text, excluded_name=None):
             if excluded_name and find_best_match(name, [excluded_name], threshold=0.8):
                 continue
 
+            # ОНОВЛЕНО: Додано Scene (індекс 1) та Inventory (індекс 12)
             row = [
                 npc.get("Location", "Westeros"),
+                npc.get("Scene", "Невідомо"),
                 name,
                 npc.get("Description", "-"),
                 npc.get("Character", "-"),
@@ -237,7 +240,8 @@ async def background_canon_generation(context_text, excluded_name=None):
                 npc.get("Memory_Anchor", "-"),
                 npc.get("Relation_NPCs", "-"),
                 npc.get("Status", "Active"),
-                npc.get("Is_Canon", "TRUE")
+                npc.get("Is_Canon", "TRUE"),
+                npc.get("Inventory", "Пусто")
             ]
             rows_to_add.append(row)
 
@@ -267,14 +271,15 @@ async def populate_contextual_npcs(location, situation_context="Normal day, calm
         canon_names_local = []
         try:
             all_rows = worksheet.get_all_values()
-            canon_col_idx = 10
+            # ОНОВЛЕНО: Тепер Is_Canon під індексом 11, бо ми додали Scene під індексом 1
+            canon_col_idx = 11
             headers = all_rows[0]
             preserved_rows = [headers]
 
             for row in all_rows[1:]:
                 if len(row) > canon_col_idx and str(row[canon_col_idx]).upper() == "TRUE":
                     preserved_rows.append(row)
-                    canon_name = str(row[1]).strip()
+                    canon_name = str(row[2]).strip() # ОНОВЛЕНО: Ім'я тепер під індексом 2
                     if canon_name:
                         canon_names_local.append(canon_name)
 
@@ -365,10 +370,21 @@ async def populate_contextual_npcs(location, situation_context="Normal day, calm
             if is_canon_clone:
                 continue
 
+            # ОНОВЛЕНО: Додано Scene (індекс 1) та Inventory (індекс 12), щоб вирівняти структуру таблиці
             row = [
-                location, ai_gen_name, npc.get("Description", "-"), npc.get("Character", "-"),
-                npc.get("Goal", "-"), npc.get("Secrets", "-"), npc.get("Relation_Player", "Neutral"),
-                npc.get("Memory_Anchor", "-"), npc.get("Relation_NPCs", "-"), "Active", "FALSE"
+                location,
+                "Невідомо",
+                ai_gen_name,
+                npc.get("Description", "-"),
+                npc.get("Character", "-"),
+                npc.get("Goal", "-"),
+                npc.get("Secrets", "-"),
+                npc.get("Relation_Player", "Neutral"),
+                npc.get("Memory_Anchor", "-"),
+                npc.get("Relation_NPCs", "-"),
+                "Active",
+                "FALSE",
+                "Пусто"
             ]
             new_rows.append(row)
 
