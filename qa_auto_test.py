@@ -2,6 +2,7 @@ import os
 import time
 import json
 import re
+import asyncio
 from google import genai
 from google.genai import types
 
@@ -126,18 +127,24 @@ class RPGTesterAdapter:
 
     def _init_character(self):
         print(f"⚙️ Ініціалізація тестового персонажа ({self.char_name})...")
-        house_data = get_house_stats_data(self.house_name)
-        full_profile = generate_initial_stats(self.char_name, self.house_name, house_data)
+        # ОБГОРТКА ASYNC: get_house_stats_data
+        house_data = asyncio.run(get_house_stats_data(self.house_name))
+
+        # ОБГОРТКА ASYNC: generate_initial_stats
+        full_profile = asyncio.run(generate_initial_stats(self.char_name, self.house_name, house_data))
 
         if full_profile:
-            save_user_data(self.chat_id, full_profile, self.char_name)
+            # ОБГОРТКА ASYNC: save_user_data
+            asyncio.run(save_user_data(self.chat_id, full_profile, self.char_name))
             user_sessions[self.chat_id] = {"state": "GAME_ACTIVE", "history": []}
             print(f"✅ Персонажа створено у базі. Локація: {full_profile.get('Поточне місцезнаходження')}")
         else:
             raise Exception("❌ Не вдалося створити тестового персонажа. Перевір чи точно назва дому збігається з БД.")
 
     def process(self, action: str):
-        raw_response = process_game_turn(self.chat_id, action)
+        # ОБГОРТКА ASYNC І РОЗПАКУВАННЯ КОРТЕЖУ
+        raw_response, suggested_actions = asyncio.run(process_game_turn(self.chat_id, action))
+
         if "📊" in raw_response:
             parts = raw_response.split("📊")
             ui_text = parts[0].strip()
@@ -145,6 +152,10 @@ class RPGTesterAdapter:
         else:
             ui_text = raw_response.strip()
             logs = "Логи відсутні."
+
+        if suggested_actions:
+            logs += f"\n💡 Згенеровані дії: {', '.join(suggested_actions)}"
+
         return ui_text, logs
 
 
@@ -227,7 +238,8 @@ if __name__ == "__main__":
     print("🚀 Запуск жорсткого інтеграційного тестування...")
     from database.operations import load_lore_data, refresh_npc_database
 
-    load_lore_data()
-    refresh_npc_database()
+    # ОБГОРТКА ASYNC для початкової ініціалізації
+    asyncio.run(load_lore_data())
+    asyncio.run(refresh_npc_database())
 
     run_test(max_turns=20)
