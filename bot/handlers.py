@@ -25,6 +25,24 @@ PROCESSED_MESSAGES = set()
 
 @router.message(Command("start"))
 async def start_handler(message: Message):
+    chat_id = message.chat.id
+
+    # 1. РОЗУМНИЙ СТАРТ: Перевіряємо, чи є в гравця збереження в базі
+    profile, _ = await get_user_data(chat_id)
+    if profile:
+        char_name = profile.get("Ім'я", "Герой")
+        builder = InlineKeyboardBuilder()
+        builder.button(text="▶️ Продовжити гру", callback_data="resume_game")
+        builder.button(text="💀 Почати заново", callback_data="restart_confirm")
+        builder.adjust(1)
+        await message.answer(
+            f"⚔️ Вітаю знову, **{char_name}**!\nУ вас є збережений прогрес. Бажаєте продовжити?",
+            reply_markup=builder.as_markup(),
+            parse_mode='Markdown'
+        )
+        return
+
+    # 2. Якщо збережень немає — стандартна генерація
     await message.answer("🗺️ *Зчитую карту Вестеросу...*", parse_mode='Markdown')
     regions = await get_unique_regions()
 
@@ -37,8 +55,27 @@ async def start_handler(message: Message):
         builder.button(text=r, callback_data=f"reg_{r}")
     builder.adjust(2)
 
-    user_sessions[message.chat.id] = {"state": "REGION_SELECT", "history": []}
+    user_sessions[chat_id] = {"state": "REGION_SELECT", "history": []}
     await message.answer("📍 *Оберіть регіон:*", reply_markup=builder.as_markup(), parse_mode='Markdown')
+
+
+@router.callback_query(F.data == "resume_game")
+async def resume_game_handler(call: CallbackQuery, bot: Bot):
+    """Обробка кнопки 'Продовжити гру' після /start"""
+    chat_id = call.message.chat.id
+    profile, _ = await get_user_data(chat_id)
+
+    if profile:
+        user_sessions[chat_id] = {
+            "state": "GAME_ACTIVE",
+            "character_name": profile.get("Ім'я", "Герой"),
+            "history": []
+        }
+        await call.message.delete()
+        await send_safe_message(bot, chat_id, "🔄 *Зв'язок зі світом відновлено. Що робите далі?*",
+                                reply_markup=get_main_menu())
+    else:
+        await call.message.answer("❌ Збереження не знайдено.")
 
 
 @router.callback_query(F.data.startswith("reg_"))
@@ -58,8 +95,11 @@ async def handle_region_selection(call: CallbackQuery):
     builder.button(text="⬅️ Назад до регіонів", callback_data="back_to_regions")
     builder.adjust(2)
 
-    await call.message.edit_text(text=f"🗺 Ви обрали регіон: *{region_name}*.\nОберіть Дім:", parse_mode="Markdown",
-                                 reply_markup=builder.as_markup())
+    await call.message.edit_text(
+        text=f"🗺 Ви обрали регіон: *{region_name}*.\nОберіть Дім:",
+        parse_mode="Markdown",
+        reply_markup=builder.as_markup()
+    )
 
 
 @router.callback_query(F.data.startswith("house_"))
@@ -79,8 +119,11 @@ async def handle_house_selection(call: CallbackQuery):
     builder.button(text="⬅️ Назад до списку Домів", callback_data="back_to_houses")
     builder.adjust(1)
 
-    await call.message.edit_text(text=f"🏰 Дім: *{house_name}*.\nКим ви хочете бути?", parse_mode="Markdown",
-                                 reply_markup=builder.as_markup())
+    await call.message.edit_text(
+        text=f"🏰 Дім: *{house_name}*.\nКим ви хочете бути?",
+        parse_mode="Markdown",
+        reply_markup=builder.as_markup()
+    )
 
 
 @router.callback_query(F.data.startswith("char_"))
@@ -106,7 +149,7 @@ async def start_game_with_character(bot: Bot, chat_id: int, char_name: str):
     house_name = session.get('house_name')
 
     if not house_name:
-        await bot.send_message(chat_id, "❌ Помилка: контекст Дому втрачено. Почніть з /start")
+        await bot.send_message(chat_id, "❌ Помилка: контекст Дому втрачено. Натисніть /start")
         return
 
     house_data = await get_house_stats_data(house_name)
@@ -136,7 +179,6 @@ async def start_game_with_character(bot: Bot, chat_id: int, char_name: str):
             await bot.send_chat_action(chat_id, action='typing')
             intro_story = await get_narrative_intro(full_profile)
 
-            # Викликаємо головне меню як стартове
             await send_safe_message(bot, chat_id, intro_story, reply_markup=get_main_menu())
             await bot.send_message(chat_id, "⚔️ Ваш шлях починається...")
 
@@ -150,10 +192,8 @@ async def start_game_with_character(bot: Bot, chat_id: int, char_name: str):
 @router.message(F.text == "📜 Профіль")
 async def show_profile_handler(message: Message):
     chat_id = message.chat.id
-    if chat_id not in user_sessions or user_sessions[chat_id].get('state') != "GAME_ACTIVE":
-        await message.answer("Спершу почніть гру через /start")
-        return
 
+    # Видалено жорстку перевірку user_sessions, тепер профіль можна подивитися навіть якщо сесія скинулась
     profile, _ = await get_user_data(chat_id)
     if profile:
         char_name = profile.get("Ім'я", "Невідомий")
@@ -180,6 +220,8 @@ async def show_profile_handler(message: Message):
             f"💀 Вороги: {enemies}"
         )
         await message.answer(text, parse_mode='Markdown')
+    else:
+        await message.answer("Спершу почніть гру через /start")
 
 
 @router.message(F.text == "🎒 Інвентар")
@@ -203,7 +245,8 @@ async def show_inventory_handler(message: Message):
 @router.message(F.text == "⚙️ Тех. дані")
 async def show_debug_stats(message: Message):
     chat_id = message.chat.id
-    log_text = user_sessions.get(chat_id, {}).get('last_debug_time', "❌ Ще не було зроблено жодного ходу.")
+    log_text = user_sessions.get(chat_id, {}).get('last_debug_time',
+                                                  "❌ Логи зберігаються лише для поточної активної сесії (до перезапуску сервера). Зробіть хід.")
     await message.answer(log_text, parse_mode='Markdown')
 
 
@@ -213,17 +256,29 @@ async def restart_request_handler(message: Message):
     builder.button(text="✅ Так", callback_data="restart_confirm")
     builder.button(text="❌ Ні", callback_data="restart_cancel")
     builder.adjust(2)
-    await message.answer("⚠️ Видалити персонажа?", reply_markup=builder.as_markup())
+    await message.answer("⚠️ Видалити персонажа назавжди?", reply_markup=builder.as_markup())
 
 
-@router.callback_query(F.data.startswith("restart_"))
-async def callback_restart_handler(call: CallbackQuery):
+@router.callback_query(F.data == "restart_cancel")
+async def callback_restart_cancel_handler(call: CallbackQuery):
+    await call.message.edit_reply_markup(reply_markup=None)
+    await call.message.answer("Рестарт скасовано. Гра продовжується.")
+
+
+@router.callback_query(F.data == "restart_confirm")
+async def callback_restart_confirm_handler(call: CallbackQuery):
     chat_id = call.message.chat.id
     await call.message.edit_reply_markup(reply_markup=None)
-    if call.data == "restart_confirm":
-        await call.message.answer("💀 Старий світ зникає у темряві...")
-        user_sessions[chat_id] = {}
-        await start_handler(call.message)
+    await call.message.answer("💀 Старий світ зникає у темряві...")
+
+    # Викликаємо логіку створення нового світу
+    regions = await get_unique_regions()
+    builder = InlineKeyboardBuilder()
+    for r in regions: builder.button(text=r, callback_data=f"reg_{r}")
+    builder.adjust(2)
+
+    user_sessions[chat_id] = {"state": "REGION_SELECT", "history": []}
+    await call.message.answer("📍 *Оберіть регіон:*", reply_markup=builder.as_markup(), parse_mode='Markdown')
 
 
 @router.callback_query(F.data == "back_to_regions")
@@ -253,11 +308,28 @@ async def handle_general_messages(message: Message, bot: Bot):
     msg_id = message.message_id
     user_text = message.text
 
-    # Захист від порожніх повідомлень (фото, гіфки, стікери)
     if not user_text:
         return
 
-    session = user_sessions.get(chat_id, {})
+    session = user_sessions.get(chat_id)
+
+    # ❗ СИСТЕМА АВТО-ВІДНОВЛЕННЯ ❗
+    # Якщо бот перезапустився на сервері, оперативна пам'ять порожня.
+    if not session:
+        profile, _ = await get_user_data(chat_id)
+        if profile:
+            # Гравець існує в БД! Відновлюємо сесію і дозволяємо хід
+            user_sessions[chat_id] = {
+                "state": "GAME_ACTIVE",
+                "character_name": profile.get("Ім'я", "Герой"),
+                "history": []
+            }
+            session = user_sessions[chat_id]
+        else:
+            # Це новий користувач, який не натиснув /start
+            await message.answer("❄️ Зима близько. Натисніть /start, щоб почати гру.")
+            return
+
     state = session.get('state')
 
     if state == "WAITING_CUSTOM_NAME":
@@ -269,19 +341,14 @@ async def handle_general_messages(message: Message, bot: Bot):
         PROCESSED_MESSAGES.add(msg_id)
         if len(PROCESSED_MESSAGES) > 100: PROCESSED_MESSAGES.pop()
 
-        # Вирізаємо емодзі-префікс, якщо гравець обрав згенеровану дію з Reply-меню
         if user_text.startswith("👉 "):
             user_text = user_text[2:].strip()
 
         await bot.send_chat_action(chat_id, action='typing')
 
         try:
-            # Отримуємо текст І список дій від рушія
             response_text, suggested_actions = await process_game_turn(chat_id, user_text)
-
-            # Передаємо запропоновані дії у функцію відправки
             await send_game_response(bot, chat_id, response_text, suggested_actions, reply_to_message_id=msg_id)
-
 
         except Exception as e:
             import traceback
