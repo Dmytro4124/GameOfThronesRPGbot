@@ -1,6 +1,7 @@
 # core/world.py
 import difflib
 import json
+import asyncio
 from database.sheets import db
 from database.operations import refresh_npc_database, find_best_match
 from core.ai_client import model, ask_gemini, clean_and_parse_json
@@ -9,8 +10,8 @@ from config import TAB_NPC
 from database.canon_npc import CANON_NPCS
 
 
-def get_canon_characters(house_name):
-    """Повертає список відомих канонічних персонажів для конкретного дому."""
+async def get_canon_characters(house_name):
+    """Асинхронно повертає список відомих канонічних персонажів для конкретного дому."""
     PRESET_CHARACTERS = {
         "Старк": ["Еддард Старк", "Кейтлін Старк", "Робб Старк", "Джон Сноу", "Арія Старк"],
         "Ланністер": ["Тайвін Ланністер", "Джейме Ланністер", "Серсея Ланністер", "Тіріон Ланністер"],
@@ -33,12 +34,16 @@ def get_canon_characters(house_name):
     Return ONLY a JSON array of strings.
     Example: ["Name 1", "Name 2"]
     """
-    result = ask_gemini(prompt)
+
+    def _sync_ask():
+        return ask_gemini(prompt)
+
+    result = await asyncio.to_thread(_sync_ask)
     return result if result else []
 
 
-def generate_initial_stats(char_name, house_name, house_data):
-    """Генерує стартовий профіль героя."""
+async def generate_initial_stats(char_name, house_name, house_data):
+    """Асинхронно генерує стартовий профіль героя."""
     origin_region = house_data.get('Регіон', 'Вестерос')
     print(f"🎲 Генерую статистику для {char_name}...")
 
@@ -115,7 +120,11 @@ HOUSE: {house_name} (Origin: {origin_region})
 
 Заповни JSON Українською мовою для наступного запиту:
     """
-    profile = ask_gemini(prompt)
+
+    def _sync_ask():
+        return ask_gemini(prompt)
+
+    profile = await asyncio.to_thread(_sync_ask)
     if profile:
         profile["Ім'я"] = char_name
         profile["Дім"] = house_name
@@ -123,8 +132,8 @@ HOUSE: {house_name} (Origin: {origin_region})
     return None
 
 
-def get_narrative_intro(profile):
-    """Генерує атмосферний вступ на основі локації та профілю гравця."""
+async def get_narrative_intro(profile):
+    """Асинхронно генерує атмосферний вступ на основі локації та профілю гравця."""
     print(f"📜 Пишу вступ для {profile.get('Ім' + chr(39) + 'я')}...")
     profile_json = json.dumps(profile, ensure_ascii=False, indent=2)
     current_location = profile.get("Поточне місцезнаходження", "Вестерос")
@@ -184,91 +193,101 @@ TIME_CONTEXT: {GAME_ERA_CONTEXT}
 </few_shot_example>
         """
     try:
-        response = model.generate_content(prompt)
+        def _sync_gen():
+            return model.generate_content(prompt)
+
+        response = await asyncio.to_thread(_sync_gen)
         return response.text
     except Exception as e:
         print(f"❌ Помилка генерації вступу: {e}")
         return f"Ви прибули у {current_location}. Вітер дме в обличчя. Що ви робите?"
 
 
-def background_canon_generation(context_text, excluded_name=None):
-    """ФОНОВИЙ ПРОЦЕС: Створення кістяка світу. Завантажує ЖОРСТКИЙ КАНОН."""
+async def background_canon_generation(context_text, excluded_name=None):
+    """Асинхронний ФОНОВИЙ ПРОЦЕС: Створення кістяка світу. Завантажує ЖОРСТКИЙ КАНОН."""
     print("🌍 [CANON GEN] Завантажую канонічну базу даних...")
-    worksheet = db.get_sheet(TAB_NPC)
-    if not worksheet: return
 
-    try:
-        worksheet.clear()
-        # НАШІ ОНОВЛЕНІ ЗАГОЛОВКИ З MEMORY ANCHOR
-        headers = ["Location", "Name", "Description", "Character", "Goal", "Secrets",
-                   "Relation_Player", "Memory_Anchor", "Relation_NPCs", "Status", "Is_Canon"]
-        worksheet.append_row(headers)
-    except Exception as e:
-        print(f"❌ [CANON GEN ERROR] Clear failed: {e}")
-        return
+    def _sync_db_ops():
+        worksheet = db.get_sheet(TAB_NPC)
+        if not worksheet: return False
 
-    rows_to_add = []
-
-    for npc in CANON_NPCS:
-        name = npc.get("Name", "Unknown")
-        # Перевірка, чи це не сам гравець
-        if excluded_name and find_best_match(name, [excluded_name], threshold=0.8):
-            continue
-
-        row = [
-            npc.get("Location", "Westeros"),
-            name,
-            npc.get("Description", "-"),
-            npc.get("Character", "-"),
-            npc.get("Goal", "-"),
-            npc.get("Secrets", "-"),
-            npc.get("Relation_Player", "Neutral"),
-            npc.get("Memory_Anchor", "-"),
-            npc.get("Relation_NPCs", "-"),
-            npc.get("Status", "Active"),
-            npc.get("Is_Canon", "TRUE")
-        ]
-        rows_to_add.append(row)
-
-    if rows_to_add:
         try:
-            worksheet.append_rows(rows_to_add)
-            print(f"✅ [CANON GEN] Світ заселено! Додано {len(rows_to_add)} канонічних легенд.")
-            from database.operations import refresh_npc_database
-            refresh_npc_database()
+            worksheet.clear()
+            headers = ["Location", "Name", "Description", "Character", "Goal", "Secrets",
+                       "Relation_Player", "Memory_Anchor", "Relation_NPCs", "Status", "Is_Canon"]
+            worksheet.append_row(headers)
         except Exception as e:
-            print(f"❌ [CANON GEN SAVE ERROR] {e}")
+            print(f"❌ [CANON GEN ERROR] Clear failed: {e}")
+            return False
+
+        rows_to_add = []
+        for npc in CANON_NPCS:
+            name = npc.get("Name", "Unknown")
+            if excluded_name and find_best_match(name, [excluded_name], threshold=0.8):
+                continue
+
+            row = [
+                npc.get("Location", "Westeros"),
+                name,
+                npc.get("Description", "-"),
+                npc.get("Character", "-"),
+                npc.get("Goal", "-"),
+                npc.get("Secrets", "-"),
+                npc.get("Relation_Player", "Neutral"),
+                npc.get("Memory_Anchor", "-"),
+                npc.get("Relation_NPCs", "-"),
+                npc.get("Status", "Active"),
+                npc.get("Is_Canon", "TRUE")
+            ]
+            rows_to_add.append(row)
+
+        if rows_to_add:
+            try:
+                worksheet.append_rows(rows_to_add)
+                return len(rows_to_add)
+            except Exception as e:
+                print(f"❌ [CANON GEN SAVE ERROR] {e}")
+                return False
+        return False
+
+    added_count = await asyncio.to_thread(_sync_db_ops)
+    if added_count:
+        print(f"✅ [CANON GEN] Світ заселено! Додано {added_count} канонічних легенд.")
+        from database.operations import refresh_npc_database
+        await refresh_npc_database()
 
 
-def populate_contextual_npcs(location, situation_context="Normal day, calm atmosphere", excluded_name=None):
-    """Генерує NPC, які відповідають ПОТОЧНІЙ СИТУАЦІЇ в локації. Блокує канонічні імена."""
+async def populate_contextual_npcs(location, situation_context="Normal day, calm atmosphere", excluded_name=None):
+    """Асинхронно генерує NPC, які відповідають ПОТОЧНІЙ СИТУАЦІЇ в локації. Блокує канонічні імена."""
     print(f"🏘️ [LOCAL POP] Аналізую локацію: {location}...")
-    worksheet = db.get_sheet(TAB_NPC)
+
+    def _sync_db_read():
+        worksheet = db.get_sheet(TAB_NPC)
+        if not worksheet: return None, None, []
+        canon_names_local = []
+        try:
+            all_rows = worksheet.get_all_values()
+            canon_col_idx = 10
+            headers = all_rows[0]
+            preserved_rows = [headers]
+
+            for row in all_rows[1:]:
+                if len(row) > canon_col_idx and str(row[canon_col_idx]).upper() == "TRUE":
+                    preserved_rows.append(row)
+                    canon_name = str(row[1]).strip()
+                    if canon_name:
+                        canon_names_local.append(canon_name)
+
+            worksheet.clear()
+            worksheet.update(preserved_rows)
+            return worksheet, preserved_rows, canon_names_local
+        except Exception as e:
+            print(f"❌ [LOCAL POP ERROR] Cleanup failed: {e}")
+            return None, None, []
+
+    worksheet, _, canon_names = await asyncio.to_thread(_sync_db_read)
     if not worksheet: return
 
-    canon_names = []  # Збираємо чорний список імен
-
-    try:
-        all_rows = worksheet.get_all_values()
-        canon_col_idx = 10
-        headers = all_rows[0]
-        preserved_rows = [headers]
-
-        for row in all_rows[1:]:
-            if len(row) > canon_col_idx and str(row[canon_col_idx]).upper() == "TRUE":
-                preserved_rows.append(row)
-                # Зберігаємо ім'я канонічного персонажа (колонка Name зазвичай має індекс 1)
-                canon_name = str(row[1]).strip()
-                if canon_name:
-                    canon_names.append(canon_name)
-
-        worksheet.clear()
-        worksheet.update(preserved_rows)
-    except Exception as e:
-        print(f"❌ [LOCAL POP ERROR] Cleanup failed: {e}")
-        return
-
-    # Формуємо рядок чорного списку для промпту (беремо перші 50, щоб не перевантажити промпт, або всі)
     blacklist_str = ", ".join(canon_names)
 
     prompt = f"""
@@ -314,8 +333,10 @@ def populate_contextual_npcs(location, situation_context="Normal day, calm atmos
         ]
         """
     try:
-        # Виклик моделі
-        response = model.generate_content(prompt)
+        def _sync_ai_gen():
+            return model.generate_content(prompt)
+
+        response = await asyncio.to_thread(_sync_ai_gen)
         npc_list = clean_and_parse_json(response.text)
 
         if not npc_list: return
@@ -324,22 +345,17 @@ def populate_contextual_npcs(location, situation_context="Normal day, calm atmos
         for npc in npc_list:
             ai_gen_name = npc.get("Name", "Unknown").strip()
 
-            # 1. Перевірка на excluded_name (Ім'я Гравця)
             if excluded_name and find_best_match(ai_gen_name, [excluded_name], threshold=0.8):
                 continue
 
-            # 2. АНТИ-КАНОН ФІЛЬТР (Fuzzy Matching)
-            # Перевіряємо, чи не згенерував ШІ щось дуже схоже на канонічне ім'я (наприклад "Джон Сноу" або "Арія")
             is_canon_clone = False
             if canon_names:
-                # cutoff=0.7 означає 70% схожості. Відловить "Робб Старк" якщо є "Роб Старк".
                 matches = difflib.get_close_matches(ai_gen_name, canon_names, n=1, cutoff=0.7)
                 if matches:
                     is_canon_clone = True
                     print(
                         f"🛡️ [ANTI-CANON FILTER] Заблоковано генерацію '{ai_gen_name}'. Занадто схоже на канон '{matches[0]}'.")
 
-            # Перевірка на заборонені прізвища (на випадок, якщо ШІ вигадає "Васю Ланністера")
             forbidden_houses = ["старк", "ланністер", "таргарієн", "баратеон", "тірелл", "грейджой", "мартелл", "аррен",
                                 "таллі", "болтон", "мормонт", "кхал"]
             if any(house in ai_gen_name.lower() for house in forbidden_houses):
@@ -347,7 +363,7 @@ def populate_contextual_npcs(location, situation_context="Normal day, calm atmos
                 print(f"🛡️ [ANTI-CANON FILTER] Заблоковано '{ai_gen_name}' через використання прізвища Великого Дому.")
 
             if is_canon_clone:
-                continue  # Пропускаємо цього NPC і не додаємо в базу!
+                continue
 
             row = [
                 location, ai_gen_name, npc.get("Description", "-"), npc.get("Character", "-"),
@@ -357,9 +373,14 @@ def populate_contextual_npcs(location, situation_context="Normal day, calm atmos
             new_rows.append(row)
 
         if new_rows:
-            worksheet.append_rows(new_rows)
+            def _sync_db_write():
+                worksheet.append_rows(new_rows)
+
+            await asyncio.to_thread(_sync_db_write)
+
             print(f"✅ [LOCAL POP] Локацію {location} заселено ({len(new_rows)} нових NPC).")
-            refresh_npc_database()
+            from database.operations import refresh_npc_database
+            await refresh_npc_database()
         else:
             print(f"⚠️ [LOCAL POP] ШІ не згенерував жодного валідного NPC для {location}.")
 

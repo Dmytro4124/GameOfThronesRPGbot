@@ -2,6 +2,7 @@
 import random
 import json
 import re
+import asyncio
 
 # Імпортуємо нашого ШІ-клієнта для функцій, які потребують суддівства
 from core.ai_client import model_worker, clean_and_parse_json
@@ -25,6 +26,7 @@ def apply_system_impacts(profile, ai_impacts):
     """
     Приймає абстрактні теги від АІ і перетворює їх на конкретну математику.
     Повертає оновлений профіль і лог змін.
+    (Ця функція працює миттєво в пам'яті, залишається синхронною)
     """
     logs = []
 
@@ -250,9 +252,9 @@ def apply_system_impacts(profile, ai_impacts):
     return profile, logs
 
 
-def validate_action(user_input, profile):
+async def validate_action(user_input, profile):
     """
-    Окрема функція-фільтр (Цензор).
+    Асинхронна функція-фільтр (Цензор).
     Перевіряє, чи не намагається гравець зламати гру чітами, анахронізмами чи діями за когось іншого.
     """
     # Жорстка перевірка смерті ДО виклику ШІ
@@ -328,7 +330,9 @@ def validate_action(user_input, profile):
         }}
         """
     try:
-        response = model_worker.generate_content(prompt)
+        def _sync_gen_val():
+            return model_worker.generate_content(prompt)
+        response = await asyncio.to_thread(_sync_gen_val)
         result = clean_and_parse_json(response.text)
 
         if not result:
@@ -340,9 +344,9 @@ def validate_action(user_input, profile):
         return True, ""
 
 
-def process_training_request(user_input, profile):
+async def process_training_request(user_input, profile):
     """
-    Worker (Тренування): Хардкорна система (+1 бал), Гібрид Енергії та Кулдаунів (Асиміляція).
+    Асинхронний Worker (Тренування): Хардкорна система (+1 бал), Гібрид Енергії та Кулдаунів (Асиміляція).
     """
     current_energy = safe_int(profile.get("Енергія", DEFAULT_ENERGY), DEFAULT_ENERGY)
     if current_energy <= 0:
@@ -370,9 +374,10 @@ def process_training_request(user_input, profile):
     }}
     """
 
-    # Виклик ШІ обгорнутий локально
     try:
-        resp = model_worker.generate_content(prompt)
+        def _sync_gen_train():
+            return model_worker.generate_content(prompt)
+        resp = await asyncio.to_thread(_sync_gen_train)
         data = clean_and_parse_json(resp.text)
     except Exception as e:
         print(f"⚠️ Training Error: {e}")
@@ -447,9 +452,9 @@ def process_training_request(user_input, profile):
     }
 
 
-def resolve_action_mechanics(user_input, profile):
+async def resolve_action_mechanics(user_input, profile):
     """
-    Worker (4b): Оцінює складність дії та рахує всю механіку (Здоров'я, Час, Золото, Енергія, Годинники).
+    Асинхронний Worker (4b): Оцінює складність дії та рахує всю механіку (Здоров'я, Час, Золото, Енергія, Годинники).
     ІНТЕГРОВАНО: Система 2d50 (Roll-Over), Перевага/Недолік, Хардкорні Крити та Прокачка.
     Не пише художній текст!
     """
@@ -567,9 +572,10 @@ def resolve_action_mechanics(user_input, profile):
             }}
         }}"""
 
-    # Виклик до ШІ ізольований
     try:
-        resp = model_worker.generate_content(prompt + "\n\nВАЖЛИВО: Відповідай ТІЛЬКИ JSON.")
+        def _sync_gen_mech():
+            return model_worker.generate_content(prompt + "\n\nВАЖЛИВО: Відповідай ТІЛЬКИ JSON.")
+        resp = await asyncio.to_thread(_sync_gen_mech)
         data = clean_and_parse_json(resp.text)
     except Exception as e:
         print(f"⚠️ AI Worker Error: {e}")

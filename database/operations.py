@@ -1,9 +1,11 @@
+# database/operations.py
 import json
-import gspread
 import difflib
 import re
-import time
+import asyncio
 import numpy as np
+import gspread
+from google import genai
 
 from database.sheets import db
 from config import (
@@ -11,152 +13,175 @@ from config import (
     TAB_HOUSES,
     TAB_CHARACTER,
     TAB_KNOWLEDGE,
-    TAB_NPC
+    TAB_NPC,
+    GEMINI_API_KEY
 )
 
 # ================= ГЛОБАЛЬНІ КЕШІ =================
 LORE_CACHE = []
 NPC_CACHE = {}
+LORE_VECTORS = None
+
+# Ініціалізація клієнта Gemini
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 # ================= РОБОТА З БАЗОЮ ГРАВЦІВ (Users_DB) =================
 
-def get_user_data(user_id):
-    """Знаходить дані гравця за Telegram ID"""
-    try:
-        sheet = db.get_sheet(TAB_USERS)
-        if not sheet: return None, None
+async def get_user_data(user_id):
+    """Асинхронно знаходить дані гравця за Telegram ID"""
 
-        cells = sheet.findall(str(user_id), in_column=1)
-        if not cells:
+    def _sync_fetch():
+        try:
+            sheet = db.get_sheet(TAB_USERS)
+            if not sheet: return None, None
+
+            cells = sheet.findall(str(user_id), in_column=1)
+            if not cells:
+                return None, None
+
+            cell = cells[0]
+            raw_data = sheet.cell(cell.row, 3).value
+
+            if raw_data:
+                return json.loads(raw_data), cell.row
+            return None, None
+        except Exception as e:
+            print(f"❌ Помилка читання БД: {e}")
             return None, None
 
-        cell = cells[0]
-        raw_data = sheet.cell(cell.row, 3).value
-
-        if raw_data:
-            return json.loads(raw_data), cell.row
-        return None, None
-    except Exception as e:
-        print(f"❌ Помилка читання БД: {e}")
-        return None, None
+    return await asyncio.to_thread(_sync_fetch)
 
 
-def save_user_data(user_id, profile_data, char_name="Unknown"):
-    """Зберігає або оновлює дані гравця"""
-    try:
-        sheet = db.get_sheet(TAB_USERS)
-        if not sheet: return False
+async def save_user_data(user_id, profile_data, char_name="Unknown"):
+    """Асинхронно зберігає або оновлює дані гравця"""
 
-        json_str = json.dumps(profile_data, ensure_ascii=False)
-        cells = sheet.findall(str(user_id), in_column=1)
+    def _sync_save():
+        try:
+            sheet = db.get_sheet(TAB_USERS)
+            if not sheet: return False
 
-        if cells:
-            # Оновлення
-            cell = cells[0]
-            sheet.update_cell(cell.row, 3, json_str)
-            sheet.update_cell(cell.row, 2, char_name)
-        else:
-            # Створення
-            sheet.append_row([str(user_id), char_name, json_str])
-        return True
-    except Exception as e:
-        print(f"❌ Помилка збереження: {e}")
-        return False
+            json_str = json.dumps(profile_data, ensure_ascii=False)
+            cells = sheet.findall(str(user_id), in_column=1)
+
+            if cells:
+                # Оновлення
+                cell = cells[0]
+                sheet.update_cell(cell.row, 3, json_str)
+                sheet.update_cell(cell.row, 2, char_name)
+            else:
+                # Створення
+                sheet.append_row([str(user_id), char_name, json_str])
+            return True
+        except Exception as e:
+            print(f"❌ Помилка збереження: {e}")
+            return False
+
+    return await asyncio.to_thread(_sync_save)
 
 
-def reset_and_fill_character_sheet(data_dict):
-    """ПОВНЕ ПЕРЕЗАПИСУВАННЯ таблиці на старті гри"""
-    try:
-        sheet = db.get_sheet(TAB_CHARACTER)
-        if not sheet: return False
+async def reset_and_fill_character_sheet(data_dict):
+    """Асинхронне ПОВНЕ ПЕРЕЗАПИСУВАННЯ таблиці на старті гри"""
 
-        keys_col = sheet.col_values(1)
+    def _sync_reset():
+        try:
+            sheet = db.get_sheet(TAB_CHARACTER)
+            if not sheet: return False
 
-        cells_to_update = []
-        for i, key in enumerate(keys_col):
-            if not key: continue
-            new_val = data_dict.get(key, "-")
-            cells_to_update.append(gspread.Cell(i + 1, 2, new_val))
+            keys_col = sheet.col_values(1)
+            cells_to_update = []
 
-        sheet.update_cells(cells_to_update)
-        return True
-    except Exception as e:
-        print(f"❌ Помилка ініціалізації: {e}")
-        return False
+            for i, key in enumerate(keys_col):
+                if not key: continue
+                new_val = data_dict.get(key, "-")
+                cells_to_update.append(gspread.Cell(i + 1, 2, new_val))
+
+            sheet.update_cells(cells_to_update)
+            return True
+        except Exception as e:
+            print(f"❌ Помилка ініціалізації: {e}")
+            return False
+
+    return await asyncio.to_thread(_sync_reset)
 
 
 # ================= РОБОТА З ДОМАМИ ТА РЕГІОНАМИ =================
 
-def get_unique_regions():
-    """Отримує список регіонів"""
-    try:
-        sheet = db.get_sheet(TAB_HOUSES)
-        records = sheet.get_all_records()
-        regions = set(row['Регіон'] for row in records if row.get('Регіон'))
-        return sorted(list(regions))
-    except Exception as e:
-        print(f"❌ Помилка читання регіонів: {e}")
-        return []
+async def get_unique_regions():
+    """Асинхронно отримує список регіонів"""
+
+    def _sync_get():
+        try:
+            sheet = db.get_sheet(TAB_HOUSES)
+            records = sheet.get_all_records()
+            regions = set(row['Регіон'] for row in records if row.get('Регіон'))
+            return sorted(list(regions))
+        except Exception as e:
+            print(f"❌ Помилка читання регіонів: {e}")
+            return []
+
+    return await asyncio.to_thread(_sync_get)
 
 
-def get_houses_by_region(region):
-    """Отримує список домів у регіоні"""
-    try:
-        sheet = db.get_sheet(TAB_HOUSES)
-        records = sheet.get_all_records()
-        return sorted([row['Рід'] for row in records if row.get('Регіон') == region])
-    except:
-        return []
+async def get_houses_by_region(region):
+    """Асинхронно отримує список домів у регіоні"""
+
+    def _sync_get():
+        try:
+            sheet = db.get_sheet(TAB_HOUSES)
+            records = sheet.get_all_records()
+            return sorted([row['Рід'] for row in records if row.get('Регіон') == region])
+        except:
+            return []
+
+    return await asyncio.to_thread(_sync_get)
 
 
-def get_house_stats_data(house_name):
-    """Отримує дані про Дім"""
-    try:
-        sheet = db.get_sheet(TAB_HOUSES)
-        records = sheet.get_all_records()
-        for row in records:
-            if row.get('Рід') == house_name:
-                return row
-        return {}
-    except:
-        return {}
+async def get_house_stats_data(house_name):
+    """Асинхронно отримує дані про Дім"""
+
+    def _sync_get():
+        try:
+            sheet = db.get_sheet(TAB_HOUSES)
+            records = sheet.get_all_records()
+            for row in records:
+                if row.get('Рід') == house_name:
+                    return row
+            return {}
+        except:
+            return {}
+
+    return await asyncio.to_thread(_sync_get)
 
 
 # ================= РОБОТА З ЛОРОМ (RAG / KnowledgeBase) =================
-import numpy as np
-from google import genai
-from config import GEMINI_API_KEY
 
-# Ініціалізація клієнта Gemini для векторів
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+async def get_embedding(text: str):
+    """Асинхронно отримує вектор тексту через Gemini"""
 
-# Глобальні змінні
-LORE_VECTORS = None
-LORE_CACHE = []
-
-
-def get_embedding(text: str):
-    """Отримує вектор тексту через безкоштовне API Gemini"""
-    try:
+    def _sync_embed():
         response = gemini_client.models.embed_content(
             model='gemini-embedding-2-preview',
             contents=text
         )
         return response.embeddings[0].values
+
+    try:
+        return await asyncio.to_thread(_sync_embed)
     except Exception as e:
         print(f"⚠️ Помилка отримання вектора від Gemini: {e}")
         return None
 
 
-def load_lore_data():
-    """Завантажує базу знань і векторизує її через Google API з обходом квот (RPM 100)"""
+async def load_lore_data():
+    """Завантажує базу знань і векторизує її без блокування Event Loop"""
     global LORE_CACHE, LORE_VECTORS
     try:
-        sheet = db.get_sheet(TAB_KNOWLEDGE)
-        if not sheet: return
+        def _get_sheet_records():
+            sheet = db.get_sheet(TAB_KNOWLEDGE)
+            return sheet.get_all_records() if sheet else []
 
-        records = sheet.get_all_records()
+        records = await asyncio.to_thread(_get_sheet_records)
         LORE_CACHE = [row for row in records if str(row.get('Інформація', '')).strip()]
 
         if not LORE_CACHE:
@@ -171,29 +196,26 @@ def load_lore_data():
         ]
 
         all_embeddings = []
-        batch_size = 90  # Безпечний ліміт: 90 текстів за раз (квота 100/хв)
+        batch_size = 90
 
-        # Розбиваємо список текстів на пакети по 90 штук
         for i in range(0, len(texts_to_embed), batch_size):
             batch = texts_to_embed[i:i + batch_size]
 
-            response = gemini_client.models.embed_content(
-                model='gemini-embedding-001',
-                contents=batch
-            )
+            def _embed_batch():
+                return gemini_client.models.embed_content(
+                    model='gemini-embedding-001',
+                    contents=batch
+                )
 
-            # Додаємо отримані вектори до загального списку
+            response = await asyncio.to_thread(_embed_batch)
             all_embeddings.extend([emb.values for emb in response.embeddings])
 
-            # Якщо це не останній пакет — чекаємо хвилину, щоб скинути квоту Google
             if i + batch_size < len(texts_to_embed):
                 print(
                     f"⏳ Векторизовано {i + len(batch)} / {len(texts_to_embed)}. Пауза 60 сек для скидання квоти API...")
-                time.sleep(60)
+                await asyncio.sleep(60)
 
-        # Перетворюємо загальний список векторів у Numpy масив
         LORE_VECTORS = np.array(all_embeddings)
-
         print(f"✅ [RAG] Вектори успішно створено через Gemini для {len(LORE_CACHE)} записів!")
 
     except Exception as e:
@@ -202,30 +224,26 @@ def load_lore_data():
         LORE_VECTORS = None
 
 
-def get_relevant_context(user_text, current_location):
-    """Семантичний пошук найрелевантнішого лору"""
+async def get_relevant_context(user_text, current_location):
+    """Семантичний пошук найрелевантнішого лору (Асинхронний)"""
     if LORE_VECTORS is None or not LORE_CACHE:
         return "Немає особливих відомостей."
 
     try:
         search_query = f"{current_location}. {user_text}"
-        query_vector_list = get_embedding(search_query)
+        query_vector_list = await get_embedding(search_query)
 
         if not query_vector_list:
             return "Немає особливих відомостей."
 
         query_vector = np.array(query_vector_list)
-
-        # Рахуємо дистанцію між масивами
         distances = np.linalg.norm(LORE_VECTORS - query_vector, axis=1)
 
-        # Топ-3 результати
         top_k = 3
         top_indices = np.argsort(distances)[:top_k]
 
         found_info = []
         for idx in top_indices:
-            # Для Gemini embeddings дистанція зазвичай менша, ставимо поріг ~1.2
             if distances[idx] < 1.2:
                 content = LORE_CACHE[idx].get('Інформація', '')
                 found_info.append(f"- {content}")
@@ -239,57 +257,65 @@ def get_relevant_context(user_text, current_location):
         print(f"⚠️ Помилка векторного пошуку: {e}")
         return "Немає особливих відомостей."
 
+
 # ================= РОБОТА З NPC =================
 
-def refresh_npc_database():
-    """Завантажує NPC з Google Sheets у пам'ять бота"""
+async def refresh_npc_database():
+    """Асинхронно завантажує NPC з Google Sheets у пам'ять бота"""
     global NPC_CACHE
-    try:
-        worksheet = db.get_sheet(TAB_NPC)
-        if not worksheet: return False
 
-        raw_data = worksheet.get_all_records()
-        new_cache = {}
-        count = 0
+    def _sync_refresh():
+        try:
+            worksheet = db.get_sheet(TAB_NPC)
+            if not worksheet: return False
 
-        for row in raw_data:
-            status = str(row.get("Status", "Active")).strip()
-            if status.lower() != "active": continue
+            raw_data = worksheet.get_all_records()
+            new_cache = {}
+            count = 0
 
-            loc = str(row.get("Location", "GLOBAL")).strip()
-            name = str(row.get("Name", "Unknown")).strip()
-            is_canon = str(row.get("Is_Canon", "FALSE")).upper() == "TRUE"
+            for row in raw_data:
+                status = str(row.get("Status", "Active")).strip()
+                if status.lower() != "active": continue
 
-            type_tag = "[CANON/BOSS]" if is_canon else "[LOCAL/BACKGROUND]"
+                loc = str(row.get("Location", "GLOBAL")).strip()
+                name = str(row.get("Name", "Unknown")).strip()
+                is_canon = str(row.get("Is_Canon", "FALSE")).upper() == "TRUE"
 
-            npc_card = f"> **{name}** {type_tag}\n"
-            if row.get("Description"): npc_card += f"- **Visual:** {row.get('Description')}\n"
-            if row.get("Character"): npc_card += f"- **Personality:** {row.get('Character')}\n"
-            if row.get("Goal"): npc_card += f"- **Goal:** {row.get('Goal')}\n"
-            if row.get("Relation_Player"): npc_card += f"- **Attitude to Player:** {row.get('Relation_Player')}\n"
-            if row.get("Memory_Anchor") and str(row.get("Memory_Anchor")).strip() != "-":
-                npc_card += f"- **Memory Anchor (WHY they feel this way):** {row.get('Memory_Anchor')}\n"
-            if row.get("Relation_NPCs"): npc_card += f"- **Attitude to other NPC:** {row.get('Relation_NPCs')}\n"
-            if row.get("Inventory") and str(row.get("Inventory")).strip() not in ["", "-"]:
-                npc_card += f"- **Inventory (Items & Gold):** {row.get('Inventory')}\n"
-            if row.get(
-                "Secrets"): npc_card += f"- **[SECRET/GM ONLY]:** (GUIDE BEHAVIOR, DO NOT REVEAL): {row.get('Secrets')}\n"
+                type_tag = "[CANON/BOSS]" if is_canon else "[LOCAL/BACKGROUND]"
 
-            if loc not in new_cache:
-                new_cache[loc] = []
-            new_cache[loc].append(npc_card)
-            count += 1
+                npc_card = f"> **{name}** {type_tag}\n"
+                if row.get("Description"): npc_card += f"- **Visual:** {row.get('Description')}\n"
+                if row.get("Character"): npc_card += f"- **Personality:** {row.get('Character')}\n"
+                if row.get("Goal"): npc_card += f"- **Goal:** {row.get('Goal')}\n"
+                if row.get("Relation_Player"): npc_card += f"- **Attitude to Player:** {row.get('Relation_Player')}\n"
+                if row.get("Memory_Anchor") and str(row.get("Memory_Anchor")).strip() != "-":
+                    npc_card += f"- **Memory Anchor (WHY they feel this way):** {row.get('Memory_Anchor')}\n"
+                if row.get("Relation_NPCs"): npc_card += f"- **Attitude to other NPC:** {row.get('Relation_NPCs')}\n"
+                if row.get("Inventory") and str(row.get("Inventory")).strip() not in ["", "-"]:
+                    npc_card += f"- **Inventory (Items & Gold):** {row.get('Inventory')}\n"
+                if row.get("Secrets"):
+                    npc_card += f"- **[SECRET/GM ONLY]:** (GUIDE BEHAVIOR, DO NOT REVEAL): {row.get('Secrets')}\n"
 
-        NPC_CACHE = new_cache
+                if loc not in new_cache:
+                    new_cache[loc] = []
+                new_cache[loc].append(npc_card)
+                count += 1
+
+            return new_cache, count
+        except Exception as e:
+            print(f"❌ [NPC DB ERROR] {e}")
+            return None, 0
+
+    result, count = await asyncio.to_thread(_sync_refresh)
+    if result is not None:
+        NPC_CACHE = result
         print(f"✅ [NPC DB] Завантажено {count} персонажів.", flush=True)
         return True
-    except Exception as e:
-        print(f"❌ [NPC DB ERROR] {e}", flush=True)
-        return False
+    return False
 
 
 def get_location_npcs(current_location):
-    """Повертає текст з описом NPC для поточної локації ТА список легальних імен."""
+    """Синхронна функція (працює лише з оперативною пам'яттю). Повертає опис NPC та список легальних імен."""
     found_npcs = []
 
     for loc_key, npcs_list in NPC_CACHE.items():
@@ -299,23 +325,19 @@ def get_location_npcs(current_location):
     if "GLOBAL" in NPC_CACHE:
         found_npcs.extend(NPC_CACHE["GLOBAL"])
 
-    # Якщо нікого немає - повертаємо ДВА порожніх значення
     if not found_npcs:
         return "", []
 
     legal_names = []
 
-    # Витягуємо чисті імена (як у твоїй таблиці)
     for npc_string in found_npcs:
-        # Шукаємо текст до першої двокрапки (ігноруючи дефіси чи зірочки на початку)
         match = re.search(r'^[-*\s]*([^:]+):', npc_string)
         if match:
             clean_name = match.group(1).strip()
             legal_names.append(clean_name)
         else:
-            # Fallback: якщо раптом немає двокрапки, беремо перші 2-3 слова
             words = npc_string.replace("-", "").strip().split()
-            clean_name = " ".join(words[:2])  # Беремо перші два слова (напр. "Джон Сноу")
+            clean_name = " ".join(words[:2])
             legal_names.append(clean_name)
 
     npc_block = "=== 👥 VISIBLE NPC ROSTER (PRIORITY USE!) ===\n"
@@ -323,7 +345,6 @@ def get_location_npcs(current_location):
     npc_block += "DO NOT HALLUCINATE NEW CHARACTERS IF A SUITABLE ONE IS HERE.\n\n"
     npc_block += "\n".join(found_npcs)
 
-    # Повертаємо кортеж: текст для промпту + список ["Дейнеріс Таргарієн", "Ілліріо Мопатіс", ...]
     return npc_block, legal_names
 
 
@@ -331,7 +352,7 @@ def get_location_npcs(current_location):
 
 def find_best_match(query_name, distinct_names, threshold=0.75):
     """
-    Шукає найбільш схоже ім'я зі списку.
+    Синхронна функція. Шукає найбільш схоже ім'я зі списку.
     Включає 'Анти-родинний запобіжник', щоб не плутати Дейнеріс та Візеріса Таргарієнів.
     """
     if not query_name or not distinct_names:
@@ -339,19 +360,16 @@ def find_best_match(query_name, distinct_names, threshold=0.75):
 
     query = query_name.lower().strip()
 
-    # 1. АБСОЛЮТНИЙ ПРІОРИТЕТ: Точний збіг (ігноруючи регістр)
     for real_name in distinct_names:
         if query == real_name.lower().strip():
             return real_name
 
-    # 2. Нечіткий пошук з базовим порогом
     matches = difflib.get_close_matches(query, distinct_names, n=1, cutoff=threshold)
 
     if matches:
         best_match = matches[0]
         best_match_low = best_match.lower().strip()
 
-        # 3. АНТИ-РОДИННИЙ ЗАПОБІЖНИК (Перевірка імені)
         query_words = query.split()
         match_words = best_match_low.split()
 
@@ -359,10 +377,8 @@ def find_best_match(query_name, distinct_names, threshold=0.75):
             query_first_name = query_words[0]
             match_first_name = match_words[0]
 
-            # Математично порівнюємо ТІЛЬКИ перші імена (Візеріс vs Дейнеріс)
             first_name_ratio = difflib.SequenceMatcher(None, query_first_name, match_first_name).ratio()
 
-            # Якщо імена відрізняються надто сильно (менше 65% збігу) — це різні люди з одним прізвищем!
             if first_name_ratio < 0.65:
                 return None
 
@@ -371,14 +387,9 @@ def find_best_match(query_name, distinct_names, threshold=0.75):
     return None
 
 
-import difflib
-import json
-import gspread
-
-
-def update_npcs_in_db(updates, legal_names_list_deprecated=None):
+async def update_npcs_in_db(updates, legal_names_list_deprecated=None):
     """
-    Оновлює існуючих NPC.
+    Асинхронно оновлює існуючих NPC.
     Вбудовано жорстку нормалізацію регістру та апострофів для difflib.
     """
     if not updates:
@@ -386,21 +397,21 @@ def update_npcs_in_db(updates, legal_names_list_deprecated=None):
 
     print(f"📝 [NPC UPDATE] Обробка змін: {json.dumps(updates, ensure_ascii=False)}")
 
-    try:
+    def _sync_update():
         worksheet = db.get_sheet(TAB_NPC)
         all_values = worksheet.get_all_values()
 
-        if not all_values: return
+        if not all_values: return False
 
         headers = [h.strip().lower() for h in all_values[0]]
         col_map = {}
-        target_cols = ["status", "relation_player", "memory_anchor", "goal", "secrets", "description", "character", "relation_npcs", "inventory"]
+        target_cols = ["status", "relation_player", "memory_anchor", "goal", "secrets", "description", "character",
+                       "relation_npcs", "inventory"]
 
         for target in target_cols:
             if target in headers:
                 col_map[target] = headers.index(target) + 1
 
-        # Створюємо дві мапи: одну для БД, іншу для нормалізованого пошуку
         db_names_map = {}
         legal_names_lower_map = {}
 
@@ -408,8 +419,6 @@ def update_npcs_in_db(updates, legal_names_list_deprecated=None):
             raw_name = str(row[1]).strip()
             if raw_name:
                 db_names_map[raw_name] = i
-
-                # НОРМАЛІЗАЦІЯ: нижній регістр + заміна всіх видів апострофів
                 norm_name = raw_name.lower().replace("’", "'").replace("`", "'").replace("‘", "'")
                 legal_names_lower_map[norm_name] = raw_name
 
@@ -421,15 +430,11 @@ def update_npcs_in_db(updates, legal_names_list_deprecated=None):
             if not target_name:
                 continue
 
-            # Нормалізуємо ім'я, яке прийшло від ШІ
             norm_target = target_name.lower().replace("’", "'").replace("`", "'").replace("‘", "'")
-
-            # Шукаємо збіг за НОРМАЛІЗОВАНИМИ рядками
             matches = difflib.get_close_matches(norm_target, global_legal_norm_names, n=1, cutoff=0.65)
 
             if matches:
                 best_norm_match = matches[0]
-                # Відновлюємо оригінальне канонічне ім'я з бази
                 real_original_name = legal_names_lower_map[best_norm_match]
                 row_idx = db_names_map[real_original_name]
 
@@ -444,7 +449,6 @@ def update_npcs_in_db(updates, legal_names_list_deprecated=None):
 
                     val_str = str(new_val).strip()
 
-                    # Фільтр пустоти
                     if not val_str or val_str.lower() in ["", "-", "none", "null", "same", "без змін"]:
                         continue
 
@@ -454,47 +458,47 @@ def update_npcs_in_db(updates, legal_names_list_deprecated=None):
                     if field_key in col_map:
                         col_idx = col_map[field_key]
                         cells_to_update.append(gspread.Cell(row_idx, col_idx, val_str))
-                    else:
-                        # ПЕРЕВІРКА ЧЕРЕЗ ЗОВНІШНЄ API (Замість сліпого блокування)
-                        from core.external_api import fetch_character_from_api
+            else:
+                from core.external_api import fetch_character_from_api
 
-                        print(f"🔍 [API CHECK] Персонажа '{target_name}' немає локально. Шукаємо в API Ice & Fire...")
-                        api_npc = fetch_character_from_api(target_name)
+                print(f"🔍 [API CHECK] Персонажа '{target_name}' немає локально. Шукаємо в API Ice & Fire...")
+                api_npc = fetch_character_from_api(target_name)
 
-                        if api_npc:
-                            print(f"🌐 [API SUCCESS] Знайдено канонічного персонажа: {api_npc['Name']}! Додаємо в базу.")
+                if api_npc:
+                    print(f"🌐 [API SUCCESS] Знайдено канонічного персонажа: {api_npc['Name']}! Додаємо в базу.")
 
-                            # Збираємо дані у масив для запису в кінець таблиці.
-                            # УВАГА: Переконайся, що порядок цих змінних відповідає порядку колонок у твоїй Google Таблиці (NPC)
-                            new_row = [
-                                api_npc["Status"],
-                                api_npc["Name"],
-                                api_npc["Location"],
-                                api_npc["Description"],
-                                api_npc["Character"],
-                                api_npc["Goal"],
-                                api_npc["Relation_Player"],
-                                api_npc["Memory_Anchor"],
-                                api_npc["Relation_NPCs"],
-                                api_npc["Secrets"],
-                                api_npc["Is_Canon"],
-                                api_npc["Inventory"]
-                            ]
+                    new_row = [
+                        api_npc.get("Status", "Active"),
+                        api_npc.get("Name", "Unknown"),
+                        api_npc.get("Location", "GLOBAL"),
+                        api_npc.get("Description", ""),
+                        api_npc.get("Character", ""),
+                        api_npc.get("Goal", ""),
+                        api_npc.get("Relation_Player", ""),
+                        api_npc.get("Memory_Anchor", ""),
+                        api_npc.get("Relation_NPCs", ""),
+                        api_npc.get("Secrets", ""),
+                        api_npc.get("Is_Canon", "TRUE"),
+                        api_npc.get("Inventory", "")
+                    ]
 
-                            try:
-                                worksheet.append_row(new_row)
-                                print(f"💾 [SAVED] {api_npc['Name']} успішно завантажений у Вестерос.")
-                            except Exception as append_err:
-                                print(
-                                    f"❌ [API SAVE ERROR] Не вдалося записати {api_npc['Name']} у таблицю: {append_err}")
-                        else:
-                            # Якщо немає ні в нас, ні в API - це 100% галюцинація
-                            print(f"🛡️ [БЛОКУВАННЯ ГАЛЮЦИНАЦІЇ] ШІ придумав NPC '{target_name}'. Ігноруємо!")
+                    try:
+                        worksheet.append_row(new_row)
+                        print(f"💾 [SAVED] {api_npc['Name']} успішно завантажений у Вестерос.")
+                    except Exception as append_err:
+                        print(f"❌ [API SAVE ERROR] Не вдалося записати {api_npc['Name']} у таблицю: {append_err}")
+                else:
+                    print(f"🛡️ [БЛОКУВАННЯ ГАЛЮЦИНАЦІЇ] ШІ придумав NPC '{target_name}'. Ігноруємо!")
 
         if cells_to_update:
             worksheet.update_cells(cells_to_update)
             print(f"💾 [SAVED] Оновлено {len(cells_to_update)} полів існуючих NPC.")
-            refresh_npc_database()
+            return True
+        return False
 
+    try:
+        has_updated = await asyncio.to_thread(_sync_update)
+        if has_updated:
+            await refresh_npc_database()
     except Exception as e:
         print(f"❌ [UPDATE ERROR] {e}")

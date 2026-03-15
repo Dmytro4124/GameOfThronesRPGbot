@@ -1,40 +1,49 @@
 # bot/utils.py
-import time
-from telebot import types
+import asyncio
+from aiogram import Bot
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-def send_safe_message(bot, chat_id, text, reply_to_message_id=None):
+
+async def send_safe_message(bot: Bot, chat_id: int, text: str, reply_to_message_id: int = None):
     """
-    Універсальна функція для відправки повідомлень.
-    Автоматично розбиває довгі тексти на частини.
+    Асинхронна універсальна функція для відправки повідомлень.
+    Автоматично розбиває довгі тексти на частини, не блокуючи Event Loop.
     """
     max_len = 4000
     if len(text) <= max_len:
         try:
-            bot.send_message(chat_id, text, reply_to_message_id=reply_to_message_id, parse_mode='Markdown')
-        except:
-            bot.send_message(chat_id, text, reply_to_message_id=reply_to_message_id)
+            await bot.send_message(chat_id, text, reply_to_message_id=reply_to_message_id, parse_mode='Markdown')
+        except Exception as e:
+            print(f"⚠️ Safe Message Error (Markdown): {e}")
+            await bot.send_message(chat_id, text, reply_to_message_id=reply_to_message_id)
     else:
         parts = [text[i:i + max_len] for i in range(0, len(text), max_len)]
         for part in parts:
             try:
-                bot.send_message(chat_id, part, parse_mode='Markdown')
-            except:
-                bot.send_message(chat_id, part)
-            time.sleep(0.5)
+                await bot.send_message(chat_id, part, parse_mode='Markdown')
+            except Exception as e:
+                print(f"⚠️ Safe Message Part Error: {e}")
+                await bot.send_message(chat_id, part)
 
-def send_game_response(bot, chat_id, text, reply_to_message_id=None):
+            # КРИТИЧНО: Неблокуюча пауза замість time.sleep
+            await asyncio.sleep(0.5)
+
+
+async def send_game_response(bot: Bot, chat_id: int, text: str, reply_to_message_id: int = None):
     """
-    Відправляє відповідь користувачу з кнопкою для перегляду технічних логів.
+    Асинхронно відправляє відповідь користувачу з кнопкою для перегляду технічних логів.
     """
-    markup = types.InlineKeyboardMarkup()
-    debug_btn = types.InlineKeyboardButton("⚙️ Тех. дані", callback_data="debug_stats")
-    markup.add(debug_btn)
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⚙️ Тех. дані", callback_data="debug_stats")
 
     try:
-        bot.send_message(
+        await bot.send_message(
             chat_id, text, reply_to_message_id=reply_to_message_id,
-            reply_markup=markup, parse_mode='Markdown'
+            reply_markup=builder.as_markup(), parse_mode='Markdown'
         )
     except Exception as e:
         print(f"⚠️ Markdown Error: {e}. Sending plain text.")
-        bot.send_message(chat_id, text, reply_to_message_id=reply_to_message_id, reply_markup=markup)
+        await bot.send_message(
+            chat_id, text, reply_to_message_id=reply_to_message_id,
+            reply_markup=builder.as_markup()
+        )

@@ -2,7 +2,7 @@
 import time
 import json
 import re
-from threading import Thread
+import asyncio
 
 # Імпорти з нашої нової структури
 from core.ai_client import model, model_worker, clean_and_parse_json
@@ -19,9 +19,9 @@ from database.operations import (
 user_sessions = {}
 
 
-def summarize_turn(gm_response):
+async def summarize_turn(gm_response):
     """
-    Стискає хід в одне речення для історії.
+    Асинхронно стискає хід в одне речення для історії.
     Використовує меншу модель для швидкості.
     """
     clean_story = gm_response.split("📊")[0][:800]
@@ -32,14 +32,17 @@ def summarize_turn(gm_response):
     Output example: "Джон спробував вдарити вартового, але той ухилився."
     """
     try:
-        resp = model_worker.generate_content(prompt)
+        def _sync_gen():
+            return model_worker.generate_content(prompt)
+
+        resp = await asyncio.to_thread(_sync_gen)
         return resp.text.strip()
     except:
         return f"Гравець діє."
 
 
-def process_game_turn(chat_id, user_input):
-    """Основний ігровий цикл (рушій)"""
+async def process_game_turn(chat_id, user_input):
+    """Основний ігровий цикл (рушій) - АСИНХРОННИЙ"""
     debug_log = ""
     global_start = time.time()
     debug_log += f"🚀 [START] Хід гравця {chat_id}..."
@@ -50,7 +53,7 @@ def process_game_turn(chat_id, user_input):
     # === ЕТАП 1: ЗАВАНТАЖЕННЯ ДАНИХ ===
     t_start = time.time()
 
-    profile, row_id = get_user_data(user_id)
+    profile, row_id = await get_user_data(user_id)
     if not profile: return "❌ Профіль не знайдено."
 
     session = user_sessions.get(chat_id, {})
@@ -63,7 +66,10 @@ def process_game_turn(chat_id, user_input):
     profile_json = json.dumps(profile, ensure_ascii=False, indent=2)
     curr_loc = profile.get("Поточне місцезнаходження", "")
 
-    context_knowledge = get_relevant_context(user_input, curr_loc)
+    # Асинхронний виклик (бо робить HTTP запит до Gemini)
+    context_knowledge = await get_relevant_context(user_input, curr_loc)
+
+    # Синхронний виклик (працює лише з кешем у пам'яті)
     npc_context_text, legal_npc_names = get_location_npcs(curr_loc)
 
     duration = time.time() - t_start
@@ -75,21 +81,19 @@ def process_game_turn(chat_id, user_input):
     logs = []
 
     # 1. ЗАВЖДИ спочатку викликаємо Розумного Суддю (він визначить намір)
-    mechanics_verdict, mechanical_updates = resolve_action_mechanics(user_input, profile)
+    # resolve_action_mechanics має бути асинхронним, якщо він робить запити до AI
+    mechanics_verdict, mechanical_updates = await resolve_action_mechanics(user_input, profile)
 
     # 2. СЕМАНТИЧНИЙ РЕДИРЕКТ: Чи виявив суддя спробу довгого тренування?
     if mechanical_updates.get("action_type") == "training":
 
-        # Передаємо хід вузькопрофільній функції тренування
-        training_result = process_training_request(user_input, profile)
+        training_result = await process_training_request(user_input, profile)
 
         if training_result:
             if "error" in training_result:
-                # Тренування провалено (мало золота, небезпека, кулдаун)
                 mechanics_verdict = f"SYSTEM: Player tried to train but FAILED. Reason: {training_result['error']}. Describe their disappointment."
                 logs.append(f"❌ {training_result['error']}")
             else:
-                # Тренування успішне!
                 mechanics_verdict = training_result['story_prompt']
                 skill = training_result['skill']
                 gain = training_result['stat_gain']
@@ -97,18 +101,14 @@ def process_game_turn(chat_id, user_input):
                 cost_gold = int(training_result['cost_gold'])
                 energy_cost = training_result.get('energy_cost', 40)
 
-                # Малюємо лог для гравця
                 logs.append(
                     f"🏋️ Тренування: {skill} +{gain} (Витрачено: {days_spent} дн., {cost_gold} 🪙, {energy_cost} ⚡)")
 
-                # Якщо сталася травма від перевтоми
                 if training_result.get("temp_debuff", 0) > 0:
                     logs.append(f"🩸 Травма від перевтоми! Штраф -{training_result['temp_debuff']} до '{skill}'.")
 
-                # Прокидаємо дані, щоб apply_system_impacts зберіг їх у базу
                 mechanical_updates["minutes_passed"] = days_spent * 1440
 
-                # Віднімаємо енергію вручну (якщо apply_system_impacts не вміє віднімати точні цифри)
                 current_energy = safe_int(profile.get("Енергія", 100))
                 profile["Енергія"] = max(0, current_energy - energy_cost)
 
@@ -116,19 +116,16 @@ def process_game_turn(chat_id, user_input):
                     mechanical_updates["skill_impact"] = {}
                 mechanical_updates["skill_impact"][skill] = gain
 
-                # Віднімаємо золото
                 current_gold = safe_int(profile.get("Особисте Золото", 0))
                 if cost_gold > 0:
                     profile["Особисте Золото"] = max(0, current_gold - cost_gold)
                     logs.append(f"💰 Золото: -{cost_gold} (Оплата вчителю)")
 
-                # Записуємо новий кулдаун асиміляції
                 if "set_cooldown" in training_result:
                     if "training_cooldowns" not in profile:
                         profile["training_cooldowns"] = {}
                     profile["training_cooldowns"][skill] = training_result["set_cooldown"]
 
-        # БЛОКУЄМО кидки кубиків 2d50 для цього ходу, бо це було тренування
         mechanical_updates["skill_used"] = "None"
 
     # 3. ОДРАЗУ застосовуємо всі наслідки до профілю (час, здоров'я, інвентар)
@@ -142,12 +139,10 @@ def process_game_turn(chat_id, user_input):
     # === ЕТАП 3: ГЕНЕРАЦІЯ СЮЖЕТУ (MAIN AI) ===
     t_start = time.time()
 
-    # --- ПЕРЕВІРКА СВІТОВИХ ПОДІЙ ЗА ДАТОЮ ---
     current_time_str = profile.get("Ігровий час", "")
     day_match = re.search(r'День (\d+)', current_time_str)
     current_day = int(day_match.group(1)) if day_match else 1
 
-    # Словник подій (Ключ = День)
     world_events = {
         5: "Починається сильна хуртовина. Пересування стає майже неможливим.",
         14: "До міста прибуває величезний королівський кортеж.",
@@ -274,9 +269,12 @@ def process_game_turn(chat_id, user_input):
     }}"""
 
     try:
-        response = model.generate_content(prompt)
+        def _sync_gen_main():
+            return model.generate_content(prompt)
+
+        response = await asyncio.to_thread(_sync_gen_main)
         raw_text = response.text.strip()
-        print(f"\n[AI RAW TEXT]:\n{raw_text}\n") # логи, прибрати після розробки
+        print(f"\n[AI RAW TEXT]:\n{raw_text}\n")
         ai_data = clean_and_parse_json(raw_text)
 
         if not ai_data and '"story":' in raw_text:
@@ -292,8 +290,11 @@ def process_game_turn(chat_id, user_input):
 
         story = ai_data.get("story", "...")
         if "Тут напиши" in story or len(story) < 20:
-            fix_resp = model.generate_content(
-                f"Ти GM. Гравець: {user_input}. Опиши наслідки художньо. Закінчи питанням.")
+            def _sync_gen_fix():
+                return model.generate_content(
+                    f"Ти GM. Гравець: {user_input}. Опиши наслідки художньо. Закінчи питанням.")
+
+            fix_resp = await asyncio.to_thread(_sync_gen_fix)
             story = fix_resp.text
 
         duration = time.time() - t_start
@@ -303,7 +304,6 @@ def process_game_turn(chat_id, user_input):
         # === ЕТАП 4: ЗАСТОСУВАННЯ НАСЛІДКІВ ТА ЗБЕРЕЖЕННЯ ===
         t_start = time.time()
 
-        # Дістаємо тільки оновлення NPC (бо іншого Main-модель більше не генерує)
         npc_changes = ai_data.get("npc_updates", [])
 
         if safe_int(profile.get("Здоров'я", 100)) <= 0:
@@ -317,40 +317,26 @@ def process_game_turn(chat_id, user_input):
             outcome = mechanical_updates.get("outcome", "UNKNOWN")
             circumstance = mechanical_updates.get("circumstance", "NORMAL")
 
-            # Переклад обставин
-            circ_ua = ""
-            if circumstance == "ADVANTAGE":
-                circ_ua = " (Перевага)"
-            elif circumstance == "DISADVANTAGE":
-                circ_ua = " (Недолік)"
+            circ_ua = " (Перевага)" if circumstance == "ADVANTAGE" else " (Недолік)" if circumstance == "DISADVANTAGE" else ""
 
-            # Іконки та статус
             if outcome == "CRITICAL SUCCESS":
-                icon = "🔥"
-                outcome_ua = "КРИТИЧНИЙ УСПІХ"
+                icon, outcome_ua = "🔥", "КРИТИЧНИЙ УСПІХ"
             elif outcome == "CRITICAL FAILURE":
-                icon = "💀"
-                outcome_ua = "КРИТИЧНИЙ ПРОВАЛ"
+                icon, outcome_ua = "💀", "КРИТИЧНИЙ ПРОВАЛ"
             elif outcome == "SUCCESS":
-                icon = "✅"
-                outcome_ua = "УСПІХ"
+                icon, outcome_ua = "✅", "УСПІХ"
             else:
-                icon = "❌"
-                outcome_ua = "ПРОВАЛ"
+                icon, outcome_ua = "❌", "ПРОВАЛ"
 
-            # Візуалізуємо формулу: Кидок + Навичка = Тотал
             target_dc = mechanical_updates.get("difficulty", 100)
             dice_log = f"{icon} {skill}{circ_ua}: Кидок {roll_str} + Навичка {skill_val} = {total_score} (Ціль: {target_dc}) -> {outcome_ua}"
             logs.insert(0, dice_log)
 
-            # === ЛОГУВАННЯ ХАРДКОРНИХ НАСЛІДКІВ ===
             if outcome == "CRITICAL SUCCESS":
                 logs.insert(1, f"✨ Осяяння! Навичка '{skill}' назавжди зросла на +1.")
-
             elif outcome == "CRITICAL FAILURE":
                 temp_debuff = mechanical_updates.get("temp_debuff", {}).get(skill, 0)
                 logs.insert(1, f"🩸 Тяжкий наслідок! Отримано тимчасовий штраф -{temp_debuff} до навички '{skill}'.")
-
                 if mechanical_updates.get("permanent_scar"):
                     logs.insert(2, f"☠️ Фатальна помилка! Навичка '{skill}' назавжди знижена на -1.")
 
@@ -359,56 +345,63 @@ def process_game_turn(chat_id, user_input):
             print(f"✈️ TRAVEL: {old_location} -> {new_location}")
             current_char_name = profile.get("Ім'я", "")
 
-            def travel_population_task(new_loc, char_name):
+            # Асинхронна функція для заселення нової локації
+            async def travel_population_task(new_loc, char_name):
                 try:
-                    situation = model_worker.generate_content(
-                        f'Describe atmosphere in "{new_loc}" (Year 298) in 1 sentence.').text.strip()
+                    def _sync_gen_travel():
+                        return model_worker.generate_content(
+                            f'Describe atmosphere in "{new_loc}" (Year 298) in 1 sentence.')
+
+                    situation_resp = await asyncio.to_thread(_sync_gen_travel)
+                    situation = situation_resp.text.strip()
                 except:
                     situation = "A tense day in Westeros."
-                populate_contextual_npcs(new_loc, situation, excluded_name=char_name)
 
-            Thread(target=travel_population_task, args=(new_location, current_char_name)).start()
+                # Припускаємо, що populate_contextual_npcs ми теж зробимо асинхронним
+                await populate_contextual_npcs(new_loc, situation, excluded_name=char_name)
 
-        # Фонове збереження
-        def background_task(chat_id_arg, user_id_arg, profile_arg, char_name_arg, input_arg, story_arg,
-                            npc_changes_arg, legal_names_arg):
+            asyncio.create_task(travel_population_task(new_location, current_char_name))
+
+        # Асинхронне фонове збереження
+        async def background_task(chat_id_arg, user_id_arg, profile_arg, char_name_arg, input_arg, story_arg,
+                                  npc_changes_arg, legal_names_arg):
             try:
-                save_user_data(user_id_arg, profile_arg, char_name_arg)
-                if npc_changes_arg: update_npcs_in_db(npc_changes_arg, legal_names_arg)
+                await save_user_data(user_id_arg, profile_arg, char_name_arg)
+                if npc_changes_arg:
+                    await update_npcs_in_db(npc_changes_arg, legal_names_arg)
 
-                short_hist_turn = summarize_turn(story_arg)
-                short_user_inp = summarize_turn(input_arg)
+                # Обидва summarize_turn тепер awaitable
+                short_hist_turn = await summarize_turn(story_arg)
+                short_user_inp = await summarize_turn(input_arg)
 
                 if chat_id_arg in user_sessions:
                     hist = user_sessions[chat_id_arg].get('history', [])
                     hist.append({"role": "User", "content": short_user_inp})
                     hist.append({"role": "GM", "content": short_hist_turn})
 
-                    # === CONTEXT FLUSHING (Скидання пам'яті) ===
-                    # Якщо історія стає занадто довгою (наприклад, > 20 реплік)
                     if len(hist) > 20:
-                        # Беремо всі повідомлення як один текст
                         history_to_compress = "\n".join([f"{m['role']}: {m['content']}" for m in hist])
-
-                        # Просимо Worker AI зробити один абзац summary
                         summary_prompt = f"Summarize this RPG history into one short paragraph (Ukrainian). Focus on the current location, main objective, and immediate situation:\n{history_to_compress}"
                         try:
-                            summary_resp = model_worker.generate_content(summary_prompt).text.strip()
-                            # ОЧИЩАЄМО історію і залишаємо ТІЛЬКИ summary
+                            def _sync_gen_sum():
+                                return model_worker.generate_content(summary_prompt)
+
+                            summary_resp = await asyncio.to_thread(_sync_gen_sum)
                             user_sessions[chat_id_arg]['history'] = [
-                                {"role": "SYSTEM", "content": f"PREVIOUS EVENTS SUMMARY: {summary_resp}"}]
+                                {"role": "SYSTEM", "content": f"PREVIOUS EVENTS SUMMARY: {summary_resp.text.strip()}"}]
                             print("🧹 [CONTEXT FLUSH] Пам'ять успішно стиснуто!")
                         except Exception as ex:
                             print(f"⚠️ Помилка стиснення: {ex}")
-                            user_sessions[chat_id_arg]['history'] = hist[-20:]  # Fallback, якщо ШІ впав
+                            user_sessions[chat_id_arg]['history'] = hist[-20:]
                     else:
                         user_sessions[chat_id_arg]['history'] = hist
             except Exception as exept:
                 print(f"❌ [BG ERROR] {exept}")
 
-        Thread(target=background_task,
-               args=(
-               chat_id, user_id, profile, profile.get("Ім'я"), user_input, story, npc_changes, legal_npc_names)).start()
+        # Запускаємо фонову задачу замість створення окремого системного потоку
+        asyncio.create_task(
+            background_task(chat_id, user_id, profile, profile.get("Ім'я"), user_input, story, npc_changes,
+                            legal_npc_names))
 
         duration = time.time() - t_start
         timing_details.append(f"💾 Save: {duration:.2f}s")
@@ -422,7 +415,6 @@ def process_game_turn(chat_id, user_input):
 
         change_log = "\n\n📊 " + " | ".join(logs) if logs else ""
         return story + change_log
-
 
     except Exception as e:
         error_msg = str(e)
