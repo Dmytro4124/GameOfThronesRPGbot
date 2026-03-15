@@ -3,6 +3,8 @@ import json
 import difflib
 import re
 import asyncio
+import os
+import hashlib
 import numpy as np
 import gspread
 from google import genai
@@ -17,10 +19,14 @@ from config import (
     GEMINI_API_KEY
 )
 
-# ================= ГЛОБАЛЬНІ КЕШІ =================
+# ================= ГЛОБАЛЬНІ КЕШІ ТА КОНСТАНТИ =================
 LORE_CACHE = []
 NPC_CACHE = {}
 LORE_VECTORS = None
+
+EMBEDDINGS_FILE = "lore_embeddings.npy"
+LORE_HASH_FILE = "lore_hash.txt"
+EMBEDDING_MODEL = "gemini-embedding-2-preview"  # ЄДИНА МОДЕЛЬ ДЛЯ ВСІХ ВЕКТОРІВ
 
 # Ініціалізація клієнта Gemini
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
@@ -65,12 +71,10 @@ async def save_user_data(user_id, profile_data, char_name="Unknown"):
             cells = sheet.findall(str(user_id), in_column=1)
 
             if cells:
-                # Оновлення
                 cell = cells[0]
                 sheet.update_cell(cell.row, 3, json_str)
                 sheet.update_cell(cell.row, 2, char_name)
             else:
-                # Створення
                 sheet.append_row([str(user_id), char_name, json_str])
             return True
         except Exception as e:
@@ -161,7 +165,7 @@ async def get_embedding(text: str):
 
     def _sync_embed():
         response = gemini_client.models.embed_content(
-            model='gemini-embedding-2-preview',
+            model=EMBEDDING_MODEL,
             contents=text
         )
         return response.embeddings[0].values
@@ -174,7 +178,7 @@ async def get_embedding(text: str):
 
 
 async def load_lore_data():
-    """Завантажує базу знань і векторизує її без блокування Event Loop"""
+    """Завантажує базу знань з розумним локальним кешуванням (MD5 Hash)"""
     global LORE_CACHE, LORE_VECTORS
     try:
         def _get_sheet_records():
@@ -188,7 +192,21 @@ async def load_lore_data():
             print("⚠️ База лору порожня.")
             return
 
-        print(f"📚 Завантажено {len(LORE_CACHE)} записів лору. Починаю повільну векторизацію (обхід лімітів)...")
+        # 1. Генеруємо унікальний хеш поточного стану таблиці лору
+        current_lore_str = json.dumps(LORE_CACHE, sort_keys=True)
+        current_hash = hashlib.md5(current_lore_str.encode('utf-8')).hexdigest()
+
+        # 2. Перевіряємо, чи є валідний локальний кеш
+        if os.path.exists(EMBEDDINGS_FILE) and os.path.exists(LORE_HASH_FILE):
+            with open(LORE_HASH_FILE, 'r') as f:
+                saved_hash = f.read().strip()
+
+            if saved_hash == current_hash:
+                print(f"⚡ Локальний кеш актуальний. Завантажую {len(LORE_CACHE)} векторів з {EMBEDDINGS_FILE}...")
+                LORE_VECTORS = np.load(EMBEDDINGS_FILE)
+                return
+
+        print(f"📚 Локальний кеш відсутній або застарів. Починаю повну векторизацію (Модель: {EMBEDDING_MODEL})...")
 
         texts_to_embed = [
             f"{row.get('Ключові слова', '')} {row.get('Інформація', '')}"
@@ -203,7 +221,7 @@ async def load_lore_data():
 
             def _embed_batch():
                 return gemini_client.models.embed_content(
-                    model='gemini-embedding-001',
+                    model=EMBEDDING_MODEL,
                     contents=batch
                 )
 
@@ -216,7 +234,13 @@ async def load_lore_data():
                 await asyncio.sleep(60)
 
         LORE_VECTORS = np.array(all_embeddings)
-        print(f"✅ [RAG] Вектори успішно створено через Gemini для {len(LORE_CACHE)} записів!")
+
+        # 3. Зберігаємо нові вектори та новий хеш на диск
+        np.save(EMBEDDINGS_FILE, LORE_VECTORS)
+        with open(LORE_HASH_FILE, 'w') as f:
+            f.write(current_hash)
+
+        print(f"✅ [RAG] Вектори успішно створено та закешовано локально!")
 
     except Exception as e:
         print(f"⚠️ Не вдалося ініціалізувати векторну базу KnowledgeBase: {e}")
