@@ -1,5 +1,5 @@
 import json
-import time
+import asyncio
 from google import genai
 from google.genai import types
 from config import GEMINI_API_KEY, MODEL_MAIN_NAME, MODEL_WORKER_NAME, MODEL_MAIN_TEMP, MODEL_WORKER_TEMP
@@ -64,8 +64,8 @@ def clean_and_parse_json(text):
         return None
 
 
-def ask_gemini(prompt, use_worker=False):
-    """Універсальна функція запиту з повторними спробами та очищенням JSON."""
+async def ask_gemini(prompt, use_worker=False):
+    """Універсальна асинхронна функція запиту з повторними спробами та очищенням JSON."""
     retries = 3
     delay = 2
     active_model = model_worker if use_worker else model
@@ -74,19 +74,21 @@ def ask_gemini(prompt, use_worker=False):
 
     for attempt in range(retries):
         try:
-            # Зверни увагу: ми БІЛЬШЕ НЕ передаємо require_json=True
-            response = active_model.generate_content(strict_prompt)
+            def _sync_gen():
+                return active_model.generate_content(strict_prompt)
+
+            response = await asyncio.to_thread(_sync_gen)
             result = clean_and_parse_json(response.text)
 
             if result:
                 return result
 
             print(f"⚠️ Спроба {attempt + 1}: Отримано не JSON. Текст: {response.text[:50]}...")
-            time.sleep(delay)
+            await asyncio.sleep(delay)
 
         except Exception as e:
             print(f"❌ Помилка API (спроба {attempt + 1}): {e}")
-            time.sleep(delay)
+            await asyncio.sleep(delay)
             delay += 2
 
     print("❌ Не вдалося отримати JSON від AI.")

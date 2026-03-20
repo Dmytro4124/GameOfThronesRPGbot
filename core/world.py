@@ -35,10 +35,7 @@ async def get_canon_characters(house_name):
     Example: ["Name 1", "Name 2"]
     """
 
-    def _sync_ask():
-        return ask_gemini(prompt)
-
-    result = await asyncio.to_thread(_sync_ask)
+    result = await ask_gemini(prompt)
     return result if result else []
 
 
@@ -121,10 +118,7 @@ HOUSE: {house_name} (Origin: {origin_region})
 Заповни JSON Українською мовою для наступного запиту:
     """
 
-    def _sync_ask():
-        return ask_gemini(prompt)
-
-    profile = await asyncio.to_thread(_sync_ask)
+    profile = await ask_gemini(prompt)
     if profile:
         profile["Ім'я"] = char_name
         profile["Дім"] = house_name

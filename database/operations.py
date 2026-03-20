@@ -197,14 +197,20 @@ async def load_lore_data():
         current_hash = hashlib.md5(current_lore_str.encode('utf-8')).hexdigest()
 
         # 2. Перевіряємо, чи є валідний локальний кеш
-        if os.path.exists(EMBEDDINGS_FILE) and os.path.exists(LORE_HASH_FILE):
+        def _sync_load_cache():
+            if not (os.path.exists(EMBEDDINGS_FILE) and os.path.exists(LORE_HASH_FILE)):
+                return None, None
             with open(LORE_HASH_FILE, 'r') as f:
                 saved_hash = f.read().strip()
-
             if saved_hash == current_hash:
-                print(f"⚡ Локальний кеш актуальний. Завантажую {len(LORE_CACHE)} векторів з {EMBEDDINGS_FILE}...")
-                LORE_VECTORS = np.load(EMBEDDINGS_FILE)
-                return
+                return saved_hash, np.load(EMBEDDINGS_FILE)
+            return saved_hash, None
+
+        saved_hash, cached_vectors = await asyncio.to_thread(_sync_load_cache)
+        if saved_hash == current_hash and cached_vectors is not None:
+            print(f"⚡ Локальний кеш актуальний. Завантажую {len(LORE_CACHE)} векторів з {EMBEDDINGS_FILE}...")
+            LORE_VECTORS = cached_vectors
+            return
 
         print(f"📚 Локальний кеш відсутній або застарів. Починаю повну векторизацію (Модель: {EMBEDDING_MODEL})...")
 
@@ -236,9 +242,12 @@ async def load_lore_data():
         LORE_VECTORS = np.array(all_embeddings)
 
         # 3. Зберігаємо нові вектори та новий хеш на диск
-        np.save(EMBEDDINGS_FILE, LORE_VECTORS)
-        with open(LORE_HASH_FILE, 'w') as f:
-            f.write(current_hash)
+        def _sync_save_cache():
+            np.save(EMBEDDINGS_FILE, LORE_VECTORS)
+            with open(LORE_HASH_FILE, 'w') as f:
+                f.write(current_hash)
+
+        await asyncio.to_thread(_sync_save_cache)
 
         print(f"✅ [RAG] Вектори успішно створено та закешовано локально!")
 
