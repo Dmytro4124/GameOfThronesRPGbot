@@ -104,7 +104,7 @@ def apply_system_impacts(profile, ai_impacts):
             logs.append(f"⏳ Час: {old_time_str} -> {exact_time_str} (+{minutes_passed} хв)")
 
     # === 1.1. ОБРОБКА ЕНЕРГІЇ ===
-    if energy_impact != "none" or energy_impact == "sleep":
+    if energy_impact != "none":
         current_energy = safe_int(profile.get("Енергія", DEFAULT_ENERGY), DEFAULT_ENERGY)
 
         energy_ranges_negative = {
@@ -133,6 +133,10 @@ def apply_system_impacts(profile, ai_impacts):
             profile["Енергія"] = new_energy
             sign = "+" if delta > 0 else ""
             logs.append(f"⚡ Енергія: {current_energy} -> {new_energy} ({sign}{delta})")
+
+        if energy_impact in ["sleep", "restore_full"] and profile.get("temp_debuffs"):
+            profile["temp_debuffs"] = {}
+            logs.append("✨ Після відпочинку тимчасові штрафи знято.")
 
     # === 2. ОБРОБКА ЗДОРОВ'Я ===
     damage_tag = ai_impacts.get("health_impact", "none")
@@ -211,9 +215,19 @@ def apply_system_impacts(profile, ai_impacts):
 
             if target_key:
                 old_val = safe_int(profile[target_key], 10)
-                new_val = min(100, old_val + val)
+                new_val = max(0, min(100, old_val + val))
                 profile[target_key] = new_val
-                logs.append(f"📈 {skill_name}: +{val} (Стало {new_val})")
+                sign = "+" if val > 0 else ""
+                logs.append(f"{'📈' if val > 0 else '📉'} {skill_name}: {sign}{val} (Стало {new_val})")
+
+    # === 5.5. ОБРОБКА ТИМЧАСОВИХ ШТРАФІВ ===
+    temp_debuff_updates = ai_impacts.get("temp_debuff", {})
+    if temp_debuff_updates:
+        current_debuffs = profile.get("temp_debuffs", {})
+        for skill_name, penalty in temp_debuff_updates.items():
+            current_debuffs[skill_name] = safe_int(penalty, 0)
+            logs.append(f"🩸 Тимчасовий штраф: {skill_name} -{penalty}")
+        profile["temp_debuffs"] = current_debuffs
 
     # === 6. ОБРОБКА ГОДИННИКІВ (CLOCKS) ===
     clocks_updates = ai_impacts.get("clocks_impact", {})
@@ -467,13 +481,14 @@ async def resolve_action_mechanics(user_input, profile):
         return random.randint(1, 50) + random.randint(1, 50)
 
     skills = {
-        "Бойові": safe_int(profile.get("Бойові навички", 10), 10),
-        "Військові": safe_int(profile.get("Військові навички", 10), 10),
-        "Інтрига": safe_int(profile.get("Інтрига", 10), 10),
-        "Управління": safe_int(profile.get("Управління", 10), 10)
+        "Бойові":     max(1, safe_int(profile.get("Бойові навички", 10), 10)     - safe_int(temp_debuffs.get("Бойові", 0), 0)),
+        "Військові":  max(1, safe_int(profile.get("Військові навички", 10), 10)  - safe_int(temp_debuffs.get("Військові", 0), 0)),
+        "Інтрига":    max(1, safe_int(profile.get("Інтрига", 10), 10)            - safe_int(temp_debuffs.get("Інтрига", 0), 0)),
+        "Управління": max(1, safe_int(profile.get("Управління", 10), 10)         - safe_int(temp_debuffs.get("Управління", 0), 0)),
     }
 
     clocks_info = profile.get("Годинники", {})
+    temp_debuffs = profile.get("temp_debuffs", {})
 
     # ЖОРСТКЕ ПЕРЕХОПЛЕННЯ (ВТРАТА СВІДОМОСТІ ДО ШІ)
     current_energy = safe_int(profile.get("Енергія", DEFAULT_ENERGY), DEFAULT_ENERGY)

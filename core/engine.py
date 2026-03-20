@@ -93,7 +93,11 @@ async def process_game_turn(chat_id, user_input):
                     f"🏋️ Тренування: {skill} +{gain} (Витрачено: {days_spent} дн., {cost_gold} 🪙, {energy_cost} ⚡)")
 
                 if training_result.get("temp_debuff", 0) > 0:
-                    logs.append(f"🩸 Травма від перевтоми! Штраф -{training_result['temp_debuff']} до '{skill}'.")
+                    debuff_val = training_result["temp_debuff"]
+                    logs.append(f"🩸 Травма від перевтоми! Штраф -{debuff_val} до '{skill}'.")
+                    current_debuffs = profile.get("temp_debuffs", {})
+                    current_debuffs[skill] = debuff_val
+                    profile["temp_debuffs"] = current_debuffs
 
                 mechanical_updates["minutes_passed"] = days_spent * 1440
                 current_energy = safe_int(profile.get("Енергія", 100))
