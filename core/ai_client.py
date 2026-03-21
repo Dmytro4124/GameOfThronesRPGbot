@@ -16,17 +16,33 @@ class AIWrapper:
         self.model_name = model_name
         self.temperature = temperature
 
-    def generate_content(self, prompt):
-        config_args = {
-            "temperature": self.temperature
-        }
-
-        # Жодних response_mime_type. Працюємо як з класичним текстом.
-        return client.models.generate_content(
-            model=self.model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(**config_args)
-        )
+    def generate_content(self, prompt, max_retries=3):
+        import time
+        delay = 2
+        last_error = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                config_args = {
+                    "temperature": self.temperature
+                }
+                # Жодних response_mime_type. Працюємо як з класичним текстом.
+                return client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(**config_args)
+                )
+            except Exception as e:
+                last_error = e
+                if attempt == max_retries:
+                    raise
+                err_str = str(e)
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    delay = min(delay * 3, 60)
+                else:
+                    delay += 2
+                print(f"⚠️ AIWrapper retry {attempt}/{max_retries}: {err_str[:80]}... (sleep {delay}s)")
+                time.sleep(delay)
+        raise last_error
 
 
 # Створюємо екземпляри моделей

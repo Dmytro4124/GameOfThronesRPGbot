@@ -16,6 +16,17 @@ from database.operations import (
 user_sessions = {}
 
 
+def _sanitize_story(text: str) -> str:
+    """Видаляє технічні рядки кидків, що випадково потрапили в наратив."""
+    # "Кидок 47 + Навичка 30 = 77 (Ціль: 100) -> ПРОВАЛ"
+    text = re.sub(r'Кидок\s+\d+\s*\+\s*Навичка\s+\d+\s*=\s*\d+\s*\(Ціль:\s*\d+\)\s*->\s*\S+', '', text)
+    # Осиротілі числові патерни типу "HP: 80", "DC 60", "E: 45"
+    text = re.sub(r"\b(HP|DC|E|Енергія|Здоров'я)\s*[:=\s]\s*\d+", '', text)
+    # Подвійні пробіли та порожні рядки
+    text = re.sub(r'  +', ' ', text)
+    return text.strip()
+
+
 def _build_impact_hints(impact_logs: list) -> str:
     """Converts technical impact log strings into GM narrative cues (no numbers)."""
     hints = []
@@ -421,6 +432,7 @@ async def process_game_turn(chat_id, user_input):
         debug_msg += f"\n🏁 *ВСЬОГО:* `{total_time:.2f}s`"
         user_sessions[chat_id]['last_debug_time'] = debug_msg
 
+        story = _sanitize_story(story)
         change_log = "\n\n📊 " + " | ".join(logs) if logs else ""
 
         return story + change_log, suggested_actions
@@ -428,4 +440,4 @@ async def process_game_turn(chat_id, user_input):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return f"📜 *Ворон згубив вашого листа...* (Помилка: {str(e)})", []
+        return "📜 *Ворон згубив вашого листа... Спробуйте ще раз.*", []
