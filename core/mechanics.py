@@ -186,6 +186,18 @@ def apply_system_impacts(profile, ai_impacts):
     if new_items:
         if isinstance(new_items, str): new_items = [new_items]
         for item in new_items:
+            # Якщо предмет вже є в інвентарі — пропускаємо без логу
+            if item.strip().lower() in current_inv_str.lower():
+                continue
+            # Fallback-захист від галюцинацій: якщо предмет з'являється без золотової транзакції,
+            # без бойових подій і без зміни локації/сцени — позначаємо підозрілим для Евалюатора.
+            # ВАЖЛИВО: предмет все одно додається (не блокуємо квестові нагороди та подарунки NPC).
+            _gold_tag = str(ai_impacts.get("gold_impact", "none"))
+            _has_transaction = _gold_tag not in ("none", "0")
+            _has_combat = ai_impacts.get("health_impact", "none") != "none"
+            _has_scene_change = ai_impacts.get("scene_impact", "none") != "none"
+            if not (_has_transaction or _has_combat or _has_scene_change):
+                logs.append(f"[БЛОКУВАННЯ ГАЛЮЦИНАЦІЇ] Предмет '{item}' отримано без транзакції, бою або зміни сцени.")
             inventory_list.append(item)
             logs.append(f"➕ Отримано: {item}")
 
@@ -281,14 +293,17 @@ async def validate_action(user_input, profile):
         return False, "Ви мертві. Ваша історія завершена, і ви не можете діяти."
 
     char_name = profile.get("Ім'я", "Герой")
+    inventory_list = profile.get("Інвентар", "порожній") or "порожній"
 
     prompt = f"""
-        You are the Lore Keeper for the game “Game of Thrones” (Medieval Fantasy).
+        You are the Lore Keeper for the game "Game of Thrones" (Medieval Fantasy).
 
-        Your task: Check the player's action for “legality.”
+        Your task: Check the player's action for "legality."
 
         PLAYER: {char_name}
-        ACTION: “{user_input}”
+        ACTION: "{user_input}"
+        PLAYER INVENTORY (items the player actually owns): {inventory_list}
+        RULE: If the player's action references physically producing, holding, or using an item NOT in the PLAYER INVENTORY list above, return is_valid: false.
 
         === THE GOLDEN RULE: INTENT ONLY ===
         The player is allowed to describe ONLY what they TRY to do, player controls ONLY their own body and voice.
@@ -311,13 +326,13 @@ async def validate_action(user_input, profile):
            - ✅ CORRECT: "I search the room for secrets."
 
         4. It is FORBIDDEN to write actions for NPCs (other characters).
-            - ❌ NOT ALLOWED: “Jorah Mormont draws his sword and kills the Night King.” (The player controls Jorah).
-            - ✅ ALLOWED: “I shout to Jorah, ‘Kill him!’” (The player controls their voice).
-            - ✅ ACCEPTABLE: “I order Jorah to attack.” (The player gives the order, and the GM decides whether the NPC will carry it out or not).
+            - ❌ NOT ALLOWED: "Jorah Mormont draws his sword and kills the Night King." (The player controls Jorah).
+            - ✅ ALLOWED: "I shout to Jorah, ‘Kill him!’" (The player controls their voice).
+            - ✅ ACCEPTABLE: "I order Jorah to attack." (The player gives the order, and the GM decides whether the NPC will carry it out or not).
 
         5. It is FORBIDDEN to describe the CONSEQUENCES of your actions as fact.
-            - ❌ NOT ALLOWED: “I hit the guard, and his head flies off his shoulders.” (The player decided the outcome).
-            - ✅ ALLOWED: “I hit the guard in the neck with my sword with all my strength.” (The player describes the attempt, the outcome is up to the GM).
+            - ❌ NOT ALLOWED: "I hit the guard, and his head flies off his shoulders." (The player decided the outcome).
+            - ✅ ALLOWED: "I hit the guard in the neck with my sword with all my strength." (The player describes the attempt, the outcome is up to the GM).
 
         6. **NPC as Subject:** The sentence describes what an NPC does.
            - ❌ "Drogo laughs." (Player decided Drogo laughs).
@@ -330,22 +345,39 @@ async def validate_action(user_input, profile):
 
         === PROHIBITION CRITERIA (RETURN is_valid: false) ===
         1. **Anachronisms:** Mention of modern technologies (F-16, telephone, automatic weapon, internet, NATO, Biden).
-        2. **ANTI-GOD-MODING (REALITY CHECK):** If the player attempts to invent reality (e.g., "I find a chest of infinite gold", "I suddenly have a Valyrian sword", "I instantly kill the boss"), you MUST automatically classify the OUTCOME as "FAILURE". 
-        3. **Meta-gaming:** Attempts to control the plot as an author (“I want a dragon to fly in and save everyone,” “Skip to the end of the game”).
+        2. **ANTI-GOD-MODING — INSTANT BLOCK:** If the player PHYSICALLY manifests, produces, or uses a non-existent item:
+           - ❌ "I pull out the Heart of the Dragon" (physically produces item not in PLAYER INVENTORY)
+           - ❌ "I suddenly wield a Valyrian sword" (physically uses item not in PLAYER INVENTORY)
+           - ❌ "I find a chest of infinite gold" (invents world state as fact)
+           These actions are ILLEGAL. Return is_valid: false immediately.
+        3. **Meta-gaming:** Attempts to control the plot as an author ("I want a dragon to fly in and save everyone," "Skip to the end of the game").
         4. **Absurdity:** Actions that are physically impossible for a human (unless it is magic available in the lore, e.g., wargs).
 
         === PERMISSION CRITERIA (RETURN is_valid: true) ===
-        1. Allow risky actions (“I attack the king” is stupid, but legal. The head GM will kill him).
+        1. Allow risky actions ("I attack the king" is stupid, but legal. The head GM will kill him).
         2. Allow jokes and conversations.
         3. Allow any actions that are possible in the physical world of Westeros.
+        4. **VERBAL BLUFF / BOAST (ALWAYS ALLOW):** If the player CLAIMS or DECLARES something verbally to an NPC — even something false or impossible — this is LEGAL roleplay. The BLUFF rule OVERRIDES ANTI-GOD-MODING when the action is purely verbal.
+           - ✅ "I tell her I have a dragon egg." (verbal claim, not physical production)
+           - ✅ "I command the guards to bow to my dragon resting nearby." (verbal boast — no dragon physically produced)
+           - ✅ "I shout that I am the true king with ten thousand swords." (declaration, not physical act)
+           RULE: If the action contains only speech/commands/declarations — return is_valid: true regardless of content.
 
         === YOUR VERDICT ===
         If the player describes the RESULT, reject the action.
 
+        === STYLE RULE FOR refusal_reason ===
+        Write EXCLUSIVELY in the voice of a harsh, sardonic medieval Narrator (like a GoT chapter heading).
+        Language: Ukrainian ONLY.
+        FORBIDDEN: AI terminology, modern words (F-16, internet, NASA, Biden), English words.
+        Style: 1-2 sentences. Poetic, cutting, in-universe.
+        GOOD example: "Дракони — лише попіл і легенди, принце. Твоя порожня хвастощі не обманює навіть ринкових злодіїв."
+        BAD example (FORBIDDEN): "The gods don’t know what an F-16 is." — contains English and modern word.
+
         OUTPUT STRICTLY VALID JSON. NO MARKDOWN. NO BACKTICKS. NO CODE FENCES.
         {{
-            “is_valid”: true or false,
-            “refusal_reason”: “A short ironic comment in Ukrainian explaining why it is impossible (only if false). For example: ‘The gods don’t know what an F-16 is.’”
+            "is_valid": true or false,
+            "refusal_reason": "Художня відмова голосом Оповідача GoT (тільки українська, без сучасних слів). Приклад: ‘Боги не дарували смертним крила, щоб злітати крізь стіни, принце.’"
         }}
         """
     try:

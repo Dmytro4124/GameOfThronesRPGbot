@@ -16,6 +16,45 @@ from database.operations import (
 user_sessions = {}
 
 
+def _build_impact_hints(impact_logs: list) -> str:
+    """Converts technical impact log strings into GM narrative cues (no numbers)."""
+    hints = []
+    for entry in impact_logs:
+        if "⚡ Енергія" in entry:
+            m_new = re.search(r'-> (\d+)', entry)
+            m_delta = re.search(r'\(([+-]?\d+)\)', entry)
+            new_val = int(m_new.group(1)) if m_new else 100
+            delta = int(m_delta.group(1)) if m_delta else 0
+
+            if delta >= 1:
+                hints.append("ENERGY RESTORE: The character recovered. GM may subtly note a sense of refreshment or renewed vigour.")
+            elif new_val <= 29 and delta < 0:
+                hints.append("ENERGY DRAIN (SERIOUS): The character is severely exhausted. GM MUST describe visible struggle: trembling hands, ragged breath, faltering steps.")
+            elif new_val <= 59 and delta <= -10:
+                hints.append("ENERGY DRAIN: The character is noticeably tired. GM MUST weave weariness into the narrative (e.g., 'your legs grow heavy', 'a wave of exhaustion washes over you').")
+            # 60-100: no hint — character is fine
+
+        elif "❤️ Здоров'я" in entry:
+            m_vals = re.search(r'(\d+) -> (\d+)', entry)
+            if not m_vals:
+                continue
+            old_val = int(m_vals.group(1))
+            new_val = int(m_vals.group(2))
+            delta = new_val - old_val
+
+            if delta >= 1:
+                hints.append("HEALTH RESTORE: The character healed. GM may note a sense of relief or physical recovery.")
+            elif delta < 0:
+                if new_val <= 39:
+                    hints.append("HEALTH CRITICAL: The character is gravely wounded. GM MUST convey urgency and mortal danger (e.g., 'blood pours freely', 'each breath is a struggle', 'death hovers close').")
+                elif new_val <= 69:
+                    hints.append("HEALTH WOUND (SERIOUS): The character is significantly hurt. GM MUST describe the wound clearly (e.g., 'blood flows', 'a sharp pain flares', 'you stagger').")
+                else:
+                    hints.append("HEALTH WOUND (MINOR): The character took a glancing blow. GM SHOULD note it briefly (e.g., 'a wince', 'a graze', 'the sting of a blow').")
+
+    return "\n".join(hints)
+
+
 async def summarize_turn(gm_response):
     clean_story = gm_response.split("📊")[0][:800]
     prompt = f"""
@@ -75,7 +114,7 @@ async def process_game_turn(chat_id, user_input):
     # === ЦЕНЗОР: Перевірка дії до будь-якої механіки ===
     is_valid, refusal_reason = await validate_action(user_input, profile)
     if not is_valid:
-        return refusal_reason, []
+        return refusal_reason + "\n\n📊 🛑 Дію заблоковано Цензором.", []
 
     mechanics_verdict, mechanical_updates = await resolve_action_mechanics(user_input, profile)
 
@@ -137,6 +176,7 @@ async def process_game_turn(chat_id, user_input):
 
     profile, impact_logs = apply_system_impacts(profile, mechanical_updates)
     logs.extend(impact_logs)
+    impact_narrative_hints = _build_impact_hints(impact_logs)
 
     duration = time.time() - t_start
     timing_details.append(f"🤖 Mechanics: {duration:.2f}s")
@@ -184,11 +224,18 @@ async def process_game_turn(chat_id, user_input):
 
     <mechanical_verdict>
     {mechanics_verdict}
-    Instruction: You MUST adhere to this verdict. 
+    Instruction: You MUST adhere to this verdict.
     - If FAILURE: Describe a painful or frustrating outcome. Add tension.
     - If SUCCESS: Describe a triumph.
-    - NO NUMBERS: NEVER mention specific numeric values for gold, health, skills, or energy in the story text.
+    - NO NUMBERS (ABSOLUTE): NEVER write any digit or numeral in the story text.
+      This includes numbers spoken by the player in their action.
+      MANDATORY CONVERSION — if the player mentions a number, convert it:
+        "5000 gold" → "a fortune", "a heavy pouch of gold", "enough to buy a lordship"
+        "100 soldiers" → "a host of men", "a small army"
+        "3 days" → "a few days", "several days' ride"
+      The narrative world has no arithmetic. Only weight, scale, and sensation.
     </mechanical_verdict>
+    {f'<system_impacts>{chr(10)}{impact_narrative_hints}{chr(10)}RULE: You MUST weave the above hints into the story narrative WITHOUT using any numbers. These are mandatory narrative beats.{chr(10)}</system_impacts>' if impact_narrative_hints else ''}
 
     <golden_laws_of_agency>
     1. NEVER TOUCH THE PLAYER: You control NPCs and Physics. The Player controls ONLY their Hero.
