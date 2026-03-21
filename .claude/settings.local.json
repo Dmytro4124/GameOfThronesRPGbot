@@ -4,7 +4,8 @@
       "Bash(grep -E \"^/c/Users.*\\\\.py$\")",
       "Read(//mnt/c/Users/dmytr/**)",
       "Bash(python -c \"import core.mechanics\")",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(PYTHONIOENCODING=utf-8 python qa_auto_test.py --help)"
     ]
   }
 }

@@ -11,73 +11,43 @@ from core.ai_client import clean_and_parse_json
 from database.operations import get_house_stats_data, save_user_data, get_user_data
 from database.sheets import db
 from core.world import generate_initial_stats
-from config import GEMINI_API_KEY_TEST, MODEL_MAIN_NAME, TAB_USERS
+from config import GEMINI_API_KEYS_TEST, MODEL_MAIN_NAME, TAB_USERS
 
 # === КОНСТАНТИ ===
-TEST_USER_ID = 999_999_999  # Зарезервований sentinel ID виключно для автотестів QA
 SLEEP_INIT_SEC = 10          # Пауза перед першим викликом рушія (rate-limit)
 SLEEP_AFTER_ENGINE_SEC = 30  # Пауза після виклику рушія
 SLEEP_AFTER_EVALUATOR_SEC = 30  # Пауза після виклику евалюатора
-PLAYER_HISTORY_MAX_MESSAGES = 6  # Rolling window для контексту гравця
+PLAYER_HISTORY_MAX_MESSAGES = 6  # Rolling window за замовчуванням (може бути перевизначено профілем)
 
 # === ЛОГУВАННЯ ===
-os.makedirs("qa_logs", exist_ok=True)
-_run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(f"qa_logs/run_{_run_ts}.log", encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
-)
 log = logging.getLogger(__name__)
 
-# === ТЕСТОВИЙ КЛІЄНТ (використовує GEMINI_API_KEY_TEST) ===
-_test_client = genai.Client(api_key=GEMINI_API_KEY_TEST)
+def _setup_logging(profile_key: str) -> str:
+    """Налаштовує логування з ім'ям профілю у назві файлу. Повертає timestamp."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    os.makedirs("qa_logs", exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            logging.FileHandler(f"qa_logs/run_{profile_key}_{ts}.log", encoding="utf-8"),
+            logging.StreamHandler(),
+        ],
+    )
+    return ts
+
+# === ПУЛ ТЕСТОВИХ КЛІЄНТІВ (round-robin по ключах) ===
+
+def _get_test_client(profile_index: int = 0) -> genai.Client:
+    """Повертає genai.Client з пулу ключів за індексом профілю."""
+    if not GEMINI_API_KEYS_TEST:
+        raise RuntimeError("Жоден GEMINI_API_KEY_TEST* не знайдено в .env")
+    key = GEMINI_API_KEYS_TEST[profile_index % len(GEMINI_API_KEYS_TEST)]
+    return genai.Client(api_key=key)
 
 
 # === ПРОМПТИ ===
-
-# Статична частина промпту гравця (system instruction).
-# <input_data> (SYSTEM_RESPONSE + PLAYER_CURRENT_STATE) інжектується per-turn у user message.
-PLAYER_SYSTEM_PROMPT = """
-<role>
-Ти — Хаос-Тестувальник (Chaos QA Engineer), який грає в текстову RPG у всесвіті "Гри Престолів". Твоя мета — зламати ігрову логіку, виявити баги рушія та перевірити межі дозволеного (God-mode, галюцинації системи).
-</role>
-
-<execution_mode>
-ТИ ВИКОНУЄШ ЦЕЙ ПРОМПТ ЯК ПРОГРАМУ, КРОК ЗА КРОКОМ.
-</execution_mode>
-
-<system_rules>
-1. ФІЗИКА СВІТУ (GoT): Це світ низького фентезі. Магії майже немає. Рушій ПОВИНЕН блокувати спроби кастувати фаєрболи, телепортуватися або діставати зброю, якої немає в PLAYER_CURRENT_STATE. Твоє завдання — провокувати рушій на ці помилки.
-2. ВЗАЄМОДІЯ З КОНТЕКСТОМ: Твоя дія має бути відповіддю на SYSTEM_RESPONSE. Не пиши дію у вакуумі.
-3. ТЕСТОВІ ВЕКТОРИ: Ти маєш атакувати рушій через агресію (напад на нейтральних NPC), порушення економіки (спроба купити щось без грошей) або галюцинації (використання вигаданих предметів).
-</system_rules>
-
-<output_requirements>
-- ВИКЛЮЧНО валідний JSON. Жодного тексту поза фігурними дужками { }.
-- НІКОЛИ не використовуй подвійні лапки (") всередині значень. Замінюй їх на одинарні (') або ялинки («»).
-- Формат JSON має містити рівно два ключі: "thought_process" та "action" (максимум 500 символів).
-</output_requirements>
-
-<thought_algorithm>
-У ключі "thought_process" ти ПОВИНЕН виконати Tree of Thoughts:
-1. Аналіз: Що щойно описав рушій?
-2. Branch A (Адекватна дія): Як би вчинив звичайний гравець?
-3. Branch B (Стрес-тест): Як можна агресивно зламати цю сцену (напад, крадіжка)?
-4. Branch C (Галюцинація): Яку неможливу дію (магія/неіснуючий предмет) можна заявити?
-5. Синтез (Adversarial Selection): Обери ту гілку, яка зараз найімовірніше змусить рушій помилитися або пропустити баг.
-</thought_algorithm>
-
-<few_shot_example>
-{
-  "thought_process": "Аналіз: Рушій описав вартового біля воріт та запропонував показати перепустку. Branch A: Показати перепустку. Branch B: Напасти на вартового голими руками, щоб перевірити бойову систему і чи вб'є він мене. Branch C: Дістати з інвентаря вигаданий 'Лазерний Меч' і телепортуватися за стіну. Синтез: Обираю Branch C, оскільки хочу перевірити, чи спрацює анти-галюцинатор рушія на 'Лазерний Меч'.",
-  "action": "Я ігнорую вимогу про перепустку, дістаю свій сяючий 'Лазерний Меч Валірії', якого немає в моєму інвентарі, і використовую заклинання телепортації, щоб миттєво опинитися за воротами."
-}
-</few_shot_example>
-"""
+# PLAYER_SYSTEM_PROMPT тепер береться з qa_profiles.TEST_PROFILES[profile]["prompt"]
 
 EVALUATOR_PROMPT = """
 <role>
@@ -95,13 +65,14 @@ UI_TEXT: {ui_text_data}
 
 <system_rules>
 Ти оцінюєш рушій за критеріями автоматичного FAIL. Якщо знайдено хоч одне порушення — статус FAIL.
-1. ПОРУШЕННЯ ІМЕРСИВНОСТІ (UI МІСТИТЬ ЦИФРИ): Художній текст (UI_TEXT) НЕ ПОВИНЕН містити цифр чи системних термінів. Фрази типу 'ви втратили 5 енергії' або 'провал кидка кубика' в UI — це беззаперечний FAIL.
+0. БЛОКУВАННЯ ЦЕНЗОРОМ (OVERRIDE): Якщо INTERNAL_LOGS містить рядок '🛑 Дію заблоковано Цензором' — Цензор відхилив дію ДО механічної обробки. В цьому випадку: Rules 3A, 3B, 4, 5 НЕ ЗАСТОСОВУВАТИ (кидка, механіки та наративу фізичного стану не було). Перевіряти ТІЛЬКИ: а) Чи є в UI_TEXT художнє пояснення відмови (будь-яке пояснення, чому дію неможливо виконати). Якщо пояснення є — PASS. Якщо UI порожній або містить тільки технічний текст — FAIL. б) Rule 1 та Rule 6 все ще діють.
+1. ПОРУШЕННЯ ІМЕРСИВНОСТІ (СИСТЕМНІ ЦИФРИ В UI): Художній текст (UI_TEXT) НЕ ПОВИНЕН містити СИСТЕМНИХ термінів або цифр, що прямо розкривають ігрову механіку. Приклади FAIL: 'ви втратили 5 енергії', 'HP: 80', 'кидок кубика 47', 'навичка +1', 'DC 60'. Приклади ДОПУСТИМОГО: NPC називає ціну ('п'ятдесят золотих', '50 монет'), кількість людей ('три вартових'), відстані ('два дні шляху'). Ключове питання: чи РОЗКРИВАЄ цифра внутрішню механіку рушія? Якщо так — FAIL. Якщо це органічна частина діалогу/опису — PASS.
 2. ГАЛЮЦИНАЦІЇ РУШІЯ (КРИТИЧНО): У INTERNAL_LOGS є теги '[БЛОКУВАННЯ ГАЛЮЦИНАЦІЇ]' або 'ШІ придумав NPC'.
 3. ЗЛАМАНА МАТЕМАТИКА ТА ПРОГРЕСІЯ — ДВА НЕЗАЛЕЖНИХ ПРАВИЛА:
-   3A. МАТЕМАТИКА КИДКА: При ризикованій дії в логах МАЄ бути рядок формату '{Навичка}: Кидок {N} + Навичка {M} = {сума} (Ціль: {DC}) -> УСПІХ/ПРОВАЛ'. ВАЖЛИВО: 'Навичка {M}' тут — це ПОТОЧНИЙ РІВЕНЬ СТАТY, що використовується в розрахунку, а НЕ підвищення навички. Не плутати з апгрейдом. Якщо при ризикованій дії немає такого рядка зовсім — FAIL.
+   3A. МАТЕМАТИКА КИДКА: При ризикованій дії в логах МАЄ бути рядок формату '{Навичка}: Кидок {N} + Навичка {M} = {сума} (Ціль: {DC}) -> УСПІХ/ПРОВАЛ'. ВАЖЛИВО: 'Навичка {M}' тут — це ПОТОЧНИЙ РІВЕНЬ СТАТY, а НЕ підвищення. ВИКЛЮЧЕННЯ: якщо дія гравця є пасивною (чекати, спостерігати, сідати, стояти) і в логах є 'Немає: Кидок -' або взагалі немає рядка кидка — це AUTO_SUCCESS, НЕ порушення. Rule 3A застосовувати ТІЛЬКИ до ризикованих дій (бій, крадіжка, переконання, магія, атлетика).
    3B. НЕЛЕГАЛЬНИЙ АПГРЕЙД СТАТY: Підвищення навички відображається ВИКЛЮЧНО рядком '📈 {назва_навички}: +{N} (Стало {нове_значення})'. Такий рядок 📈 легальний ТІЛЬКИ якщо в тому самому ході: кидок > 95, АБО дія містила слово 'тренування'. Якщо рядок 📈 є, а ці умови не виконані — FAIL. Якщо рядка 📈 немає взагалі — підвищення НЕ відбулось, Rule 3B не застосовувати.
 4. РОЗСИНХРОН НАРАТИВУ (ЗОНОВА ЛОГІКА): Перевіряй лише ті втрати, які зобов'язані бути відображені в наративі. Лог-рядки мають формат '⚡ Енергія: {old} -> {new} ({delta})' та '❤️ Здоров'я: {old} -> {new}'. Зчитуй {new} як залишковий рівень.
-   ЕНЕРГІЯ: a) залишок ≥ 60 — наратив НЕ потрібен, тиша Майстра ПРАВИЛЬНА, НЕ карати; b) залишок 30–59 І дельта ≤ -10 — UI ПОВИНЕН згадати стому; c) залишок ≤ 29 — будь-яка втрата → UI ПОВИНЕН описати виснаження. Порушення b/c → FAIL.
+   ЕНЕРГІЯ: a) залишок ≥ 60 — наратив НЕ потрібен, тиша Майстра ПРАВИЛЬНА, НЕ карати; b) залишок 30–59 — перевір дельту: ТІЛЬКИ якщо |дельта| ≥ 10 (значна втрата), UI ПОВИНЕН згадати стому. Якщо |дельта| < 10 (незначна втрата, наприклад -7) — наратив НЕ обов'язковий навіть у цій зоні, НЕ карати; c) залишок ≤ 29 — будь-яка втрата → UI ПОВИНЕН описати виснаження. Порушення b (при |дельта| ≥ 10) або c → FAIL. Все інше — PASS.
    ЗДОРОВ'Я: будь-яка втрата: залишок ≥ 70 → хоча б мимохідна згадка ('wince', 'graze'); залишок 40–69 → явний опис рани ('blood', 'pain'); залишок ≤ 39 → критична небезпека в UI. Відсутність → FAIL.
    ЗОЛОТО/ІНШІ РЕСУРСИ: зміна золота в логах НЕ вимагає згадки в UI. Не перевіряти.
 5. GOD-MODE: Система дозволила дію при нестачі енергії без жорсткої відмови в UI.
@@ -116,19 +87,29 @@ UI_TEXT: {ui_text_data}
 
 <thought_algorithm>
 У ключі "log_analysis" проведи стислий Adversarial Validation:
+0. СПОЧАТКУ перевір: чи є в INTERNAL_LOGS рядок '🛑 Дію заблоковано Цензором'? Якщо ТАК — застосуй Rule 0 (Censor Override): пропусти Rules 3-5, перевір лише чи UI має художнє пояснення + Rules 1, 6.
 1. Шукай в INTERNAL_LOGS рядки формату '📈 {навичка}: +{N}' — це єдині апгрейди статів. Якщо таких рядків немає — прогресії не було, Rule 3B не застосовувати. Якщо є — перевір, чи в тому самому ході був кидок > 95 або слово 'тренування'. Рядки 'Кидок {N} + Навичка {M}' — це розрахунок шансу, НЕ апгрейд, ігнорувати для Rule 3B.
-2. Перевір UI_TEXT на імерсивність (відсутність цифр) та синхронізацію з логами за зоновою логікою (Rule 4).
+2. Перевір UI_TEXT на імерсивність (СИСТЕМНІ цифри — Rule 1) та синхронізацію з логами за зоновою логікою (Rule 4). Для енергії у зоні 30-59: перевір |дельту| — якщо < 10, наратив НЕ обов'язковий.
 3. Винеси фінальний вердикт.
 </thought_algorithm>
 
-<few_shot_example>
+<few_shot_examples>
+ПРИКЛАД 1 (PASS — стандартний кидок):
 {
-  "log_analysis": "INTERNAL_LOGS: 'Інтрига: Кидок 26 + Навичка 75 = 101 (Ціль: 120) -> ПРОВАЛ' — стандартний рядок кидка, 'Навичка 75' є поточним рівнем статy в розрахунку, не апгрейдом. Рядків '📈' немає — прогресії не відбулось, Rule 3B не застосовується. Енергія: 80 -> 76 (-4) — залишок 76, зона fine (≥60), тиша Майстра коректна. UI цифр немає. Вердикт: PASS.",
+  "log_analysis": "Rule 0: немає '🛑', Цензор не спрацював. INTERNAL_LOGS: 'Інтрига: Кидок 26 + Навичка 75 = 101 (Ціль: 120) -> ПРОВАЛ' — стандартний рядок кидка, 'Навичка 75' є поточним рівнем статy, не апгрейдом. Рядків '📈' немає — Rule 3B не застосовується. Енергія: 80 -> 76 (-4) — залишок 76, зона fine (≥60), тиша Майстра коректна. UI системних цифр немає. Вердикт: PASS.",
   "status": "PASS",
   "reason": "Усі перевірки пройдено. Рядок кидка коректний, апгрейдів (📈) немає.",
   "ux_score": 7
 }
-</few_shot_example>
+
+ПРИКЛАД 2 (PASS — енергія в зоні 30-59 але мала дельта):
+{
+  "log_analysis": "Rule 0: немає '🛑'. Енергія: 60 -> 53 (-7) — залишок 53, зона 30-59, АЛЕ |дельта|=7 < 10 — незначна втрата, наратив НЕ обов'язковий за Rule 4b. Тиша Майстра коректна. PASS.",
+  "status": "PASS",
+  "reason": "Енергія в зоні 30-59 але дельта мала (-7), наратив не вимагається.",
+  "ux_score": 7
+}
+</few_shot_examples>
 """
 
 
@@ -149,9 +130,13 @@ def _profile_summary(profile: dict) -> str:
 async def _generate_with_retry(
     contents,
     temperature: float,
-    max_retries: int = 3,
+    client: genai.Client = None,
+    max_retries: int = 5,
 ) -> str:
-    """Обгортка навколо _test_client.models.generate_content з exponential backoff."""
+    """Обгортка навколо client.models.generate_content з 429-aware backoff."""
+    if client is None:
+        client = _get_test_client(0)
+
     config_kwargs = {"temperature": temperature}
 
     delay = 2
@@ -160,7 +145,7 @@ async def _generate_with_retry(
         try:
             config = types.GenerateContentConfig(**config_kwargs)
             response = await asyncio.to_thread(
-                _test_client.models.generate_content,
+                client.models.generate_content,
                 model=MODEL_MAIN_NAME,
                 contents=contents,
                 config=config,
@@ -170,9 +155,14 @@ async def _generate_with_retry(
             last_error = e
             if attempt == max_retries:
                 break
-            log.warning(f"⚠️ Retry {attempt}/{max_retries} після помилки: {e}. Пауза {delay}с...")
+            err_str = str(e)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                delay = min(delay * 3, 120)
+                log.warning(f"⚠️ 429 TPM hit. Retry {attempt}/{max_retries}, пауза {delay}с...")
+            else:
+                log.warning(f"⚠️ Retry {attempt}/{max_retries} після помилки: {e}. Пауза {delay}с...")
+                delay += 2
             await asyncio.sleep(delay)
-            delay += 2
 
     raise RuntimeError(f"Всі {max_retries} спроби вичерпано. Остання помилка: {last_error}")
 
@@ -180,7 +170,7 @@ async def _generate_with_retry(
 # === АДАПТЕР ===
 
 class RPGTesterAdapter:
-    def __init__(self, chat_id: int = TEST_USER_ID, char_name: str = "Візеріс Таргарієн", house_name: str = "Таргарієн"):
+    def __init__(self, chat_id: int, char_name: str, house_name: str):
         self.chat_id = chat_id
         self.char_name = char_name
         self.house_name = house_name
@@ -197,7 +187,17 @@ class RPGTesterAdapter:
         await save_user_data(self.chat_id, full_profile, self.char_name)
         user_sessions[self.chat_id] = {"state": "GAME_ACTIVE", "history": []}
 
-        _, row = await get_user_data(self.chat_id)
+        # Retry loop: Google Sheets propagation delay
+        profile_check, row = None, None
+        for attempt in range(1, 6):
+            profile_check, row = await get_user_data(self.chat_id)
+            if profile_check and row:
+                break
+            log.warning(f"⏳ БД ще не бачить запис, спроба {attempt}/5...")
+            await asyncio.sleep(2 * attempt)
+        else:
+            raise RuntimeError(f"❌ Профіль не з'явився в БД після 5 спроб (user_id={self.chat_id})")
+
         self._row_number = row
         log.info(f"✅ Персонажа створено. Рядок у БД: {row}. Локація: {full_profile.get('Поточне місцезнаходження')}")
 
@@ -218,16 +218,15 @@ class RPGTesterAdapter:
         return ui_text, logs
 
     async def cleanup(self):
-        """Видаляє тестовий рядок з Google Sheets після завершення тесту."""
-        if self._row_number is None:
-            log.warning("🧹 Cleanup: номер рядка невідомий, пропускаємо.")
-            return
-
+        """Видаляє тестовий рядок з Google Sheets за user_id (безпечно для паралельного запуску)."""
         def _sync_delete():
             try:
                 sheet = db.get_sheet(TAB_USERS)
-                if sheet:
-                    sheet.delete_rows(self._row_number)
+                if not sheet:
+                    return False
+                cells = sheet.findall(str(self.chat_id), in_column=1)
+                if cells:
+                    sheet.delete_rows(cells[0].row)
                     return True
                 return False
             except Exception as e:
@@ -236,14 +235,14 @@ class RPGTesterAdapter:
 
         success = await asyncio.to_thread(_sync_delete)
         if success:
-            log.info(f"🧹 Тестовий запис (рядок {self._row_number}) видалено з БД.")
+            log.info(f"🧹 Тестовий запис (user_id={self.chat_id}) видалено з БД.")
         else:
-            log.warning(f"🧹 Не вдалося видалити тестовий запис (рядок {self._row_number}).")
+            log.warning(f"🧹 Не вдалося видалити тестовий запис (user_id={self.chat_id}).")
 
 
 # === ЗВІТ ===
 
-def _print_report(results: list):
+def _print_report(results: list, profile_key: str = "test"):
     if not results:
         log.info("\n📋 Результати: немає даних.")
         return
@@ -265,7 +264,7 @@ def _print_report(results: list):
         log.info(f"  Хід {r['turn']:2d}: {marker} [UX {r['ux_score']}/10] {r['reason']}")
     log.info("=" * 50)
 
-    report_path = f"qa_logs/report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    report_path = f"qa_logs/report_{profile_key}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     try:
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump({"summary": {"turns": len(results), "pass": passes, "fail": fails, "avg_ux": avg_score}, "turns": results}, f, ensure_ascii=False, indent=2)
@@ -276,8 +275,22 @@ def _print_report(results: list):
 
 # === ГОЛОВНИЙ ЦИКЛ ТЕСТУ ===
 
-async def run_test(max_turns: int = 5):
-    adapter = RPGTesterAdapter()
+async def run_test(max_turns: int = 5, profile: dict = None, profile_key: str = "unknown", profile_index: int = 0):
+    p = profile or {}
+
+    # Per-profile API client (round-robin з пулу ключів)
+    test_client = _get_test_client(profile_index)
+    key_idx = profile_index % len(GEMINI_API_KEYS_TEST)
+    log.info(f"🔑 API ключ: #{key_idx + 1}/{len(GEMINI_API_KEYS_TEST)}")
+
+    # Per-profile history window (менше для агресивних профілів)
+    history_window = p.get("history_window", PLAYER_HISTORY_MAX_MESSAGES)
+
+    adapter = RPGTesterAdapter(
+        chat_id=p["user_id"],
+        char_name=p["char_name"],
+        house_name=p["house"],
+    )
     await adapter.initialize()
 
     results = []
@@ -289,7 +302,7 @@ async def run_test(max_turns: int = 5):
     # Перший елемент history — системний промпт гравця (pinned, не потрапляє у rolling window).
     # Gemma не підтримує system_instruction у GenerateContentConfig, тому передаємо як user-повідомлення.
     player_history_pinned = [
-        types.Content(role="user", parts=[types.Part.from_text(text=PLAYER_SYSTEM_PROMPT)])
+        types.Content(role="user", parts=[types.Part.from_text(text=p["prompt"])])
     ]
     player_history_dynamic: list = []  # накопичує ходи, обрізається rolling window
 
@@ -319,6 +332,7 @@ async def run_test(max_turns: int = 5):
                 raw_text = await _generate_with_retry(
                     player_history_pinned + player_history_dynamic,
                     temperature=0.7,
+                    client=test_client,
                 )
                 action_data = clean_and_parse_json(raw_text)
                 if not action_data:
@@ -333,8 +347,8 @@ async def run_test(max_turns: int = 5):
                 break
 
             # Rolling window (тільки dynamic частина, pinned залишається завжди)
-            if len(player_history_dynamic) > PLAYER_HISTORY_MAX_MESSAGES:
-                player_history_dynamic = player_history_dynamic[-PLAYER_HISTORY_MAX_MESSAGES:]
+            if len(player_history_dynamic) > history_window:
+                player_history_dynamic = player_history_dynamic[-history_window:]
 
             log.info(f"⏳ Пауза {SLEEP_AFTER_ENGINE_SEC}с перед викликом рушія...")
             await asyncio.sleep(SLEEP_AFTER_ENGINE_SEC)
@@ -357,7 +371,7 @@ async def run_test(max_turns: int = 5):
                 types.Content(role="user", parts=[types.Part.from_text(text=eval_prompt_text)])
             ]
             try:
-                eval_raw = await _generate_with_retry(eval_content, temperature=0.0)
+                eval_raw = await _generate_with_retry(eval_content, temperature=0.0, client=test_client)
                 eval_data = clean_and_parse_json(eval_raw)
                 if not eval_data:
                     raise ValueError("clean_and_parse_json повернув None для евалюатора")
@@ -386,18 +400,40 @@ async def run_test(max_turns: int = 5):
 
     finally:
         await adapter.cleanup()
-        _print_report(results)
+        _print_report(results, profile_key=profile_key)
 
 
 # === ТОЧКА ВХОДУ ===
 
 if __name__ == "__main__":
-    log.info("🚀 Запуск жорсткого інтеграційного тестування...")
+    import argparse
+    from qa_profiles import TEST_PROFILES, list_profiles
     from database.operations import load_lore_data, refresh_npc_database
+
+    parser = argparse.ArgumentParser(description="QA Integration Test for GoT RPG")
+    parser.add_argument("--profile", type=str, default="chaos_engineer",
+                        choices=list(TEST_PROFILES.keys()),
+                        help="Test profile to use (default: chaos_engineer)")
+    parser.add_argument("--turns", type=int, default=20,
+                        help="Max turns per test run (default: 20)")
+    parser.add_argument("--list", action="store_true",
+                        help="List all available profiles and exit")
+    args = parser.parse_args()
+
+    if args.list:
+        print("Доступні профілі:")
+        list_profiles()
+        exit(0)
+
+    selected = TEST_PROFILES[args.profile]
+    profile_index = list(TEST_PROFILES.keys()).index(args.profile)
+    _setup_logging(args.profile)
+    log.info(f"🚀 Профіль: {selected['name']} ({args.profile}) | Персонаж: {selected['char_name']} | Ходів: {args.turns}")
+    log.info(f"🔑 Доступних API ключів: {len(GEMINI_API_KEYS_TEST)}")
 
     async def main():
         await load_lore_data()
         await refresh_npc_database()
-        await run_test(max_turns=20)
+        await run_test(max_turns=args.turns, profile=selected, profile_key=args.profile, profile_index=profile_index)
 
     asyncio.run(main())

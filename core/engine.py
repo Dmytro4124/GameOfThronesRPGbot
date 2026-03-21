@@ -327,7 +327,7 @@ async def process_game_turn(chat_id, user_input):
             story += "\n\n💀 *ВАШ ДОЗОР ЗАКІНЧИВСЯ. Ви загинули.*"
             suggested_actions = ["🔄 Почати заново"]
 
-        if "skill_used" in mechanical_updates and mechanical_updates["skill_used"] != "None":
+        if "skill_used" in mechanical_updates and mechanical_updates["skill_used"] not in ["None", "Немає"]:
             skill = mechanical_updates["skill_used"]
             roll_str = mechanical_updates.get("dice_roll", "0")
             skill_val = mechanical_updates.get("skill_val", 0)
