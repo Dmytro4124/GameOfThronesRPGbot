@@ -342,10 +342,10 @@ async def validate_action(user_input, profile):
         === YOUR VERDICT ===
         If the player describes the RESULT, reject the action.
 
-        RESPONSE (JSON):
+        OUTPUT STRICTLY VALID JSON. NO MARKDOWN. NO BACKTICKS. NO CODE FENCES.
         {{
             “is_valid”: true or false,
-            “refusal_reason”: “A short ironic comment in Ukrainian explaining why it is impossible (only if false). For example: ‘The gods don't know what an F-16 is.’”
+            “refusal_reason”: “A short ironic comment in Ukrainian explaining why it is impossible (only if false). For example: ‘The gods don’t know what an F-16 is.’”
         }}
         """
     try:
@@ -383,7 +383,7 @@ async def process_training_request(user_input, profile):
     1. CONTEXT CHECK: Is it a safe time to pass days? (Active combat, stealth, or dialogue = impossible).
     2. METHOD CHECK: Solo ("I train") vs Mentor ("I pay a master / read a book").
 
-    OUTPUT STRICTLY JSON:
+    OUTPUT STRICTLY VALID JSON ONLY. NO MARKDOWN. NO BACKTICKS. NO CODE FENCES. NO PREAMBLE TEXT.
     {{
         "is_training": true or false,
         "is_possible": true or false,
@@ -393,6 +393,7 @@ async def process_training_request(user_input, profile):
     }}
     """
 
+    resp = None
     try:
         def _sync_gen_train():
             return model_worker.generate_content(prompt)
@@ -402,7 +403,13 @@ async def process_training_request(user_input, profile):
         print(f"⚠️ Training Error: {e}")
         return None
 
-    if not data or not data.get("is_training"): return None
+    if not data:
+        if resp is not None:
+            print(f"⚠️ [TRAINING] JSON parse returned None. Raw (200 chars): {resp.text[:200]!r}")
+        return None
+    if not data.get("is_training"):
+        print(f"⚠️ [TRAINING] is_training=False. Parsed: {data}")
+        return None
     if not data.get("is_possible"):
         return {
             "error": f"Зараз неможливо розпочати тренування: {data.get('reason_if_failed', 'Небезпечна ситуація.')}"
@@ -480,15 +487,15 @@ async def resolve_action_mechanics(user_input, profile):
     def roll_2d50():
         return random.randint(1, 50) + random.randint(1, 50)
 
+    clocks_info = profile.get("Годинники", {})
+    temp_debuffs = profile.get("temp_debuffs", {})
+
     skills = {
         "Бойові":     max(1, safe_int(profile.get("Бойові навички", 10), 10)     - safe_int(temp_debuffs.get("Бойові", 0), 0)),
         "Військові":  max(1, safe_int(profile.get("Військові навички", 10), 10)  - safe_int(temp_debuffs.get("Військові", 0), 0)),
         "Інтрига":    max(1, safe_int(profile.get("Інтрига", 10), 10)            - safe_int(temp_debuffs.get("Інтрига", 0), 0)),
         "Управління": max(1, safe_int(profile.get("Управління", 10), 10)         - safe_int(temp_debuffs.get("Управління", 0), 0)),
     }
-
-    clocks_info = profile.get("Годинники", {})
-    temp_debuffs = profile.get("temp_debuffs", {})
 
     # ЖОРСТКЕ ПЕРЕХОПЛЕННЯ (ВТРАТА СВІДОМОСТІ ДО ШІ)
     current_energy = safe_int(profile.get("Енергія", DEFAULT_ENERGY), DEFAULT_ENERGY)

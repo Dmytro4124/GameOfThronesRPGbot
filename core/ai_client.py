@@ -1,4 +1,5 @@
 import json
+import re
 import asyncio
 from google import genai
 from google.genai import types
@@ -34,29 +35,61 @@ model_worker = AIWrapper(MODEL_WORKER_NAME, temperature=MODEL_WORKER_TEMP)
 
 
 def clean_and_parse_json(text):
-    """Витягує JSON з тексту. Підтримує і словники {}, і списки []."""
+    """Витягує JSON з тексту. Підтримує {} і []. Stack-based bracket matching."""
+    if not text:
+        return None
     try:
-        text = text.replace("```json", "").replace("```", "").strip()
+        # Крок 1: Стрипінг всіх варіантів markdown-фенсів (```json, ```JSON, ~~~json, тощо)
+        text = re.sub(r'^\s*[`~]{3,}\s*\w*\s*\n?', '', text, flags=re.MULTILINE)
+        text = re.sub(r'^\s*[`~]{3,}\s*$', '', text, flags=re.MULTILINE)
+        text = text.strip()
+
+        # Крок 2: Знайти початок JSON-структури
         start_obj = text.find('{')
         start_arr = text.find('[')
-
         possible_starts = [i for i in [start_obj, start_arr] if i != -1]
         if not possible_starts:
             return None
 
         start_index = min(possible_starts)
-        end_index = text.rfind('}') if start_index == start_obj else text.rfind(']')
+        opening_char = text[start_index]
+        closing_char = '}' if opening_char == '{' else ']'
 
-        if start_index != -1 and end_index != -1 and end_index > start_index:
-            json_str = text[start_index: end_index + 1]
+        # Крок 3: Stack-based сканування — коректно ігнорує дужки всередині рядків
+        depth = 0
+        in_string = False
+        escaped = False
+        end_index = -1
 
-            # === РІШЕННЯ: strict=False дозволяє переноси рядків ===
-            return json.loads(json_str, strict=False)
+        for i in range(start_index, len(text)):
+            ch = text[i]
+            if escaped:
+                escaped = False
+                continue
+            if ch == '\\' and in_string:
+                escaped = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == opening_char:
+                depth += 1
+            elif ch == closing_char:
+                depth -= 1
+                if depth == 0:
+                    end_index = i
+                    break
 
-        return None
+        if end_index == -1 or end_index <= start_index:
+            return None
+
+        json_str = text[start_index: end_index + 1]
+        # strict=False дозволяє переноси рядків всередині рядкових значень
+        return json.loads(json_str, strict=False)
 
     except json.JSONDecodeError as e:
-        # Тепер ми будемо бачити, якщо JSON зламався!
         print(f"⚠️ Помилка парсингу JSON (JSONDecodeError): {e}")
         return None
     except Exception as e:

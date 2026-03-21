@@ -317,7 +317,7 @@ async def populate_contextual_npcs(location, situation_context="Normal day, calm
         === LANGUAGE REQUIREMENT (CRITICAL) ===
         Responce should be in UKRAINIAN language only
 
-        OUTPUT JSON ARRAY ONLY:
+        OUTPUT STRICTLY VALID JSON ARRAY ONLY. NO MARKDOWN. NO BACKTICKS. NO CODE FENCES. START WITH [ AND END WITH ]. NO TEXT BEFORE OR AFTER.
         [
           {{
             "Name": "Name",

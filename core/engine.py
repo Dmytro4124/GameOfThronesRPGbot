@@ -5,7 +5,7 @@ import re
 import asyncio
 
 from core.ai_client import model, model_worker, clean_and_parse_json
-from core.mechanics import apply_system_impacts, process_training_request, safe_int, resolve_action_mechanics
+from core.mechanics import apply_system_impacts, process_training_request, safe_int, resolve_action_mechanics, validate_action
 from core.prompts import GAME_ERA_CONTEXT
 from core.world import populate_contextual_npcs
 from database.operations import (
@@ -71,6 +71,11 @@ async def process_game_turn(chat_id, user_input):
 
     t_start = time.time()
     logs = []
+
+    # === ЦЕНЗОР: Перевірка дії до будь-якої механіки ===
+    is_valid, refusal_reason = await validate_action(user_input, profile)
+    if not is_valid:
+        return refusal_reason, []
 
     mechanics_verdict, mechanical_updates = await resolve_action_mechanics(user_input, profile)
 
@@ -245,7 +250,7 @@ async def process_game_turn(chat_id, user_input):
 
         if not ai_data and '"story":' in raw_text:
             try:
-                story_match = re.search(r'"story":\s*"(.*?)(?<!\\)"', raw_text, re.DOTALL)
+                story_match = re.search(r'"story"\s*:\s*"((?:[^"\\]|\\.)*)"', raw_text, re.DOTALL)
                 extracted_story = story_match.group(1).replace('\\"', '"').replace('\\n',
                                                                                    '\n') if story_match else raw_text
                 ai_data = {"story": extracted_story, "updates": {}, "suggested_actions": []}
