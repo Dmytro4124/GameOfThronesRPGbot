@@ -84,6 +84,32 @@ async def save_user_data(user_id, profile_data, char_name="Unknown"):
     return await asyncio.to_thread(_sync_save)
 
 
+async def delete_user_data(user_id):
+    """Видаляє рядок гравця з Users_DB за Telegram ID. Для чистого рестарту гри."""
+
+    def _sync_delete():
+        try:
+            sheet = db.get_sheet(TAB_USERS)
+            if not sheet:
+                return False
+            cells = sheet.findall(str(user_id), in_column=1)
+            for cell in reversed(cells):  # reversed щоб не зсунути індекси при видаленні
+                sheet.delete_rows(cell.row)
+            return len(cells) > 0
+        except Exception as e:
+            print(f"❌ Помилка видалення профілю {user_id}: {e}")
+            return False
+
+    return await asyncio.to_thread(_sync_delete)
+
+
+def clear_npc_cache():
+    """Очищує глобальний NPC-кеш. Викликати при рестарті гри."""
+    global NPC_CACHE
+    NPC_CACHE = {}
+    print("🗑️ [NPC CACHE] Кеш очищено.")
+
+
 async def reset_and_fill_character_sheet(data_dict):
     """Асинхронне ПОВНЕ ПЕРЕЗАПИСУВАННЯ таблиці на старті гри"""
 

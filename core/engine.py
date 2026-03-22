@@ -99,6 +99,8 @@ async def process_game_turn(chat_id, user_input):
     if not profile: return "❌ Профіль не знайдено.", []
 
     session = user_sessions.get(chat_id, {})
+    if session.get("state") == "INITIALIZING":
+        return "⏳ *Світ відроджується... Зачекайте кілька секунд.*", []
     if chat_id not in user_sessions:
         user_sessions[chat_id] = {"state": "GAME_ACTIVE", "history": []}
     history = session.get('history', [])

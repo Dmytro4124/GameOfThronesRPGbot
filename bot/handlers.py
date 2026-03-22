@@ -10,14 +10,14 @@ from bot.menus import get_dynamic_menu, get_main_menu
 from bot.utils import send_safe_message, send_game_response
 from database.operations import (
     get_unique_regions, get_houses_by_region, get_house_stats_data,
-    get_user_data, save_user_data
+    get_user_data, save_user_data, delete_user_data, clear_npc_cache
 )
 from core.world import (
     get_canon_characters, generate_initial_stats, get_narrative_intro,
     background_canon_generation, populate_contextual_npcs
 )
 from core.engine import process_game_turn, user_sessions
-from core.prompts import GAME_ERA_CONTEXT
+
 
 router = Router()
 PROCESSED_MESSAGES = set()
@@ -160,18 +160,29 @@ async def start_game_with_character(bot: Bot, chat_id: int, char_name: str):
 
             if chat_id not in user_sessions:
                 user_sessions[chat_id] = {}
-            user_sessions[chat_id]['state'] = "GAME_ACTIVE"
+            user_sessions[chat_id]['state'] = "INITIALIZING"  # Блокуємо ігрові дії до готовності світу
             user_sessions[chat_id]['character_name'] = char_name
             user_sessions[chat_id]['history'] = []
 
             start_loc = full_profile.get("Поточне місцезнаходження", "Вестерос")
             hero_name = full_profile.get("Ім'я", char_name)
 
-            async def initial_world_setup(loc, p_name, time_ctx):
-                await background_canon_generation(context_text=time_ctx, excluded_name=p_name)
+            async def initial_world_setup(loc, p_name):
+                await background_canon_generation(excluded_name=p_name)
                 await populate_contextual_npcs(loc, "Start of the game. Normal daily routine.", excluded_name=p_name)
+                # Розблокуємо ПІСЛЯ повної готовності світу
+                if chat_id in user_sessions:
+                    user_sessions[chat_id]['state'] = "GAME_ACTIVE"
 
-            asyncio.create_task(initial_world_setup(start_loc, char_name, GAME_ERA_CONTEXT))
+            task = asyncio.create_task(initial_world_setup(start_loc, char_name))
+
+            def _on_world_setup_done(t):
+                if t.exception():
+                    print(f"❌ [WORLD SETUP FAILED] {t.exception()}")
+                    if chat_id in user_sessions:
+                        user_sessions[chat_id]['state'] = "GAME_ACTIVE"
+
+            task.add_done_callback(_on_world_setup_done)
 
             stats_msg = f"✅ *Персонажа створено!*\n👤 **{hero_name}**\n📍 Локація: _{start_loc}_"
             await bot.send_message(chat_id, stats_msg, parse_mode='Markdown')
@@ -268,16 +279,26 @@ async def callback_restart_cancel_handler(call: CallbackQuery):
 @router.callback_query(F.data == "restart_confirm")
 async def callback_restart_confirm_handler(call: CallbackQuery):
     chat_id = call.message.chat.id
+    user_id = call.from_user.id
     await call.message.edit_reply_markup(reply_markup=None)
     await call.message.answer("💀 Старий світ зникає у темряві...")
 
-    # Викликаємо логіку створення нового світу
+    # 1. Блокуємо ігрові дії під час ініціалізації
+    user_sessions[chat_id] = {"state": "INITIALIZING", "history": []}
+
+    # 2. Видаляємо старий профіль з Google Sheets
+    await delete_user_data(user_id)
+
+    # 3. Очищуємо NPC-кеш (NPC_DB буде перезаписана при створенні персонажа)
+    clear_npc_cache()
+
+    # 4. Показуємо вибір регіону
     regions = await get_unique_regions()
     builder = InlineKeyboardBuilder()
     for r in regions: builder.button(text=r, callback_data=f"reg_{r}")
     builder.adjust(2)
 
-    user_sessions[chat_id] = {"state": "REGION_SELECT", "history": []}
+    user_sessions[chat_id]["state"] = "REGION_SELECT"
     await call.message.answer("📍 *Оберіть регіон:*", reply_markup=builder.as_markup(), parse_mode='Markdown')
 
 

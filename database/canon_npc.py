@@ -1,4 +1,5 @@
 # database/canon_npc.py
+import copy
 
 # Маппінг текстових Relation_Player → числових Reputation_Score
 _RELATION_TO_SCORE = {
@@ -21,12 +22,20 @@ def _map_relation_to_score(relation_text):
     return _RELATION_TO_SCORE.get(key, 0)
 
 
-# При першому імпорті — автоматично додаємо Reputation_Score до всіх NPC, якщо відсутній
 def _ensure_reputation_scores(npcs_list):
+    """Створює IMMUTABLE tuple з shallow-копіями dict-ів. Оригінали не мутуються."""
+    result = []
     for npc in npcs_list:
-        if "Reputation_Score" not in npc:
-            npc["Reputation_Score"] = _map_relation_to_score(npc.get("Relation_Player", ""))
-    return npcs_list
+        npc_copy = dict(npc)  # shallow copy — не мутуємо оригінал
+        if "Reputation_Score" not in npc_copy:
+            npc_copy["Reputation_Score"] = _map_relation_to_score(npc_copy.get("Relation_Player", ""))
+        result.append(npc_copy)
+    return tuple(result)  # tuple = immutable sequence
+
+
+def get_canon_npcs_copy():
+    """Повертає deep copy канонічних NPC. Безпечно для мутацій — кожен виклик = свіжі дані."""
+    return copy.deepcopy(list(CANON_NPCS))
 
 
 CANON_NPCS = _ensure_reputation_scores([

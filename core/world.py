@@ -7,7 +7,7 @@ from database.operations import refresh_npc_database, find_best_match
 from core.ai_client import model, ask_gemini, clean_and_parse_json
 from core.prompts import GAME_ERA_CONTEXT
 from config import TAB_NPC
-from database.canon_npc import CANON_NPCS
+from database.canon_npc import get_canon_npcs_copy
 
 
 async def get_canon_characters(house_name):
@@ -197,64 +197,99 @@ TIME_CONTEXT: {GAME_ERA_CONTEXT}
         return f"Ви прибули у {current_location}. Вітер дме в обличчя. Що ви робите?"
 
 
-async def background_canon_generation(context_text, excluded_name=None):
+async def background_canon_generation(excluded_name=None):
     """Асинхронний ФОНОВИЙ ПРОЦЕС: Створення кістяка світу. Завантажує ЖОРСТКИЙ КАНОН."""
     print("🌍 [CANON GEN] Завантажую канонічну базу даних...")
 
     def _sync_db_ops():
+        import time as _time
         worksheet = db.get_sheet(TAB_NPC)
         if not worksheet: return False
 
         try:
             worksheet.clear()
-            # ОНОВЛЕНО: Додано Scene та Inventory у заголовки
             headers = ["Location", "Scene", "Name", "Description", "Character", "Goal", "Secrets",
                        "Relation_Player", "Memory_Anchor", "Relation_NPCs", "Status", "Is_Canon", "Inventory",
                        "Reputation_Score"]
             worksheet.append_row(headers)
+            _time.sleep(2)  # Пауза після clear+headers, щоб API встиг обробити
         except Exception as e:
             print(f"❌ [CANON GEN ERROR] Clear failed: {e}")
             return False
 
-        rows_to_add = []
-        for npc in CANON_NPCS:
-            name = npc.get("Name", "Unknown")
-            if excluded_name and find_best_match(name, [excluded_name], threshold=0.8):
-                continue
+        try:
+            rows_to_add = []
+            for npc in get_canon_npcs_copy():
+                name = npc.get("Name", "Unknown")
+                if excluded_name and find_best_match(name, [excluded_name], threshold=0.8):
+                    continue
 
-            # ОНОВЛЕНО: Додано Scene (індекс 1) та Inventory (індекс 12)
-            row = [
-                npc.get("Location", "Westeros"),
-                npc.get("Scene", "Невідомо"),
-                name,
-                npc.get("Description", "-"),
-                npc.get("Character", "-"),
-                npc.get("Goal", "-"),
-                npc.get("Secrets", "-"),
-                npc.get("Relation_Player", "Neutral"),
-                npc.get("Memory_Anchor", "-"),
-                npc.get("Relation_NPCs", "-"),
-                npc.get("Status", "Active"),
-                npc.get("Is_Canon", "TRUE"),
-                npc.get("Inventory", "Пусто"),
-                npc.get("Reputation_Score", 0)
-            ]
-            rows_to_add.append(row)
+                row = [
+                    npc.get("Location", "Westeros"),
+                    npc.get("Scene", "Невідомо"),
+                    name,
+                    npc.get("Description", "-"),
+                    npc.get("Character", "-"),
+                    npc.get("Goal", "-"),
+                    npc.get("Secrets", "-"),
+                    npc.get("Relation_Player", "Neutral"),
+                    npc.get("Memory_Anchor", "-"),
+                    npc.get("Relation_NPCs", "-"),
+                    npc.get("Status", "Active"),
+                    npc.get("Is_Canon", "TRUE"),
+                    npc.get("Inventory", "Пусто"),
+                    npc.get("Reputation_Score", 0)
+                ]
+                rows_to_add.append(row)
 
-        if rows_to_add:
-            try:
-                worksheet.append_rows(rows_to_add)
-                return len(rows_to_add)
-            except Exception as e:
-                print(f"❌ [CANON GEN SAVE ERROR] {e}")
+            if not rows_to_add:
+                print("⚠️ [CANON GEN] Жодного NPC для запису!")
                 return False
-        return False
+
+            print(f"📋 [CANON GEN] Підготовлено {len(rows_to_add)} канонічних NPC для запису...")
+
+            # Батчінг: пишемо по 15 рядків з паузою між батчами (захист від API rate limit)
+            BATCH_SIZE = 15
+            total_written = 0
+            for i in range(0, len(rows_to_add), BATCH_SIZE):
+                batch = rows_to_add[i:i + BATCH_SIZE]
+                try:
+                    worksheet.append_rows(batch)
+                    total_written += len(batch)
+                    print(f"📝 [CANON GEN] Batch {i // BATCH_SIZE + 1}: записано {len(batch)} NPC")
+                except Exception as e:
+                    print(f"❌ [CANON GEN BATCH ERROR] Batch {i // BATCH_SIZE + 1}: {type(e).__name__}: {e}")
+                    _time.sleep(3)
+                    try:
+                        worksheet.append_rows(batch)
+                        total_written += len(batch)
+                        print(f"🔄 [CANON GEN] Batch {i // BATCH_SIZE + 1}: retry успішний")
+                    except Exception as e2:
+                        print(f"❌ [CANON GEN BATCH RETRY FAILED] {type(e2).__name__}: {e2}")
+                if i + BATCH_SIZE < len(rows_to_add):
+                    _time.sleep(2)
+
+            # Верифікація: перечитуємо таблицю і перевіряємо кількість записаних рядків
+            _time.sleep(1)
+            verify_rows = worksheet.get_all_values()
+            actual_count = len(verify_rows) - 1  # мінус заголовок
+            print(f"🔍 [CANON GEN VERIFY] Очікувано {total_written}, знайдено {actual_count} рядків у таблиці")
+            if actual_count < total_written:
+                print(f"⚠️ [CANON GEN] DATA LOSS: {total_written - actual_count} рядків зникло!")
+
+            return total_written if total_written > 0 else False
+
+        except Exception as e:
+            print(f"❌ [CANON GEN CRITICAL] Row building/writing failed: {type(e).__name__}: {e}")
+            return False
 
     added_count = await asyncio.to_thread(_sync_db_ops)
     if added_count:
         print(f"✅ [CANON GEN] Світ заселено! Додано {added_count} канонічних легенд.")
         from database.operations import refresh_npc_database
         await refresh_npc_database()
+    else:
+        print("❌ [CANON GEN] Не вдалося записати жодного канонічного NPC!")
 
 
 async def populate_contextual_npcs(location, situation_context="Normal day, calm atmosphere", excluded_name=None):
@@ -267,17 +302,41 @@ async def populate_contextual_npcs(location, situation_context="Normal day, calm
         canon_names_local = []
         try:
             all_rows = worksheet.get_all_values()
-            # ОНОВЛЕНО: Тепер Is_Canon під індексом 11, бо ми додали Scene під індексом 1
-            canon_col_idx = 11
+            if not all_rows:
+                print("⚠️ [LOCAL POP] Таблиця NPC_DB порожня!")
+                return None, None, []
+
             headers = all_rows[0]
+
+            # Динамічний пошук колонок замість хардкоду індексів
+            try:
+                canon_col_idx = headers.index("Is_Canon")
+            except ValueError:
+                print(f"❌ [LOCAL POP ERROR] Колонку 'Is_Canon' не знайдено! Заголовки: {headers}")
+                return None, None, []
+
+            try:
+                name_col_idx = headers.index("Name")
+            except ValueError:
+                name_col_idx = 2  # fallback
+
             preserved_rows = [headers]
 
             for row in all_rows[1:]:
                 if len(row) > canon_col_idx and str(row[canon_col_idx]).upper() == "TRUE":
                     preserved_rows.append(row)
-                    canon_name = str(row[2]).strip() # ОНОВЛЕНО: Ім'я тепер під індексом 2
+                    canon_name = str(row[name_col_idx]).strip() if len(row) > name_col_idx else ""
                     if canon_name:
                         canon_names_local.append(canon_name)
+
+            print(f"🔍 [LOCAL POP] Знайдено {len(preserved_rows) - 1} канонічних NPC з {len(all_rows) - 1} загальних")
+
+            # Захист: якщо є рядки але жоден не канонічний — не стираємо таблицю
+            if len(all_rows) > 1 and len(preserved_rows) == 1:
+                print(f"⚠️ [LOCAL POP] {len(all_rows) - 1} рядків існує, але 0 канонічних! "
+                      f"Пропускаємо деструктивне очищення. Перевірте Is_Canon колонку (idx={canon_col_idx}).")
+                # Повертаємо worksheet без очищення, щоб не втратити дані
+                return worksheet, all_rows, canon_names_local
 
             worksheet.clear()
             worksheet.update(preserved_rows)

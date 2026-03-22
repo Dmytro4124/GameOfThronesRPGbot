@@ -10,7 +10,7 @@ from core.engine import process_game_turn, user_sessions
 from core.ai_client import clean_and_parse_json
 from database.operations import get_house_stats_data, save_user_data, get_user_data
 from database.sheets import db
-from core.world import generate_initial_stats
+from core.world import generate_initial_stats, background_canon_generation, populate_contextual_npcs
 from config import GEMINI_API_KEYS_TEST, MODEL_MAIN_NAME, TAB_USERS
 
 # === КОНСТАНТИ ===
@@ -194,7 +194,15 @@ class RPGTesterAdapter:
             raise RuntimeError("❌ Не вдалося створити тестового персонажа. Перевір назву дому в БД.")
 
         await save_user_data(self.chat_id, full_profile, self.char_name)
-        user_sessions[self.chat_id] = {"state": "GAME_ACTIVE", "history": []}
+        user_sessions[self.chat_id] = {"state": "INITIALIZING", "history": []}
+
+        # Заселяємо світ канонічними + фоновими NPC (як у bot/handlers.py:170-175)
+        start_loc = full_profile.get("Поточне місцезнаходження", "Вестерос")
+        log.info(f"🌍 Заселяю світ канонічними NPC (локація: {start_loc})...")
+        await background_canon_generation(excluded_name=self.char_name)
+        await populate_contextual_npcs(start_loc, "Start of the game. Normal daily routine.", excluded_name=self.char_name)
+
+        user_sessions[self.chat_id]['state'] = "GAME_ACTIVE"
 
         # Retry loop: Google Sheets propagation delay
         profile_check, row = None, None
