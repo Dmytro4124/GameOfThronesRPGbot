@@ -510,11 +510,38 @@ async def process_training_request(user_input, profile):
     }
 
 
-async def resolve_action_mechanics(user_input, profile):
+def get_npc_reputation_modifier(reputation_score):
+    """Детермінований модифікатор DC та обставин на основі числової репутації NPC.
+    Returns: (circumstance_override, dc_modifier, is_blocked)"""
+    score = safe_int(reputation_score, 0)
+    if score >= 80:
+        return "ADVANTAGE", -20, False
+    elif score >= 40:
+        return "NORMAL", -10, False
+    elif score <= -80:
+        return "BLOCK", 0, True
+    elif score <= -40:
+        return "DISADVANTAGE", 20, False
+    return "NORMAL", 0, False
+
+
+def get_reputation_delta(outcome):
+    """Повертає зміну репутації NPC залежно від результату перевірки Інтриги/Управління."""
+    deltas = {
+        "CRITICAL SUCCESS": 10,
+        "SUCCESS": 5,
+        "FAILURE": -3,
+        "CRITICAL FAILURE": -8,
+    }
+    return deltas.get(outcome, 0)
+
+
+async def resolve_action_mechanics(user_input, profile, npc_reputation_context=None):
     """
     Асинхронний Worker (4b): Оцінює складність дії та рахує всю механіку (Здоров'я, Час, Золото, Енергія, Годинники, Локація).
     ІНТЕГРОВАНО: Система 2d50 (Roll-Over), Перевага/Недолік, Хардкорні Крити та Прокачка.
     Не пише художній текст!
+    npc_reputation_context: dict {npc_name: reputation_score} для NPC у поточній сцені.
     """
     def roll_2d50():
         return random.randint(1, 50) + random.randint(1, 50)
@@ -558,7 +585,18 @@ async def resolve_action_mechanics(user_input, profile):
         Player Action: "{user_input}"
         Player Skills: {json.dumps(skills, ensure_ascii=False)}
         Active Clocks (Tension): {json.dumps(clocks_info, ensure_ascii=False)}
+        NPC Reputation Context: {json.dumps(npc_reputation_context or {}, ensure_ascii=False)}
         </data>
+
+        <npc_reputation_guide>
+        If the player's action targets a specific NPC, consider their reputation score when setting DC:
+        - Score >= 80 (Devoted): Lower DC by 20, consider ADVANTAGE for social skills.
+        - Score 40-79 (Friendly): Lower DC by 10.
+        - Score -39 to 39 (Neutral): No modifier.
+        - Score -79 to -40 (Hostile): Raise DC by 20, consider DISADVANTAGE for social skills.
+        - Score <= -80 (Blood Enemy): Social actions should use maximum DC (140+).
+        NOTE: This guide applies ONLY to social skills (Інтрига, Управління). Combat/Military skills are unaffected by reputation.
+        </npc_reputation_guide>
 
         <rules>
         1. CLASSIFY REQUIRED SKILL (STRICT):
@@ -665,7 +703,7 @@ async def resolve_action_mechanics(user_input, profile):
     # МАТЕМАТИКА 2d50 ТА КРИТІВ ВІДБУВАЄТЬСЯ ТУТ
     # -------------------------------------------------
 
-    if current_energy <= 20 and skill_used in ["Бойові", "Військові"]:
+    if current_energy <= 20:
         circumstance = "DISADVANTAGE"
         data["verdict_text"] = "[СИСТЕМНА ВТОМА: Гравець ледве тримається на ногах]. " + data.get('verdict_text', '')
 
@@ -679,6 +717,39 @@ async def resolve_action_mechanics(user_input, profile):
         return "MECHANICAL VERDICT: AUTO_SUCCESS! (No skill required).", updates
 
     skill_val = skills[skill_used]
+
+    # --- ДЕТЕРМІНОВАНІ REPUTATION МОДИФІКАТОРИ (для соціальних навичок) ---
+    rep_dc_mod = 0
+    rep_blocked = False
+    rep_target_npc = None
+    if skill_used in ["Інтрига", "Управління"] and npc_reputation_context:
+        # Шукаємо цільового NPC у тексті дії
+        best_rep_score = None
+        for npc_name, rep_score in npc_reputation_context.items():
+            if npc_name.lower() in user_input.lower():
+                best_rep_score = rep_score
+                rep_target_npc = npc_name
+                break
+        # Якщо не знайшли точний збіг, але є лише один NPC — використовуємо його
+        if best_rep_score is None and len(npc_reputation_context) == 1:
+            rep_target_npc, best_rep_score = next(iter(npc_reputation_context.items()))
+
+        if best_rep_score is not None:
+            rep_circ, rep_dc_mod, rep_blocked = get_npc_reputation_modifier(best_rep_score)
+            if rep_blocked:
+                updates["skill_used"] = skill_used
+                updates["outcome"] = "BLOCKED"
+                updates["reputation_block"] = True
+                updates["reputation_target_npc"] = rep_target_npc
+                return f"MECHANICAL VERDICT: BLOCKED! NPC '{rep_target_npc}' (reputation {best_rep_score}) — соціальна дія заблокована кровною ворожнечею. GM INFO: Describe the NPC's absolute refusal, hatred, or hostility. The player CANNOT persuade this NPC through social means — only force, fear, or third-party intervention.", updates
+            # Застосовуємо circumstance override від репутації (якщо ще не DISADVANTAGE від енергії)
+            if rep_circ == "ADVANTAGE" and circumstance != "DISADVANTAGE":
+                circumstance = "ADVANTAGE"
+            elif rep_circ == "DISADVANTAGE":
+                circumstance = "DISADVANTAGE"
+
+    # Застосовуємо DC-модифікатор від репутації
+    difficulty = max(40, difficulty + rep_dc_mod)
 
     roll_1 = roll_2d50()
     roll_2 = roll_2d50()
@@ -704,7 +775,8 @@ async def resolve_action_mechanics(user_input, profile):
     else:
         outcome = "FAILURE"
 
-    verdict_str = f"MECHANICAL VERDICT: {outcome}! (Skill: {skill_used} [{skill_val}], Roll: {natural_roll}, Total: {total_score} vs DC {difficulty}). GM INFO: {data.get('verdict_text')}"
+    rep_info = f" [REP: {rep_dc_mod:+d} DC]" if rep_dc_mod else ""
+    verdict_str = f"MECHANICAL VERDICT: {outcome}! (Skill: {skill_used} [{skill_val}], Roll: {natural_roll}, Total: {total_score} vs DC {difficulty}{rep_info}). GM INFO: {data.get('verdict_text')}"
 
     updates["skill_used"] = skill_used
     updates["dice_roll"] = roll_str
@@ -713,6 +785,11 @@ async def resolve_action_mechanics(user_input, profile):
     updates["outcome"] = outcome
     updates["circumstance"] = circumstance
     updates["difficulty"] = difficulty
+
+    # Reputation delta для соціальних навичок
+    if skill_used in ["Інтрига", "Управління"] and rep_target_npc:
+        updates["reputation_delta"] = get_reputation_delta(outcome)
+        updates["reputation_target_npc"] = rep_target_npc
 
     # --- ХАРДКОРНА СИСТЕМА ТРАВМ ТА ПРОКАЧКИ ---
     if outcome == "CRITICAL SUCCESS":

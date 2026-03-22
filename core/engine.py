@@ -10,7 +10,8 @@ from core.prompts import GAME_ERA_CONTEXT
 from core.world import populate_contextual_npcs
 from database.operations import (
     get_user_data, save_user_data, get_relevant_context,
-    get_location_npcs, update_npcs_in_db
+    get_location_npcs, update_npcs_in_db,
+    update_npc_reputation, append_memory_anchor
 )
 
 user_sessions = {}
@@ -114,7 +115,7 @@ async def process_game_turn(chat_id, user_input):
 
     # === ОНОВЛЕНО: Передаємо і локацію, і сцену для жорсткої фільтрації ===
     context_knowledge = await get_relevant_context(user_input, curr_loc)
-    npc_context_text, legal_npc_names = get_location_npcs(curr_loc, curr_scene)
+    npc_context_text, legal_npc_names, npc_reputation_context = get_location_npcs(curr_loc, curr_scene)
 
     duration = time.time() - t_start
     timing_details.append(f"📚 Data: {duration:.2f}s")
@@ -127,7 +128,15 @@ async def process_game_turn(chat_id, user_input):
     if not is_valid:
         return refusal_reason + "\n\n📊 🛑 Дію заблоковано Цензором.", []
 
-    mechanics_verdict, mechanical_updates = await resolve_action_mechanics(user_input, profile)
+    mechanics_verdict, mechanical_updates = await resolve_action_mechanics(user_input, profile, npc_reputation_context)
+
+    # === БЛОКУВАННЯ РЕПУТАЦІЄЮ: NPC відмовляє через кровну ворожнечу ===
+    if mechanical_updates.get("reputation_block"):
+        npc_name = mechanical_updates.get("reputation_target_npc", "NPC")
+        logs.append(f"🚫 Репутація: {npc_name} — соціальна дія заблокована (кровна ворожнеча)")
+        change_log = "\n\n📊 " + " | ".join(logs) if logs else ""
+        # Передаємо GM для генерації художньої відмови
+        mechanics_verdict_for_block = mechanics_verdict
 
     if mechanical_updates.get("action_type") == "training":
         training_result = await process_training_request(user_input, profile)
@@ -366,6 +375,13 @@ async def process_game_turn(chat_id, user_input):
             dice_log = f"{icon} {skill}{circ_ua}: Кидок {roll_str} + Навичка {skill_val} = {total_score} (Ціль: {target_dc}) -> {outcome_ua}"
             logs.insert(0, dice_log)
 
+            # Reputation delta лог
+            rep_delta = mechanical_updates.get("reputation_delta", 0)
+            rep_target = mechanical_updates.get("reputation_target_npc")
+            if rep_delta and rep_target:
+                rep_icon = "📈" if rep_delta > 0 else "📉"
+                logs.append(f"{rep_icon} Репутація з {rep_target}: {rep_delta:+d}")
+
         new_location = profile.get("Поточне місцезнаходження", "")
         # Модифіковано: Тепер генерація канонічних NPC враховує і зміну сцени (якщо треба)
         if old_location != new_location and len(new_location) > 3:
@@ -386,11 +402,28 @@ async def process_game_turn(chat_id, user_input):
             await asyncio.create_task(travel_population_task(new_location, current_char_name))
 
         async def background_task(chat_id_arg, user_id_arg, profile_arg, char_name_arg, input_arg, story_arg,
-                                  npc_changes_arg, legal_names_arg):
+                                  npc_changes_arg, legal_names_arg, mech_updates_arg=None):
             try:
                 await save_user_data(user_id_arg, profile_arg, char_name_arg)
                 if npc_changes_arg:
                     await update_npcs_in_db(npc_changes_arg, legal_names_arg)
+
+                # Оновлення репутації NPC після соціальних перевірок
+                if mech_updates_arg:
+                    rep_delta = mech_updates_arg.get("reputation_delta", 0)
+                    rep_target = mech_updates_arg.get("reputation_target_npc")
+                    if rep_delta and rep_target:
+                        await update_npc_reputation(rep_target, rep_delta)
+                        outcome = mech_updates_arg.get("outcome", "")
+                        skill = mech_updates_arg.get("skill_used", "")
+                        game_minutes = safe_int(profile_arg.get("Час_хвилини", 0), 0)
+                        game_day = game_minutes // 1440
+                        await append_memory_anchor(
+                            rep_target,
+                            f"{skill} {outcome} (дія гравця)",
+                            game_day=game_day,
+                            rep_change=rep_delta
+                        )
 
                 short_hist_turn = await summarize_turn(story_arg)
                 short_user_inp = await summarize_turn(input_arg)
@@ -420,7 +453,7 @@ async def process_game_turn(chat_id, user_input):
 
         await asyncio.create_task(
             background_task(chat_id, user_id, profile, profile.get("Ім'я"), user_input, story, npc_changes,
-                            legal_npc_names))
+                            legal_npc_names, mechanical_updates))
 
         duration = time.time() - t_start
         timing_details.append(f"💾 Save: {duration:.2f}s")

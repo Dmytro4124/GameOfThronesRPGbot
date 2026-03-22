@@ -317,11 +317,19 @@ async def refresh_npc_database():
 
                 type_tag = "[CANON/BOSS]" if is_canon else "[LOCAL/BACKGROUND]"
 
+                rep_score = 0
+                raw_rep = row.get("Reputation_Score", "0")
+                try:
+                    rep_score = int(str(raw_rep).strip()) if str(raw_rep).strip() else 0
+                except (ValueError, TypeError):
+                    rep_score = 0
+
                 npc_card = f"> **{name}** {type_tag}\n"
                 if row.get("Description"): npc_card += f"- **Visual:** {row.get('Description')}\n"
                 if row.get("Character"): npc_card += f"- **Personality:** {row.get('Character')}\n"
                 if row.get("Goal"): npc_card += f"- **Goal:** {row.get('Goal')}\n"
                 if row.get("Relation_Player"): npc_card += f"- **Attitude to Player:** {row.get('Relation_Player')}\n"
+                npc_card += f"- **Reputation Score:** {rep_score}\n"
                 if row.get("Memory_Anchor") and str(row.get("Memory_Anchor")).strip() != "-":
                     npc_card += f"- **Memory Anchor:** {row.get('Memory_Anchor')}\n"
                 if row.get("Relation_NPCs"): npc_card += f"- **Attitude to other NPC:** {row.get('Relation_NPCs')}\n"
@@ -337,7 +345,8 @@ async def refresh_npc_database():
                 new_cache[loc].append({
                     "name": name,
                     "scene": scene,
-                    "card": npc_card
+                    "card": npc_card,
+                    "reputation_score": rep_score
                 })
                 count += 1
 
@@ -355,9 +364,10 @@ async def refresh_npc_database():
 
 
 def get_location_npcs(current_location, current_scene):
-    """Синхронна функція. Повертає опис NPC та список легальних імен за Локацією ТА Сценою."""
+    """Синхронна функція. Повертає опис NPC, список легальних імен та dict репутації за Локацією ТА Сценою."""
     found_npcs = []
     legal_names = []
+    reputation_context = {}
 
     target_loc = str(current_location).strip().lower()
     target_scene = str(current_scene).strip().lower()
@@ -375,22 +385,24 @@ def get_location_npcs(current_location, current_scene):
                 if npc_scene == target_scene or npc_scene == "global" or npc_scene == "":
                     found_npcs.append(npc_data["card"])
                     legal_names.append(npc_data["name"])
+                    reputation_context[npc_data["name"]] = npc_data.get("reputation_score", 0)
 
     # Завжди додаємо абсолютно глобальних NPC (якщо такі є в архітектурі)
     if "GLOBAL" in NPC_CACHE:
         for npc_data in NPC_CACHE["GLOBAL"]:
             found_npcs.append(npc_data["card"])
             legal_names.append(npc_data["name"])
+            reputation_context[npc_data["name"]] = npc_data.get("reputation_score", 0)
 
     if not found_npcs:
-        return "", []
+        return "", [], {}
 
     npc_block = "=== 👥 VISIBLE NPC ROSTER (STRICTLY IN THIS SCENE) ===\n"
     npc_block += "GM INSTRUCTION: Only these characters are physically present here.\n"
     npc_block += "DO NOT HALLUCINATE NEW CHARACTERS IF A SUITABLE ONE IS HERE.\n\n"
     npc_block += "\n".join(found_npcs)
 
-    return npc_block, legal_names
+    return npc_block, legal_names, reputation_context
 
 
 # ================= ДОПОМІЖНІ ФУНКЦІЇ ДЛЯ БАЗИ =================
@@ -452,7 +464,7 @@ async def update_npcs_in_db(updates, legal_names_list_deprecated=None):
         col_map = {}
         target_cols = ["status", "location", "scene", "relation_player", "memory_anchor", "goal", "secrets",
                        "description", "character",
-                       "relation_npcs", "inventory"]
+                       "relation_npcs", "inventory", "reputation_score"]
 
         for target in target_cols:
             if target in headers:
@@ -514,18 +526,20 @@ async def update_npcs_in_db(updates, legal_names_list_deprecated=None):
                     print(f"🌐 [API SUCCESS] Знайдено канонічного персонажа: {api_npc['Name']}! Додаємо в базу.")
 
                     new_row = [
-                        api_npc.get("Status", "Active"),
-                        api_npc.get("Name", "Unknown"),
                         api_npc.get("Location", "GLOBAL"),
+                        api_npc.get("Scene", "Невідомо"),
+                        api_npc.get("Name", "Unknown"),
                         api_npc.get("Description", ""),
                         api_npc.get("Character", ""),
                         api_npc.get("Goal", ""),
+                        api_npc.get("Secrets", ""),
                         api_npc.get("Relation_Player", ""),
                         api_npc.get("Memory_Anchor", ""),
                         api_npc.get("Relation_NPCs", ""),
-                        api_npc.get("Secrets", ""),
+                        api_npc.get("Status", "Active"),
                         api_npc.get("Is_Canon", "TRUE"),
-                        api_npc.get("Inventory", "")
+                        api_npc.get("Inventory", ""),
+                        0  # Reputation_Score default
                     ]
 
                     try:
@@ -548,3 +562,101 @@ async def update_npcs_in_db(updates, legal_names_list_deprecated=None):
             await refresh_npc_database()
     except Exception as e:
         print(f"❌ [UPDATE ERROR] {e}")
+
+
+async def update_npc_reputation(npc_name, delta):
+    """Атомарне оновлення Reputation_Score NPC у Google Sheets. Clamp до [-100, 100]."""
+    if not npc_name or not delta:
+        return
+
+    def _sync_rep_update():
+        worksheet = db.get_sheet(TAB_NPC)
+        all_values = worksheet.get_all_values()
+        if not all_values:
+            return False
+
+        headers = [h.strip().lower() for h in all_values[0]]
+        if "reputation_score" not in headers:
+            print(f"⚠️ [REP] Колонка 'Reputation_Score' відсутня в NPC_DB. Пропускаємо.")
+            return False
+
+        rep_col = headers.index("reputation_score") + 1
+        name_col = headers.index("name") + 1 if "name" in headers else 3
+
+        for i, row in enumerate(all_values[1:], start=2):
+            raw_name = str(row[name_col - 1]).strip()
+            norm_db = raw_name.lower().replace("'", "'").replace("`", "'").replace("\u2019", "'")
+            norm_target = npc_name.lower().replace("'", "'").replace("`", "'").replace("\u2019", "'")
+
+            if norm_db == norm_target or (difflib.SequenceMatcher(None, norm_db, norm_target).ratio() > 0.75):
+                old_val = 0
+                try:
+                    old_val = int(str(row[rep_col - 1]).strip()) if str(row[rep_col - 1]).strip() else 0
+                except (ValueError, TypeError):
+                    old_val = 0
+                new_val = max(-100, min(100, old_val + delta))
+                worksheet.update_cell(i, rep_col, new_val)
+                print(f"📊 [REP] {raw_name}: {old_val} -> {new_val} (delta {delta:+d})")
+                return True
+
+        print(f"⚠️ [REP] NPC '{npc_name}' не знайдено в NPC_DB.")
+        return False
+
+    try:
+        updated = await asyncio.to_thread(_sync_rep_update)
+        if updated:
+            await refresh_npc_database()
+    except Exception as e:
+        print(f"❌ [REP UPDATE ERROR] {e}")
+
+
+async def append_memory_anchor(npc_name, event_text, game_day=0, rep_change=0):
+    """Додає подію до Memory_Anchor як JSON-масив (FIFO 5 записів)."""
+    if not npc_name or not event_text:
+        return
+
+    def _sync_memory_update():
+        worksheet = db.get_sheet(TAB_NPC)
+        all_values = worksheet.get_all_values()
+        if not all_values:
+            return False
+
+        headers = [h.strip().lower() for h in all_values[0]]
+        if "memory_anchor" not in headers:
+            return False
+
+        mem_col = headers.index("memory_anchor") + 1
+        name_col = headers.index("name") + 1 if "name" in headers else 3
+
+        for i, row in enumerate(all_values[1:], start=2):
+            raw_name = str(row[name_col - 1]).strip()
+            norm_db = raw_name.lower().replace("'", "'").replace("`", "'").replace("\u2019", "'")
+            norm_target = npc_name.lower().replace("'", "'").replace("`", "'").replace("\u2019", "'")
+
+            if norm_db == norm_target or (difflib.SequenceMatcher(None, norm_db, norm_target).ratio() > 0.75):
+                old_val = str(row[mem_col - 1]).strip()
+                # Парсимо існуючий масив або конвертуємо legacy рядок
+                memory_list = []
+                if old_val and old_val != "-":
+                    try:
+                        memory_list = json.loads(old_val)
+                        if not isinstance(memory_list, list):
+                            memory_list = [{"event": old_val, "day": 0, "rep_change": 0}]
+                    except (json.JSONDecodeError, TypeError):
+                        memory_list = [{"event": old_val, "day": 0, "rep_change": 0}]
+
+                # Додаємо нову подію
+                memory_list.append({"event": event_text, "day": game_day, "rep_change": rep_change})
+                # FIFO — тримаємо тільки останні 5
+                memory_list = memory_list[-5:]
+
+                worksheet.update_cell(i, mem_col, json.dumps(memory_list, ensure_ascii=False))
+                print(f"📝 [MEMORY] {raw_name}: додано '{event_text}' (всього {len(memory_list)} записів)")
+                return True
+
+        return False
+
+    try:
+        await asyncio.to_thread(_sync_memory_update)
+    except Exception as e:
+        print(f"❌ [MEMORY UPDATE ERROR] {e}")

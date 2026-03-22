@@ -209,7 +209,8 @@ async def background_canon_generation(context_text, excluded_name=None):
             worksheet.clear()
             # ОНОВЛЕНО: Додано Scene та Inventory у заголовки
             headers = ["Location", "Scene", "Name", "Description", "Character", "Goal", "Secrets",
-                       "Relation_Player", "Memory_Anchor", "Relation_NPCs", "Status", "Is_Canon", "Inventory"]
+                       "Relation_Player", "Memory_Anchor", "Relation_NPCs", "Status", "Is_Canon", "Inventory",
+                       "Reputation_Score"]
             worksheet.append_row(headers)
         except Exception as e:
             print(f"❌ [CANON GEN ERROR] Clear failed: {e}")
@@ -235,7 +236,8 @@ async def background_canon_generation(context_text, excluded_name=None):
                 npc.get("Relation_NPCs", "-"),
                 npc.get("Status", "Active"),
                 npc.get("Is_Canon", "TRUE"),
-                npc.get("Inventory", "Пусто")
+                npc.get("Inventory", "Пусто"),
+                npc.get("Reputation_Score", 0)
             ]
             rows_to_add.append(row)
 
@@ -364,7 +366,9 @@ async def populate_contextual_npcs(location, situation_context="Normal day, calm
             if is_canon_clone:
                 continue
 
-            # ОНОВЛЕНО: Додано Scene (індекс 1) та Inventory (індекс 12), щоб вирівняти структуру таблиці
+            # ОНОВЛЕНО: Додано Scene, Inventory та Reputation_Score
+            from database.canon_npc import _map_relation_to_score
+            initial_rep = _map_relation_to_score(npc.get("Relation_Player", "Neutral"))
             row = [
                 location,
                 "Невідомо",
@@ -378,7 +382,8 @@ async def populate_contextual_npcs(location, situation_context="Normal day, calm
                 npc.get("Relation_NPCs", "-"),
                 "Active",
                 "FALSE",
-                "Пусто"
+                "Пусто",
+                initial_rep
             ]
             new_rows.append(row)
 

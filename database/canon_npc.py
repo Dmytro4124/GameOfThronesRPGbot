@@ -1,6 +1,35 @@
 # database/canon_npc.py
 
-CANON_NPCS = [
+# Маппінг текстових Relation_Player → числових Reputation_Score
+_RELATION_TO_SCORE = {
+    "дружня": 30,
+    "дружня (фальшива)": 10,  # Виглядає дружнім, але не щиро
+    "нейтральна": 0,
+    "обережна": -10,
+    "зверхня": -20,
+    "підозріла": -30,
+    "агресивна": -50,
+    "ворожа": -60,
+}
+
+
+def _map_relation_to_score(relation_text):
+    """Конвертує текстове ставлення до числового score."""
+    if not relation_text:
+        return 0
+    key = str(relation_text).strip().lower()
+    return _RELATION_TO_SCORE.get(key, 0)
+
+
+# При першому імпорті — автоматично додаємо Reputation_Score до всіх NPC, якщо відсутній
+def _ensure_reputation_scores(npcs_list):
+    for npc in npcs_list:
+        if "Reputation_Score" not in npc:
+            npc["Reputation_Score"] = _map_relation_to_score(npc.get("Relation_Player", ""))
+    return npcs_list
+
+
+CANON_NPCS = _ensure_reputation_scores([
     # ================= ЕССOC =================
     {
         "Location": "Пентос", "Scene": "Маєток Ілліріо", "Name": "Дейнеріс Таргарієн",
@@ -998,4 +1027,4 @@ CANON_NPCS = [
         "Relation_Player": "Ворожа", "Memory_Anchor": "-", "Relation_NPCs": "Підкоряється Григору Клігану.",
         "Status": "Active", "Is_Canon": "TRUE", "Inventory": "Пусто"
     }
-]
+])
