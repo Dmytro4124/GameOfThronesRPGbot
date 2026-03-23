@@ -8,7 +8,7 @@ from google.genai import types
 
 from core.engine import process_game_turn, user_sessions
 from core.ai_client import clean_and_parse_json
-from database.operations import get_house_stats_data, save_user_data, get_user_data
+from database.operations import get_house_stats_data, save_user_data, get_user_data, clear_npc_cache, refresh_npc_database, get_location_npcs
 from database.sheets import db
 from core.world import generate_initial_stats, background_canon_generation, populate_contextual_npcs
 from config import GEMINI_API_KEYS_TEST, MODEL_MAIN_NAME, TAB_USERS
@@ -67,7 +67,7 @@ PLAYER_ACTION: {player_action_data}
 <system_rules>
 Ти оцінюєш рушій за критеріями автоматичного FAIL. Якщо знайдено хоч одне порушення — статус FAIL.
 0. БЛОКУВАННЯ ЦЕНЗОРОМ (OVERRIDE): Якщо INTERNAL_LOGS містить рядок '🛑 Дію заблоковано Цензором' — Цензор відхилив дію ДО механічної обробки. В цьому випадку: Rules 3A, 3B, 4, 5 НЕ ЗАСТОСОВУВАТИ (кидка, механіки та наративу фізичного стану не було). Перевіряти ТІЛЬКИ: а) Чи є в UI_TEXT художнє пояснення відмови (будь-яке пояснення, чому дію неможливо виконати). Якщо пояснення є — PASS. Якщо UI порожній або містить тільки технічний текст — FAIL. б) Rule 1 та Rule 6 все ще діють.
-1. ПОРУШЕННЯ ІМЕРСИВНОСТІ (СИСТЕМНІ ЦИФРИ В UI): Художній текст (UI_TEXT) НЕ ПОВИНЕН містити СИСТЕМНИХ термінів або цифр, що прямо розкривають ігрову механіку. Перевіряй ВИКЛЮЧНО текст UI_TEXT. Текст PLAYER_ACTION — це введення гравця, він МОЖЕ містити будь-які слова і цифри, НЕ перевіряти його за Rule 1. Приклади FAIL: 'ви втратили 5 енергії', 'HP: 80', 'кидок кубика 47', 'навичка +1', 'DC 60'. Приклади ДОПУСТИМОГО: NPC називає ціну ('п'ятдесят золотих', '50 монет'), кількість людей ('три вартових'), відстані ('два дні шляху'). Ключове питання: чи РОЗКРИВАЄ цифра внутрішню механіку рушія? Якщо так — FAIL. Якщо це органічна частина діалогу/опису — PASS.
+1. ПОРУШЕННЯ ІМЕРСИВНОСТІ (СИСТЕМНІ ЦИФРИ В UI): Художній текст (UI_TEXT) НЕ ПОВИНЕН містити СИСТЕМНИХ термінів або цифр, що прямо розкривають ігрову механіку. Перевіряй ВИКЛЮЧНО текст UI_TEXT. Текст PLAYER_ACTION — це введення гравця, він МОЖЕ містити будь-які слова і цифри, НЕ перевіряти його за Rule 1. Приклади FAIL: 'ви втратили 5 енергії', 'HP: 80', 'кидок кубика 47', 'навичка +1', 'DC 60'. Приклади ДОПУСТИМОГО: NPC називає ціну ('п'ятдесят золотих', '50 монет'), кількість людей ('три вартових'), відстані ('два дні шляху'). ЯВНІ ВИКЛЮЧЕННЯ (НІКОЛИ не є порушенням Rule 1): імена NPC (Ілліріо Мопатіс, Кассандра Ліра тощо), титули (принц, лорд, магістр), назви фракцій/організацій (найманці, вартові, Ланністери), назви локацій (Пентос, Гавань), будь-які наративні описи персонажів та подій. Ключове питання: чи РОЗКРИВАЄ цифра або термін ВНУТРІШНЮ ЧИСЛОВУ МЕХАНІКУ рушія (стати, кидки, DC, HP, енергію)? Якщо так — FAIL. Якщо це імена, титули, або органічна частина діалогу/опису — PASS.
 2. ГАЛЮЦИНАЦІЇ РУШІЯ (КРИТИЧНО): У INTERNAL_LOGS є теги '[БЛОКУВАННЯ ГАЛЮЦИНАЦІЇ]' або 'ШІ придумав NPC'.
 3. ЗЛАМАНА МАТЕМАТИКА ТА ПРОГРЕСІЯ — ДВА НЕЗАЛЕЖНИХ ПРАВИЛА:
    3A. МАТЕМАТИКА КИДКА: При ризикованій дії в логах МАЄ бути рядок формату '{Навичка}: Кидок {N} + Навичка {M} = {сума} (Ціль: {DC}) -> УСПІХ/ПРОВАЛ'. ВАЖЛИВО: 'Навичка {M}' тут — це ПОТОЧНИЙ РІВЕНЬ СТАТY, а НЕ підвищення. ВИКЛЮЧЕННЯ: якщо дія гравця є пасивною (чекати, спостерігати, сідати, стояти) і в логах є 'Немає: Кидок -' або взагалі немає рядка кидка — це AUTO_SUCCESS, НЕ порушення. Rule 3A застосовувати ТІЛЬКИ до ризикованих дій (бій, крадіжка, переконання, магія, атлетика).
@@ -116,6 +116,14 @@ PLAYER_ACTION: {player_action_data}
   "log_analysis": "Rule 0: немає '🛑'. Енергія: 43 -> 37 (-6) — залишок 37. УВАГА: 37 > 29, тому це зона b (30-59), НЕ зона c (≤29). |дельта|=6 < 10 — наратив НЕ обов'язковий. PASS.",
   "status": "PASS",
   "reason": "Енергія 37 — зона 30-59 (НЕ ≤29), дельта мала (-6), наратив не вимагається.",
+  "ux_score": 7
+}
+
+ПРИКЛАД 4 (PASS — енергія 31, дуже близько до межі ≤29, але все ще зона b):
+{
+  "log_analysis": "Rule 0: немає '🛑'. Енергія: 36 -> 31 (-5) — залишок 31. УВАГА: 31 > 29, тому це ЗОНА b (30-59), НЕ зона c (≤29). |дельта|=5 < 10 — наратив НЕ обов'язковий. Це НЕ порушення. UI містить імена NPC ('Ілліріо Мопатіс', 'найманці', 'принц') — це наративні елементи, НЕ системні терміни (Rule 1 не порушено). PASS.",
+  "status": "PASS",
+  "reason": "Енергія 31 — зона 30-59 (31 > 29, НЕ ≤29), дельта мала (-5), наратив не вимагається. Імена NPC та титули не є системними термінами.",
   "ux_score": 7
 }
 </few_shot_examples>
@@ -199,8 +207,17 @@ class RPGTesterAdapter:
         # Заселяємо світ канонічними + фоновими NPC (як у bot/handlers.py:170-175)
         start_loc = full_profile.get("Поточне місцезнаходження", "Вестерос")
         log.info(f"🌍 Заселяю світ канонічними NPC (локація: {start_loc})...")
+        clear_npc_cache()  # Очищуємо стейл-кеш перед перезаписом NPC_DB
         await background_canon_generation(excluded_name=self.char_name)
         await populate_contextual_npcs(start_loc, "Start of the game. Normal daily routine.", excluded_name=self.char_name)
+        await refresh_npc_database()  # Гарантуємо свіжий кеш після перезапису
+
+        # Anti-Doppelganger верифікація: перевіряємо що гравець НЕ в ростері NPC
+        _, legal_names, _ = get_location_npcs(start_loc, "Невідомо")
+        if self.char_name in legal_names:
+            log.warning(f"⚠️ DOPPELGANGER DETECTED: '{self.char_name}' знайдено в NPC ростері після world setup!")
+        else:
+            log.info(f"✅ Anti-Doppelganger: '{self.char_name}' відсутній в NPC ростері — OK")
 
         user_sessions[self.chat_id]['state'] = "GAME_ACTIVE"
 
@@ -338,6 +355,7 @@ async def run_test(max_turns: int = 5, profile: dict = None, profile_key: str = 
             turn_user_msg = (
                 f"SYSTEM_RESPONSE: {ui_text}\n\n"
                 f"PLAYER_CURRENT_STATE: {profile_summary}\n\n"
+                f"TURN_NUMBER: {turn}/{max_turns}\n\n"
                 "ВАЖЛИВО: Відповідай ТІЛЬКИ валідним JSON. Без Markdown."
             )
             player_history_dynamic.append(
@@ -355,7 +373,8 @@ async def run_test(max_turns: int = 5, profile: dict = None, profile_key: str = 
                 if not action_data:
                     raise ValueError("clean_and_parse_json повернув None")
                 player_action = action_data.get("action", "Дія не розпізнана")
-                log.info(f"👤 ГРАВЕЦЬ (Думка: {action_data.get('thought_process', '')}):\n-> {player_action}\n")
+                state_check = action_data.get("state_check", "")
+                log.info(f"👤 ГРАВЕЦЬ [Стан: {state_check}] (Думка: {action_data.get('thought_process', '')}):\n-> {player_action}\n")
                 player_history_dynamic.append(
                     types.Content(role="model", parts=[types.Part.from_text(text=raw_text)])
                 )
@@ -377,11 +396,14 @@ async def run_test(max_turns: int = 5, profile: dict = None, profile_key: str = 
             await asyncio.sleep(SLEEP_AFTER_EVALUATOR_SEC)
 
             # === EVALUATOR AI ===
+            evaluator_extra = p.get("evaluator_extra_rules", "")
+            eval_extra_block = f"\n<profile_specific_rules>\n{evaluator_extra}\n</profile_specific_rules>" if evaluator_extra else ""
             eval_prompt_text = (
                 EVALUATOR_PROMPT
                 .replace("{internal_logs_data}", system_logs)
                 .replace("{ui_text_data}", new_ui_text)
                 .replace("{player_action_data}", player_action)
+                + eval_extra_block
                 + "\nВАЖЛИВО: Відповідай ТІЛЬКИ валідним JSON. Без Markdown."
             )
 
