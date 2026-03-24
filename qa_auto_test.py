@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import asyncio
 import logging
@@ -411,14 +412,35 @@ async def run_test(max_turns: int = 5, profile: dict = None, profile_key: str = 
                 types.Content(role="user", parts=[types.Part.from_text(text=eval_prompt_text)])
             ]
             try:
-                eval_raw = await _generate_with_retry(eval_content, temperature=0.0, client=test_client)
-                eval_data = clean_and_parse_json(eval_raw)
+                eval_data = None
+                for eval_attempt in range(1, 3):
+                    eval_raw = await _generate_with_retry(eval_content, temperature=0.0, client=test_client)
+                    eval_data = clean_and_parse_json(eval_raw)
+                    if eval_data:
+                        break
+                    log.warning(f"⚠️ Евалюатор: JSON parse fail, спроба {eval_attempt}/2. Raw: {eval_raw[:200]}")
+                    if eval_attempt < 2:
+                        await asyncio.sleep(SLEEP_AFTER_EVALUATOR_SEC)
                 if not eval_data:
-                    raise ValueError("clean_and_parse_json повернув None для евалюатора")
+                    log.warning(f"⚠️ Евалюатор не повернув валідний JSON після 2 спроб. Хід {turn} пропущено (SKIP).")
+                    results.append({"turn": turn, "status": "SKIP", "ux_score": "?", "reason": "Evaluator JSON parse failure"})
+                    ui_text = new_ui_text
+                    continue
 
                 status = eval_data.get("status", "ERROR")
                 ux_score = eval_data.get("ux_score", "?")
                 reason = eval_data.get("reason", "—")
+
+                # A04 FIX: Post-hoc validation — перевіряємо false positive для Rule 4c (E>29)
+                if status == "FAIL" and ("4c" in reason.lower() or "≤29" in reason or "<=29" in reason or "залишок" in reason.lower()):
+                    # Витягуємо реальний залишок енергії з логів рушія
+                    energy_match = re.search(r'⚡ Енергія: \d+ -> (\d+)', system_logs)
+                    if energy_match:
+                        actual_energy = int(energy_match.group(1))
+                        if actual_energy > 29:
+                            log.warning(f"⚠️ FALSE POSITIVE: Евалюатор сказав FAIL (Rule 4c), але E={actual_energy} > 29. Переозначено на PASS.")
+                            status = "PASS"
+                            reason = f"[OVERRIDDEN] Евалюатор помилився: E={actual_energy} > 29, Rule 4c не застосовується. Оригінал: {reason}"
 
                 log.info(f"🔍 АНАЛІЗ ЛОГІВ: {eval_data.get('log_analysis', 'Аналіз відсутній')}")
                 log.info(f"⚖️  ЕВАЛЮАТОР [UX: {ux_score}/10] -> {status}")

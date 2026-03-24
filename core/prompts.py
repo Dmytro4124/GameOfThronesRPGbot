@@ -1,29 +1,30 @@
 # core/prompts.py
 
 GAME_ERA_CONTEXT = """
-=== TIMELINE: year 298 (End of the Long Summer) ===
-The world stands still in anticipation of disaster. “Winter is coming,” and you can feel it in the air.
+=== ХРОНОЛОГІЯ: 298 рік від Завоювання (Кінець Довгого Літа) ===
+Світ завмер в очікуванні біди. "Зима близько" — і це відчувається в повітрі.
 
-1. POLITICAL SITUATION (POWDER KEG):
-- Iron Throne: Robert Baratheon. The former “Demon of the Trident” who was feared by all is now fat,  perpetually drunk, and indifferent to ruling. He hates the Targaryens with all his heart. The country is in debt to the Lannisters, the Iron Bank, and others.
-- Queen: Cersei Lannister. She surrounds the court with her people. The Lannisters behave as if they are already in power.
-- Hand of the King: Jon Arryn died of a fever. Now the king needs a replacement.
-- Current Main Event: A huge royal procession is slowly crawling along the King's Road to the North, to Winterfell, and will arrive in a few days.
+1. ПОЛІТИЧНА СИТУАЦІЯ (ПОРОХОВА БОЧКА):
+- Залізний Трон: Роберт Баратеон. Колишній "Демон Тризуба", якого боялися всі, нині огрядний, вічно п'яний і байдужий до правління. Ненавидить Таргарієнів всім серцем. Корона в боргах перед Ланністерами, Залізним Банком та іншими.
+- Королева: Серсея Ланністер. Оточує двір своїми людьми. Ланністери поводяться так, ніби вже при владі.
+- Десниця Короля: Джон Аррін помер від "гарячки". Тепер королю потрібна заміна.
+- Поточна подія (на початку гри): Величезна королівська процесія повзе Королівським трактом на Північ, до Вінтерфеллу.
 
-2. HIDDEN THREATS (FOR GM ONLY - PLAYERS SHOULD NOT KNOW THIS):
-- Secret: The queen's children are bastards from incest with Jaime (this is the most dangerous secret in the world).
-- Secret 2: Jon Arryn was poisoned by Lysa Arryn in collusion with Petyr Baelish.
-- North: The Night's Watch is weaker than ever. Scouts are disappearing beyond the Wall. Old people scare children with tales of the Others, but the lords do not believe it.
-- Essos: Viserys Targaryen sells his sister Daenerys to Khal Drogo. There are no dragons yet (they are still petrified eggs).
+2. ПРИХОВАНІ ЗАГРОЗИ (ТІЛЬКИ ДЛЯ GM — ГРАВЕЦЬ НЕ ПОВИНЕН ЗНАТИ):
+- Таємниця: Діти королеви — бастарди від інцесту з Джеймі (найнебезпечніший секрет у світі).
+- Таємниця 2: Джона Арріна отруїла Ліза Аррін у змові з Петіром Бейлішем.
+- Північ: Нічна Варта слабша за будь-коли. Розвідники зникають за Стіною. Лорди не вірять в Інших.
+- Ессос: Візерис Таргарієн продає сестру Дейнеріс Кхалу Дрого. Драконів ще немає (окам'янілі яйця).
+ПРАВИЛО РОЗКРИТТЯ: Ці таємниці можуть бути розкриті через розслідування гравця. Якщо гравець цілеспрямовано шукає ці секрети І проходить складну перевірку Інтриги — можеш натякнути на правду.
 
-3. WORLD ATMOSPHERE (GRIMDARK):
-- Economy: Grain prices are rising. Peasants are hoarding supplies, fearing a long winter.
-- Law: The roads are dangerous. “Bandits lurk behind every bush.” Knights are often no better than bandits.
-- Mood: Anxiety. There is a smell of war in the air, although the swords are still in their sheaths.
+3. АТМОСФЕРА СВІТУ (GRIMDARK):
+- Економіка: Ціни на зерно зростають. Селяни роблять запаси, боячись довгої зими.
+- Закон: Дороги небезпечні. "За кожним кущем — розбійники." Лицарі часто не кращі за бандитів.
+- Настрій: Тривога. В повітрі пахне війною, хоча мечі ще в піхвах.
 
-IMPORTANT FOR THE PLOT:
-- Ned Stark is still alive and is in Winterfell, having received news of a deserter from the night watch.
-- The War of the Five Kings HAS NOT YET BEGUN.
-- DRAGONS: Extinct. Illyrio currently holds three STONE EGGS. They are fossils. They cannot move, hatch, or hiss.
-- MAGIC: Extremely rare and subtle. No fireballs, no resurrection (yet).
+ВАЖЛИВО ДЛЯ СЮЖЕТУ:
+- Нед Старк ще живий і перебуває у Вінтерфеллі.
+- Війна П'яти Королів ЩЕ НЕ ПОЧАЛАСЯ.
+- ДРАКОНИ: Вимерли. У Ілліріо є три КАМ'ЯНІ ЯЙЦЯ. Вони скам'янілості. Не рухаються, не вилуплюються, не шиплять.
+- МАГІЯ: Надзвичайно рідкісна і тонка. Ніяких вогняних куль, воскресінь (поки що).
 """

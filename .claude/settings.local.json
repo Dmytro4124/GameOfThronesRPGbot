@@ -5,7 +5,8 @@
       "Read(//mnt/c/Users/dmytr/**)",
       "Bash(python -c \"import core.mechanics\")",
       "Bash(python:*)",
-      "Bash(PYTHONIOENCODING=utf-8 python qa_auto_test.py --help)"
+      "Bash(PYTHONIOENCODING=utf-8 python qa_auto_test.py --help)",
+      "Bash(find /c/Users/dmytr/TelegramGameOfThronesBot/core -name *.py -type f)"
     ]
   }
 }

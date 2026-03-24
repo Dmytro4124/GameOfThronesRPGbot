@@ -188,12 +188,35 @@ async def start_game_with_character(bot: Bot, chat_id: int, char_name: str):
             await bot.send_message(chat_id, stats_msg, parse_mode='Markdown')
 
             await bot.send_chat_action(chat_id, action='typing')
-            intro_story = await get_narrative_intro(full_profile)
+            intro_data = await get_narrative_intro(full_profile)
 
-            await send_safe_message(bot, chat_id, intro_story, reply_markup=get_main_menu())
+            narrative = intro_data.get("narrative_text", "")
+            action_prompt = intro_data.get("action_prompt", "")
+            raw_suggested = intro_data.get("suggested_actions", [])
+
+            button_texts = []
+            intents_map = {}
+            for item in raw_suggested:
+                if isinstance(item, dict):
+                    btn = str(item.get("button", "...")).strip()[:40]
+                    intent = str(item.get("intent", btn)).strip()
+                else:
+                    btn = str(item).strip()[:40]
+                    intent = btn
+                button_texts.append(btn)
+                intents_map[btn] = intent
+
+            user_sessions.setdefault(chat_id, {})["action_intents"] = intents_map
+
+            display_text = narrative
+            if action_prompt:
+                display_text += f"\n\n_{action_prompt}_"
+
+            markup = get_dynamic_menu(button_texts) if button_texts else get_main_menu()
+            await send_safe_message(bot, chat_id, display_text, reply_markup=markup)
             await bot.send_message(chat_id, "⚔️ Ваш шлях починається...")
 
-            user_sessions[chat_id]['history'].append({"role": "GM", "content": intro_story})
+            user_sessions[chat_id]['history'].append({"role": "GM", "content": display_text})
         else:
             await bot.send_message(chat_id, "❌ Помилка запису в базу даних.")
     else:
@@ -363,7 +386,13 @@ async def handle_general_messages(message: Message, bot: Bot):
         if len(PROCESSED_MESSAGES) > 100: PROCESSED_MESSAGES.pop()
 
         if user_text.startswith("👉 "):
-            user_text = user_text[2:].strip()
+            stripped = user_text[2:].strip()
+            session = user_sessions.get(chat_id, {})
+            intents_map = session.get("action_intents", {})
+            resolved_intent = intents_map.get(stripped, stripped)
+            if resolved_intent != stripped:
+                await message.answer(f"_{resolved_intent}_", parse_mode="Markdown")
+            user_text = resolved_intent
 
         await bot.send_chat_action(chat_id, action='typing')
 
