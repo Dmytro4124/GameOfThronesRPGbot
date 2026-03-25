@@ -379,6 +379,7 @@ async def process_game_turn(chat_id, user_input):
     </current_turn>
 
     <json_generation_rules>
+    0. АНАЛІЗ NPC (ОБОВ'ЯЗКОВО ПЕРШИМ): Заповни "npc_reasoning" ДО написання "story". Перерахуй кожного NPC з АКТИВНОГО РОСТЕРУ, з яким гравець взаємодіяв (прямо чи опосередковано). Для кожного вкажи ЩО ЗМІНИЛОСЬ: ставлення, локація, інвентар, мета, стан. Якщо ЖОДЕН NPC не змінився — явно напиши причину. Тільки після заповнення "npc_reasoning" — переходь до "npc_updates" та "story".
     1. ПОСТІЙНІСТЬ ПРЕДМЕТІВ: Якщо фізичні предмети чи золото обмінюються, ти ПОВИНЕН оновити поле "Inventory" NPC.
     2. ПОРОЖНІ РЯДКИ: Якщо конкретне поле НЕ змінилося, його значення ПОВИННО бути рівно "".
     3. ЗАБОРОНЕНІ СЛОВА: Не пиши "no change", "same", або "без змін". Використовуй "".
@@ -395,8 +396,7 @@ async def process_game_turn(chat_id, user_input):
     ВІДПОВІДАЙ СТРОГО У ФОРМАТІ JSON:
     {{
         "reasoning": "Твоє коротке внутрішнє міркування про те, як світ/NPC реагують на дію гравця з урахуванням механічного вердикту.",
-        "story": "Твій фінальний наративний текст українською. Заверши запрошенням до наступної дії.",
-        "suggested_actions": [{{"button": "Текст кнопки", "intent": "Розгорнутий намір від першої особи"}}, ...],
+        "npc_reasoning": "ОБОВ'ЯЗКОВО: перерахуй кожного NPC з активного ростеру, з яким гравець взаємодіяв, і що саме змінилося (ставлення, локація, інвентар, мета, стан). Якщо жоден NPC не змінився — поясни чому.",
         "npc_updates": [
             {{
                 "Name": "Exact Name from Roster",
@@ -412,7 +412,9 @@ async def process_game_turn(chat_id, user_input):
                 "Inventory": "",
                 "Status": "Active"
             }}
-        ]
+        ],
+        "story": "Твій фінальний наративний текст українською. Заверши запрошенням до наступної дії.",
+        "suggested_actions": [{{"button": "Текст кнопки", "intent": "Розгорнутий намір від першої особи"}}, ...]
     }}"""
 
     try:
@@ -468,6 +470,9 @@ async def process_game_turn(chat_id, user_input):
 
         t_start = time.time()
         npc_changes = ai_data.get("npc_updates", [])
+        if not npc_changes and npc_context_text:
+            npc_rsn = ai_data.get("npc_reasoning", "—")
+            print(f"[NPC_WARN] npc_updates=[] при наявних NPC у сцені. npc_reasoning: {npc_rsn[:300]}")
 
         if safe_int(profile.get("Здоров'я", 100)) <= 0:
             story += "\n\n💀 *ВАШ ДОЗОР ЗАКІНЧИВСЯ. Ви загинули.*"
