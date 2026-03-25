@@ -50,10 +50,36 @@ model = AIWrapper(MODEL_MAIN_NAME, temperature=MODEL_MAIN_TEMP)
 model_worker = AIWrapper(MODEL_WORKER_NAME, temperature=MODEL_WORKER_TEMP)
 
 
+def _fix_invalid_escapes(s: str) -> str:
+    """
+    Виправляє невалідні escape-послідовності у JSON-рядку.
+    Стратегія: замінює одиничний \, за яким іде не-валідний символ, на \\,
+    що дозволяє json.loads розпарсити його як літеральний бекслеш.
+
+    JSON дозволяє лише: \" \\ \/ \b \f \n \r \t \uXXXX
+    """
+    # Placeholder, який гарантовано не зустрічається у JSON
+    PLACEHOLDER = "\x00DBLSLASH\x00"
+
+    # Крок 1: захистити вже валідні \\ від подвійної обробки
+    s = s.replace('\\\\', PLACEHOLDER)
+
+    # Крок 2: знайти \ за яким іде НЕ-валідний escape-символ і замінити на \\
+    # Negative lookahead: не чіпаємо " \ / b f n r t u + 4 hex
+    s = re.sub(r'\\(?!["\\\/bfnrt]|u[0-9a-fA-F]{4})', r'\\\\', s)
+
+    # Крок 3: відновити оригінальні \\
+    s = s.replace(PLACEHOLDER, '\\\\')
+
+    return s
+
+
 def clean_and_parse_json(text):
-    """Витягує JSON з тексту. Підтримує {} і []. Stack-based bracket matching."""
+    """Витягує JSON з тексту. Підтримує {} і []. Stack-based bracket matching.
+    Шарова оборона проти невалідних escape-послідовностей від LLM."""
     if not text:
         return None
+
     try:
         # Крок 1: Стрипінг всіх варіантів markdown-фенсів (```json, ```JSON, ~~~json, тощо)
         text = re.sub(r'^\s*[`~]{3,}\s*\w*\s*\n?', '', text, flags=re.MULTILINE)
@@ -102,15 +128,28 @@ def clean_and_parse_json(text):
             return None
 
         json_str = text[start_index: end_index + 1]
-        # strict=False дозволяє переноси рядків всередині рядкових значень
-        return json.loads(json_str, strict=False)
 
-    except json.JSONDecodeError as e:
-        print(f"⚠️ Помилка парсингу JSON (JSONDecodeError): {e}")
-        return None
     except Exception as e:
-        print(f"⚠️ Помилка парсингу: {e}")
+        print(f"⚠️ Помилка екстракції JSON: {e}")
         return None
+
+    # Шар 1: стандартний парсинг (strict=False дозволяє літеральні переноси рядків)
+    try:
+        return json.loads(json_str, strict=False)
+    except json.JSONDecodeError as e:
+        snippet = json_str[max(0, e.pos - 40): e.pos + 40]
+        print(f"⚠️ JSONDecodeError шар 1: {e} | Фрагмент: {snippet!r}")
+
+    # Шар 2: виправити невалідні escape-послідовності → повторний парсинг
+    try:
+        sanitized = _fix_invalid_escapes(json_str)
+        return json.loads(sanitized, strict=False)
+    except json.JSONDecodeError as e:
+        snippet = json_str[max(0, e.pos - 40): e.pos + 40]
+        print(f"⚠️ JSONDecodeError шар 2 (після escape-fix): {e} | Фрагмент: {snippet!r}")
+
+    print(f"❌ JSON парсинг повністю провалився. Початок тексту: {json_str[:200]!r}")
+    return None
 
 
 async def ask_gemini(prompt, use_worker=False):
