@@ -23,6 +23,25 @@ WEBHOOK_PATH = f"/{TELEGRAM_TOKEN}"
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 
+async def health_check(request):
+    return web.Response(text="Bot is alive", status=200)
+
+
+async def run_polling():
+    port = int(os.getenv('PORT', 8080))
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f"🌐 Keep-alive сервер запущено на порту {port}")
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await runner.cleanup()
+
+
 async def on_startup(bot: Bot):
     logger.info("⏳ Початок ініціалізації системи...")
 
@@ -69,7 +88,7 @@ def main():
         web.run_app(app, host="0.0.0.0", port=port)
     else:
         logger.info("🚀 Запуск у режимі Infinity Polling...")
-        asyncio.run(dp.start_polling(bot))
+        asyncio.run(run_polling())
 
 
 if __name__ == "__main__":
