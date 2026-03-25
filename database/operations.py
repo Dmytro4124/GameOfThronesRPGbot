@@ -498,12 +498,15 @@ async def update_npcs_in_db(updates, legal_names_list_deprecated=None):
 
         db_names_map = {}
         legal_names_lower_map = {}
+        name_col_idx = headers.index("name") if "name" in headers else 2
 
         for i, row in enumerate(all_values[1:], start=2):
-            raw_name = str(row[1]).strip()
+            if len(row) <= name_col_idx:
+                continue
+            raw_name = str(row[name_col_idx]).strip()
             if raw_name:
                 db_names_map[raw_name] = i
-                norm_name = raw_name.lower().replace("’", "'").replace("`", "'").replace("‘", "'")
+                norm_name = raw_name.lower().replace("’", "’").replace("`", "’").replace("’", "’")
                 legal_names_lower_map[norm_name] = raw_name
 
         cells_to_update = []
@@ -543,38 +546,7 @@ async def update_npcs_in_db(updates, legal_names_list_deprecated=None):
                         col_idx = col_map[field_key]
                         cells_to_update.append(gspread.Cell(row_idx, col_idx, val_str))
             else:
-                from core.external_api import fetch_character_from_api
-
-                print(f"🔍 [API CHECK] Персонажа '{target_name}' немає локально. Шукаємо в API Ice & Fire...")
-                api_npc = fetch_character_from_api(target_name)
-
-                if api_npc:
-                    print(f"🌐 [API SUCCESS] Знайдено канонічного персонажа: {api_npc['Name']}! Додаємо в базу.")
-
-                    new_row = [
-                        api_npc.get("Location", "GLOBAL"),
-                        api_npc.get("Scene", "Невідомо"),
-                        api_npc.get("Name", "Unknown"),
-                        api_npc.get("Description", ""),
-                        api_npc.get("Character", ""),
-                        api_npc.get("Goal", ""),
-                        api_npc.get("Secrets", ""),
-                        api_npc.get("Relation_Player", ""),
-                        api_npc.get("Memory_Anchor", ""),
-                        api_npc.get("Relation_NPCs", ""),
-                        api_npc.get("Status", "Active"),
-                        api_npc.get("Is_Canon", "TRUE"),
-                        api_npc.get("Inventory", ""),
-                        0  # Reputation_Score default
-                    ]
-
-                    try:
-                        worksheet.append_row(new_row)
-                        print(f"💾 [SAVED] {api_npc['Name']} успішно завантажений у Вестерос.")
-                    except Exception as append_err:
-                        print(f"❌ [API SAVE ERROR] Не вдалося записати {api_npc['Name']} у таблицю: {append_err}")
-                else:
-                    print(f"🛡️ [БЛОКУВАННЯ ГАЛЮЦИНАЦІЇ] ШІ придумав NPC '{target_name}'. Ігноруємо!")
+                print(f"🛡️ [БЛОКУВАННЯ ГАЛЮЦИНАЦІЇ] ШІ придумав NPC '{target_name}'. Ігноруємо!")
 
         if cells_to_update:
             worksheet.update_cells(cells_to_update)
