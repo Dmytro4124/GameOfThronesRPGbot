@@ -385,19 +385,22 @@ async def handle_general_messages(message: Message, bot: Bot):
         PROCESSED_MESSAGES.add(msg_id)
         if len(PROCESSED_MESSAGES) > 100: PROCESSED_MESSAGES.pop()
 
+        display_intent = None
         if user_text.startswith("👉 "):
             stripped = user_text[2:].strip()
             session = user_sessions.get(chat_id, {})
             intents_map = session.get("action_intents", {})
             resolved_intent = intents_map.get(stripped, stripped)
             if resolved_intent != stripped:
-                await message.answer(f"_{resolved_intent}_", parse_mode="Markdown")
+                display_intent = resolved_intent
             user_text = resolved_intent
 
         await bot.send_chat_action(chat_id, action='typing')
 
         try:
             response_text, suggested_actions = await process_game_turn(chat_id, user_text)
+            if display_intent:
+                response_text = f"🗣️ _{display_intent}_\n\n{response_text}"
             await send_game_response(bot, chat_id, response_text, suggested_actions, reply_to_message_id=msg_id)
 
         except Exception as e:
