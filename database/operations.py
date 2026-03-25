@@ -423,11 +423,19 @@ def get_location_npcs(current_location, current_scene, current_region=None):
                         legal_names.append(npc_data["name"])
                         reputation_context[npc_data["name"]] = npc_data.get("reputation_score", 0)
         else:
-            # Нормальний режим: точний збіг локації + сцени
+            # Нормальний режим: точний збіг локації + сцени з підтримкою приватних сцен
             if loc_key.lower() == target_loc:
+                _GENERIC_SCENES = ("невідомо", "global", "")
+                player_in_specific_scene = target_scene not in _GENERIC_SCENES
                 for npc_data in npcs_list:
                     npc_scene = str(npc_data.get("scene", "невідомо")).strip().lower()
-                    if npc_scene == target_scene or npc_scene == "global" or npc_scene == "":
+                    if player_in_specific_scene:
+                        # Іменована/приватна сцена: ТІЛЬКИ NPC явно прив'язані до цієї сцени
+                        show = (npc_scene == target_scene)
+                    else:
+                        # Загальна сцена: показуємо NPC без прив'язки АБО з такою ж сценою
+                        show = (npc_scene == target_scene or npc_scene in _GENERIC_SCENES)
+                    if show:
                         found_npcs.append(npc_data["card"])
                         legal_names.append(npc_data["name"])
                         reputation_context[npc_data["name"]] = npc_data.get("reputation_score", 0)

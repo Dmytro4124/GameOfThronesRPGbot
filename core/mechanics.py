@@ -619,7 +619,7 @@ async def resolve_action_mechanics(user_input, profile, npc_reputation_context=N
              Accusations, threats, insults, and aggressive actions MUST increment tension (+1). NEVER output "clear" during aggression or without a location change.
 
         6. MOVEMENT AND LOCATIONS (CRITICAL):
-           - If the player explicitly leaves a room, building, or travels locally, you MUST output the new micro-location in "scene_impact" (e.g., "Гавань", "Вулиці", "Таверна").
+           - If the player explicitly leaves a room, building, or travels locally, you MUST output the new micro-location in "scene_impact" (e.g., "Гавань", "Вулиці", "Таверна"). Якщо гравець входить у КОНКРЕТНИЙ приватний простір NPC (покої, в'язниця, підвал), давай описову назву з іменем або функцією (напр. "Покої Неда Старка", "Темниця під вежею") — ця назва буде використана GM як якір сцени для ізоляції NPC.
            - If they travel to an entirely new city or region, update "location_impact" (e.g., "Браавос", "Королівська Гавань") AND update "scene_impact" to a logical starting point there.
            - If they stay in the current scene, output "none" for both.
         </rules>
