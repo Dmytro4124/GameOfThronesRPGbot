@@ -56,7 +56,7 @@ def _fix_invalid_escapes(s: str) -> str:
     Стратегія: замінює одиничний \, за яким іде не-валідний символ, на \\,
     що дозволяє json.loads розпарсити його як літеральний бекслеш.
 
-    JSON дозволяє лише: \" \\ \/ \b \f \n \r \t \uXXXX
+    JSON дозволяє лише: \" \\ \/ \b \f \n \r \t \\uXXXX
     """
     # Placeholder, який гарантовано не зустрічається у JSON
     PLACEHOLDER = "\x00DBLSLASH\x00"
