@@ -6,6 +6,7 @@ from database.sheets import db
 from database.operations import refresh_npc_database, find_best_match
 from core.ai_client import model, ask_gemini, clean_and_parse_json
 from core.prompts import GAME_ERA_CONTEXT
+from core.world_constants import get_region_for_location
 from config import TAB_NPC
 from database.canon_npc import get_canon_npcs_copy
 
@@ -88,6 +89,7 @@ HOUSE: {house_name} (Origin: {origin_region})
     "Дім": "Мормонт",
     "Титул": "Вигнанець / Лицар",
     "Поточне місцезнаходження": "Пентос",
+    "Регіон": "Вільні Міста",
     "Володіння": "-",
     "Світогляд": "Відданий, меланхолійний, шукає спокути",
     "Здоров'я": 100,
@@ -122,6 +124,9 @@ HOUSE: {house_name} (Origin: {origin_region})
     if profile:
         profile["Ім'я"] = char_name
         profile["Дім"] = house_name
+        # Auto-derive регіон — перезаписуємо відповідь ШІ гарантованим значенням
+        loc = profile.get("Поточне місцезнаходження", "")
+        profile["Регіон"] = get_region_for_location(loc) or origin_region
         return profile
     return None
 
@@ -252,7 +257,7 @@ async def background_canon_generation(excluded_name=None):
             worksheet.clear()
             headers = ["Location", "Scene", "Name", "Description", "Character", "Goal", "Secrets",
                        "Relation_Player", "Memory_Anchor", "Relation_NPCs", "Status", "Is_Canon", "Inventory",
-                       "Reputation_Score"]
+                       "Reputation_Score", "Region"]
             worksheet.append_row(headers)
             _time.sleep(2)  # Пауза після clear+headers, щоб API встиг обробити
         except Exception as e:
@@ -280,7 +285,8 @@ async def background_canon_generation(excluded_name=None):
                     npc.get("Status", "Active"),
                     npc.get("Is_Canon", "TRUE"),
                     npc.get("Inventory", "Пусто"),
-                    npc.get("Reputation_Score", 0)
+                    npc.get("Reputation_Score", 0),
+                    npc.get("Region", ""),
                 ]
                 rows_to_add.append(row)
 
@@ -471,7 +477,7 @@ async def populate_contextual_npcs(location, situation_context="Normal day, calm
             if is_canon_clone:
                 continue
 
-            # ОНОВЛЕНО: Додано Scene, Inventory та Reputation_Score
+            # ОНОВЛЕНО: Додано Scene, Inventory, Reputation_Score та Region
             from database.canon_npc import _map_relation_to_score
             initial_rep = _map_relation_to_score(npc.get("Relation_Player", "Neutral"))
             row = [
@@ -488,7 +494,8 @@ async def populate_contextual_npcs(location, situation_context="Normal day, calm
                 "Active",
                 "FALSE",
                 "Пусто",
-                initial_rep
+                initial_rep,
+                get_region_for_location(location) or "",
             ]
             new_rows.append(row)
 

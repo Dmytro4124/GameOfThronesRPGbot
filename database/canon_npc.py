@@ -33,9 +33,15 @@ def _ensure_reputation_scores(npcs_list):
     return tuple(result)  # tuple = immutable sequence
 
 
+def _inject_region(npcs_list):
+    """Автоматично додає поле 'Region' до кожного NPC на основі LOCATION_TO_REGION маппінгу."""
+    from core.world_constants import LOCATION_TO_REGION
+    return [dict(npc, Region=LOCATION_TO_REGION.get(npc.get("Location", ""), "")) for npc in npcs_list]
+
+
 def get_canon_npcs_copy():
-    """Повертає deep copy канонічних NPC. Безпечно для мутацій — кожен виклик = свіжі дані."""
-    return copy.deepcopy(list(CANON_NPCS))
+    """Повертає deep copy канонічних NPC з автоматично заповненим полем 'Region'."""
+    return copy.deepcopy(_inject_region(list(CANON_NPCS)))
 
 
 CANON_NPCS = _ensure_reputation_scores([
@@ -867,7 +873,7 @@ CANON_NPCS = _ensure_reputation_scores([
         "Status": "Active", "Is_Canon": "TRUE", "Inventory": "Пусто"
     },
     {
-        "Location": "Королівська Гавань (Темниці)", "Scene": "Невідомо", "Name": "Джакен Х'ґар",
+        "Location": "Королівство Корони", "Scene": "Темниці", "Name": "Джакен Х'ґар",
         "Description": "В'язень у кайданах. Має довге волосся, наполовину руде, наполовину біле. Завжди говорить про себе в третій особі ('Людина').",
         "Character": "Абсолютно спокійний, ввічливий, смертоносний. Випромінює ауру таємничості.",
         "Goal": "Дочекатися відправлення на Стіну або знайти того, хто звільнить його з клітки.",
@@ -968,7 +974,7 @@ CANON_NPCS = _ensure_reputation_scores([
 
     # ================= СТОРМОВІ ТА РІЧКОВІ ЗЕМЛІ =================
     {
-        "Location": "Тарт / Табір Ренлі", "Scene": "Невідомо", "Name": "Брієнна Тарт",
+        "Location": "Штормові Землі", "Scene": "Табір Ренлі", "Name": "Брієнна Тарт",
         "Description": "Надзвичайно висока, м'язиста жінка з чоловічою статурою, поламаним носом і щирими, красивими блакитними очима.",
         "Character": "Непохитно віддана ідеалам лицарства, чесна, наївна, страждає через своє непривабливе обличчя.",
         "Goal": "Служити справжньому лицарю і довести, що жінки можуть бути воїнами.",

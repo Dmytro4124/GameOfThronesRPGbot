@@ -10,6 +10,7 @@ import gspread
 from google import genai
 
 from database.sheets import db
+from core.world_constants import is_valid_location, is_valid_region, TRAVEL_LOCATION
 from config import (
     TAB_USERS,
     TAB_HOUSES,
@@ -350,6 +351,8 @@ async def refresh_npc_database():
                 except (ValueError, TypeError):
                     rep_score = 0
 
+                region = str(row.get("Region", "")).strip()
+
                 npc_card = f"> **{name}** {type_tag}\n"
                 if row.get("Description"): npc_card += f"- **Visual:** {row.get('Description')}\n"
                 if row.get("Character"): npc_card += f"- **Personality:** {row.get('Character')}\n"
@@ -372,7 +375,8 @@ async def refresh_npc_database():
                     "name": name,
                     "scene": scene,
                     "card": npc_card,
-                    "reputation_score": rep_score
+                    "reputation_score": rep_score,
+                    "region": region,
                 })
                 count += 1
 
@@ -389,31 +393,46 @@ async def refresh_npc_database():
     return False
 
 
-def get_location_npcs(current_location, current_scene):
-    """Синхронна функція. Повертає опис NPC, список легальних імен та dict репутації за Локацією ТА Сценою."""
+def get_location_npcs(current_location, current_scene, current_region=None):
+    """Синхронна функція. Повертає опис NPC, список легальних імен та dict репутації.
+    Підтримує 3-рівневу фільтрацію: Регіон → Локація → Сцена.
+    Якщо current_location == TRAVEL_LOCATION — показує регіональних мандрівників.
+    """
     found_npcs = []
     legal_names = []
     reputation_context = {}
 
+    is_traveling = str(current_location).strip() == TRAVEL_LOCATION
     target_loc = str(current_location).strip().lower()
     target_scene = str(current_scene).strip().lower()
-
     if not target_scene:
         target_scene = "невідомо"
 
-    # Фільтрація з кешу за двома параметрами
     for loc_key, npcs_list in NPC_CACHE.items():
-        if loc_key.lower() == target_loc:
-            for npc_data in npcs_list:
-                npc_scene = str(npc_data.get("scene", "невідомо")).strip().lower()
+        if loc_key == "GLOBAL":
+            continue  # обробляємо окремо нижче
 
-                # Жорсткий збіг сцени. Глобальних NPC без сцени також пропускаємо.
-                if npc_scene == target_scene or npc_scene == "global" or npc_scene == "":
-                    found_npcs.append(npc_data["card"])
-                    legal_names.append(npc_data["name"])
-                    reputation_context[npc_data["name"]] = npc_data.get("reputation_score", 0)
+        if is_traveling:
+            # Travel-режим: показуємо NPC чий регіон збігається і чия сцена = global/empty
+            if current_region:
+                for npc_data in npcs_list:
+                    npc_region = npc_data.get("region", "").strip()
+                    npc_scene = str(npc_data.get("scene", "")).strip().lower()
+                    if npc_region == current_region and npc_scene in ("global", "", "невідомо"):
+                        found_npcs.append(npc_data["card"])
+                        legal_names.append(npc_data["name"])
+                        reputation_context[npc_data["name"]] = npc_data.get("reputation_score", 0)
+        else:
+            # Нормальний режим: точний збіг локації + сцени
+            if loc_key.lower() == target_loc:
+                for npc_data in npcs_list:
+                    npc_scene = str(npc_data.get("scene", "невідомо")).strip().lower()
+                    if npc_scene == target_scene or npc_scene == "global" or npc_scene == "":
+                        found_npcs.append(npc_data["card"])
+                        legal_names.append(npc_data["name"])
+                        reputation_context[npc_data["name"]] = npc_data.get("reputation_score", 0)
 
-    # Завжди додаємо абсолютно глобальних NPC (якщо такі є в архітектурі)
+    # Завжди додаємо абсолютно глобальних NPC
     if "GLOBAL" in NPC_CACHE:
         for npc_data in NPC_CACHE["GLOBAL"]:
             found_npcs.append(npc_data["card"])
@@ -490,7 +509,7 @@ async def update_npcs_in_db(updates, legal_names_list_deprecated=None):
         col_map = {}
         target_cols = ["status", "location", "scene", "relation_player", "memory_anchor", "goal", "secrets",
                        "description", "character",
-                       "relation_npcs", "inventory", "reputation_score"]
+                       "relation_npcs", "inventory", "reputation_score", "region"]
 
         for target in target_cols:
             if target in headers:
@@ -540,6 +559,17 @@ async def update_npcs_in_db(updates, legal_names_list_deprecated=None):
                         continue
 
                     if len(val_str) < 3 and field_key not in ["status"]:
+                        continue
+
+                    if field_key == "location":
+                        if not is_valid_location(val_str) or val_str == TRAVEL_LOCATION:
+                            print(f"🚫 [NPC ЛОКАЦІЯ ЗАБЛОКОВАНА] ШІ намагався записати неканонічне значення "
+                                  f"'{val_str}' у Location для NPC '{real_original_name}'. Пропускаємо.")
+                            continue
+
+                    if field_key == "region" and not is_valid_region(val_str):
+                        print(f"🚫 [NPC РЕГІОН ЗАБЛОКОВАНИЙ] Неканонічне значення '{val_str}' "
+                              f"для NPC '{real_original_name}'. Пропускаємо.")
                         continue
 
                     if field_key in col_map:

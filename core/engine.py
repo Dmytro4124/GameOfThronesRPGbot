@@ -7,6 +7,7 @@ import asyncio
 from core.ai_client import model, model_worker, clean_and_parse_json
 from core.mechanics import apply_system_impacts, process_training_request, safe_int, resolve_action_mechanics, validate_action
 from core.prompts import GAME_ERA_CONTEXT
+from core.world_constants import VALID_LOCATIONS_ORDERED, VALID_REGIONS_ORDERED, TRAVEL_LOCATION, get_region_for_location, LOCATION_DESCRIPTIONS
 from core.world import populate_contextual_npcs
 from database.operations import (
     get_user_data, save_user_data, get_relevant_context,
@@ -167,10 +168,13 @@ async def process_game_turn(chat_id, user_input):
 
     curr_loc = profile.get("Поточне місцезнаходження", "Невідомо")
     curr_scene = profile.get("Поточна сцена", "Невідомо")
+    curr_region = profile.get("Регіон", get_region_for_location(curr_loc) or "Невідомо")
 
-    # === ОНОВЛЕНО: Передаємо і локацію, і сцену для жорсткої фільтрації ===
+    # === ОНОВЛЕНО: 3-рівнева фільтрація NPC (Регіон → Локація → Сцена) ===
     context_knowledge = await get_relevant_context(user_input, curr_loc)
-    npc_context_text, legal_npc_names, npc_reputation_context = get_location_npcs(curr_loc, curr_scene)
+    npc_context_text, legal_npc_names, npc_reputation_context = get_location_npcs(
+        curr_loc, curr_scene, current_region=curr_region
+    )
 
     duration = time.time() - t_start
     timing_details.append(f"📚 Data: {duration:.2f}s")
@@ -307,6 +311,10 @@ async def process_game_turn(chat_id, user_input):
         "4": ["АТАКУВАТИ", "ЗАХИСТИТИСЬ", "ВТЕКТИ", "ДИКИЙ GAMBLE"],
     }
     _action_slots = _action_slots_map.get(_tension_val, _action_slots_map["2"])
+    _valid_locs_str = ", ".join(f'"{loc}"' for loc in VALID_LOCATIONS_ORDERED)
+    _valid_regions_str = ", ".join(f'"{r}"' for r in VALID_REGIONS_ORDERED)
+    _curr_loc_desc = LOCATION_DESCRIPTIONS.get(curr_loc, "")
+    _loc_hint = f"\n    ОПИС ПОТОЧНОЇ ЛОКАЦІЇ: {_curr_loc_desc}" if _curr_loc_desc else ""
 
     prompt = f"""<system>
     Роль: Неупереджений Майстер Гри (GM) для Grimdark RPG (Гра Престолів).
@@ -337,8 +345,14 @@ async def process_game_turn(chat_id, user_input):
 
     <scene_state>
     ПОТОЧНИЙ ЧАС: {current_time_str}
-    ПОТОЧНЕ МІСТО: {profile.get("Поточне місцезнаходження", "")}
-    ПОТОЧНА СЦЕНА: {profile.get("Поточна сцена", "")}
+    ПОТОЧНИЙ РЕГІОН: {curr_region}
+    ПОТОЧНЕ МІСТО: {curr_loc}{"" if curr_loc != TRAVEL_LOCATION else " (ГРАВЕЦЬ В ДОРОЗІ між локаціями)"}{_loc_hint}
+    ПОТОЧНА СЦЕНА: {curr_scene}
+    ПРАВИЛО ПЕРЕМІЩЕННЯ (КРИТИЧНО):
+    - Конкретне місто/замок → "location_impact": одне з {_valid_locs_str}
+    - Гравець вирушає в дорогу між містами → "location_impact": "В дорозі" (Регіон зберігається автоматично)
+    - Без зміни локації → "location_impact": "none". Будь-яке інше значення є ПОМИЛКОЮ.
+    КАНОНІЧНІ РЕГІОНИ (довідка): {_valid_regions_str}
     ПРИСУТНІ NPC (тільки персонажі, фізично присутні в цій сцені):
     {npc_context_text}
     АТМОСФЕРА СЦЕНИ: {_tension_label}
@@ -391,6 +405,7 @@ async def process_game_turn(chat_id, user_input):
        Дія 4 — тип [{_action_slots[3]}]: аналогічно
        Grimdark тон, українська мова для обох полів. Назву типу НЕ включати в тексти.
     6. ЗАБОРОНА БЕЗІМЕННИХ NPC: НІКОЛИ не вводь нового персонажа як "Лорд [Дім]" або "Леді [Дім]" без першого імені. Завжди давай конкретне ім'я (наприклад, "Сер Ронет Калдер" замість "Лорд Ланністер", "Вартовий Маркос" замість "один з охоронців").
+    7. ЛОКАЦІЇ NPC: Поле "Location" у npc_updates може містити ТІЛЬКИ значення зі списку канонічних регіонів (той самий список, що й для location_impact), АБО значення "GLOBAL". Ніколи не вигадуй нові назви міст чи замків для поля Location.
     </json_generation_rules>
 
     ВІДПОВІДАЙ СТРОГО У ФОРМАТІ JSON:
@@ -515,8 +530,8 @@ async def process_game_turn(chat_id, user_input):
                 logs.append(f"{rep_icon} Репутація з {rep_target}: {rep_delta:+d}")
 
         new_location = profile.get("Поточне місцезнаходження", "")
-        # Модифіковано: Тепер генерація канонічних NPC враховує і зміну сцени (якщо треба)
-        if old_location != new_location and len(new_location) > 3:
+        # Генерація NPC тільки при зміні реальної локації (не при travel-стані)
+        if old_location != new_location and len(new_location) > 3 and new_location != TRAVEL_LOCATION:
             current_char_name = profile.get("Ім'я", "")
 
             async def travel_population_task(new_loc, char_name):

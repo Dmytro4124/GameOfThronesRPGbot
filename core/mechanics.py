@@ -6,6 +6,7 @@ import asyncio
 
 # Імпортуємо нашого ШІ-клієнта для функцій, які потребують суддівства
 from core.ai_client import model_worker, clean_and_parse_json
+from core.world_constants import is_valid_location, get_region_for_location, TRAVEL_LOCATION
 
 # === КОНСТАНТИ СИСТЕМИ ===
 MINUTES_IN_DAY = 1440
@@ -282,10 +283,20 @@ def apply_system_impacts(profile, ai_impacts):
     # === 7. ОБРОБКА ПЕРЕМІЩЕННЯ (ГЛОБАЛЬНА ЛОКАЦІЯ ТА ЛОКАЛЬНА СЦЕНА) ===
     new_location = ai_impacts.get("location_impact", "none")
     if new_location and str(new_location).lower() not in ["none", "немає", "без змін", "", "null"]:
-        old_location = profile.get("Поточне місцезнаходження", "Невідомо")
-        if old_location != new_location:
-            profile["Поточне місцезнаходження"] = str(new_location).strip()
-            logs.append(f"🗺️ Регіон: {old_location} -> {new_location}")
+        if not is_valid_location(str(new_location).strip()):
+            print(f"🚫 [ЛОКАЦІЯ ЗАБЛОКОВАНА] ШІ повернув неканонічне значення '{new_location}'. "
+                  f"Локація збережена: {profile.get('Поточне місцезнаходження', 'Невідомо')}")
+        else:
+            old_location = profile.get("Поточне місцезнаходження", "Невідомо")
+            if old_location != new_location:
+                profile["Поточне місцезнаходження"] = str(new_location).strip()
+                logs.append(f"🗺️ Локація: {old_location} -> {new_location}")
+                # Auto-derive регіон. При TRAVEL_LOCATION — регіон не змінюється.
+                if str(new_location).strip() != TRAVEL_LOCATION:
+                    new_region = get_region_for_location(str(new_location).strip())
+                    if new_region:
+                        profile["Регіон"] = new_region
+                        logs.append(f"🌍 Регіон: {new_region}")
 
     new_scene = ai_impacts.get("scene_impact", "none")
     if new_scene and str(new_scene).lower() not in ["none", "немає", "без змін", "", "null"]:
