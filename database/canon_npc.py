@@ -39,6 +39,25 @@ def _map_relation_to_score(relation_text):
     return _RELATION_TO_SCORE.get(key, 0)
 
 
+def _score_to_relation_text(score: int) -> str:
+    """Конвертує числовий Reputation_Score у текстовий ступінь 15-ступеневої шкали."""
+    if score >= 85: return "Абсолютна довіра"
+    if score >= 70: return "Глибока довіра"
+    if score >= 60: return "Довіряє"
+    if score >= 45: return "Дружній"
+    if score >= 30: return "Прихильний"
+    if score >= 20: return "Тепле ставлення"
+    if score >= 10: return "Обережно відкритий"
+    if score >= -5: return "Нейтральний"
+    if score >= -15: return "Холодний"
+    if score >= -25: return "Підозрілий"
+    if score >= -35: return "Глибока підозра"
+    if score >= -50: return "Ворожий"
+    if score >= -65: return "Відкрита ворожість"
+    if score >= -80: return "Кривавий ворог"
+    return "Смертельна ненависть"
+
+
 def _ensure_reputation_scores(npcs_list):
     """Створює IMMUTABLE tuple з shallow-копіями dict-ів. Оригінали не мутуються."""
     result = []

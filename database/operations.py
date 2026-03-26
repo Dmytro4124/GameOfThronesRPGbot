@@ -358,7 +358,6 @@ async def refresh_npc_database():
                 if row.get("Character"): npc_card += f"- **Personality:** {row.get('Character')}\n"
                 if row.get("Goal"): npc_card += f"- **Goal:** {row.get('Goal')}\n"
                 if row.get("Relation_Player"): npc_card += f"- **Attitude to Player:** {row.get('Relation_Player')}\n"
-                npc_card += f"- **Reputation Score:** {rep_score}\n"
                 raw_anchor = str(row.get("Memory_Anchor", "")).strip()
                 if raw_anchor and raw_anchor != "-":
                     try:
@@ -653,6 +652,13 @@ async def update_npc_reputation(npc_name, delta):
                 new_val = max(-100, min(100, old_val + delta))
                 worksheet.update_cell(i, rep_col, new_val)
                 print(f"📊 [REP] {raw_name}: {old_val} -> {new_val} (delta {delta:+d})")
+                # Автоматично синхронізуємо текстовий ярлик із новим Score
+                from database.canon_npc import _score_to_relation_text
+                if "relation_player" in headers:
+                    rel_col = headers.index("relation_player") + 1
+                    new_relation = _score_to_relation_text(new_val)
+                    worksheet.update_cell(i, rel_col, new_relation)
+                    print(f"🔄 [SYNC] {raw_name}: Relation_Player → '{new_relation}'")
                 return True
 
         print(f"⚠️ [REP] NPC '{npc_name}' не знайдено в NPC_DB.")
