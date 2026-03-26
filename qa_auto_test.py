@@ -18,7 +18,7 @@ from config import GEMINI_API_KEYS_TEST, MODEL_MAIN_NAME, TAB_USERS
 SLEEP_INIT_SEC = 10          # Пауза перед першим викликом рушія (rate-limit)
 SLEEP_AFTER_ENGINE_SEC = 30  # Пауза після виклику рушія
 SLEEP_AFTER_EVALUATOR_SEC = 30  # Пауза після виклику евалюатора
-PLAYER_HISTORY_MAX_MESSAGES = 6  # Rolling window за замовчуванням (може бути перевизначено профілем)
+PLAYER_HISTORY_MAX_MESSAGES = 10  # Rolling window за замовчуванням (може бути перевизначено профілем)
 
 # === ЛОГУВАННЯ ===
 log = logging.getLogger(__name__)

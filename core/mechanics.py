@@ -582,6 +582,11 @@ async def resolve_action_mechanics(user_input, profile, npc_reputation_context=N
         - Score -79 to -40 (Hostile): Raise DC by 20, consider DISADVANTAGE for social skills.
         - Score <= -80 (Blood Enemy): Social actions should use maximum DC (140+).
         NOTE: This guide applies ONLY to social skills (Інтрига, Управління). Combat/Military skills are unaffected by reputation.
+        - HOSTILE NPC RULE: If the action is directed at or involves a specific NPC with reputation score < -20,
+          you MUST assign a skill (Управління or Інтрига). NEVER use skill_used="None" for requests,
+          demands, or any interaction that requires NPC cooperation with a hostile NPC.
+          Exception: purely physical/environmental actions that don't require NPC cooperation
+          (walking past, looking around, picking up an object) may still be None.
         </npc_reputation_guide>
 
         <rules>

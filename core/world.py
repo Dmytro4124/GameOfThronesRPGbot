@@ -427,6 +427,13 @@ async def populate_contextual_npcs(location, situation_context="Normal day, calm
         - "Secrets" must be interesting plot hooks, but not break canonical story.
         - Output 'Location' field in UKRAINIAN language (e.g., 'Вінтерфел', 'Пентос', 'Стіна').
 
+        === RELATION_PLAYER SCALE (ОБОВ'ЯЗКОВО) ===
+        Поле Relation_Player ПОВИННО містити ТІЛЬКИ одне значення з цієї шкали (від найгіршого до найкращого):
+        Смертельна ненависть | Кривавий ворог | Відкрита ворожість | Ворожий | Глибока підозра |
+        Підозрілий | Холодний | Нейтральний | Обережно відкритий | Тепле ставлення |
+        Прихильний | Дружній | Довіряє | Глибока довіра | Абсолютна довіра
+        Фоновий/незнайомий NPC зазвичай починає з: Холодний, Нейтральний або Підозрілий.
+
         === LANGUAGE REQUIREMENT (CRITICAL) ===
         Responce should be in UKRAINIAN language only
 
@@ -438,7 +445,7 @@ async def populate_contextual_npcs(location, situation_context="Normal day, calm
             "Character": "Personality traits",
             "Goal": "Current desire",
             "Secrets": "Hidden info",
-            "Relation_Player": "Initial reaction",
+            "Relation_Player": "ТІЛЬКИ одне зі значень шкали: Смертельна ненависть / Кривавий ворог / Відкрита ворожість / Ворожий / Глибока підозра / Підозрілий / Холодний / Нейтральний / Обережно відкритий / Тепле ставлення / Прихильний / Дружній / Довіряє / Глибока довіра / Абсолютна довіра",
             "Memory_Anchor": "-",
             "Relation_NPCs": "Connection to local groups"
           }}
