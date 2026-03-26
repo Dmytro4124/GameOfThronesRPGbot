@@ -168,7 +168,15 @@ def apply_system_impacts(profile, ai_impacts):
         elif gold_tag == "spend_large": gold_change = -random.randint(300, 800)
         elif gold_tag == "earn_small": gold_change = random.randint(10, 30)
         elif gold_tag == "earn_medium": gold_change = random.randint(100, 300)
-        elif gold_tag == "earn_large": gold_change = random.randint(1000, 2000)
+        elif gold_tag == "earn_large":
+            # earn_large дозволено лише при реальному продажу (є inventory_lost) або квестовій нагороді.
+            # Без фізичного продажу — обмежуємо до earn_medium, щоб запобігти Infinite Money Glitch.
+            has_sale = bool(ai_impacts.get("inventory_lost"))
+            if has_sale:
+                gold_change = random.randint(500, 800)
+            else:
+                gold_change = random.randint(100, 300)
+                logs.append("[АУДИТ] earn_large без inventory_lost — обмежено до earn_medium. Перевір логіку транзакції.")
 
     if gold_change != 0:
         old_gold = safe_int(profile.get("Особисте Золото", 0), 0)
@@ -627,6 +635,8 @@ async def resolve_action_mechanics(user_input, profile, npc_reputation_context=N
         <example_output>
         {{
             "reasoning": "Player explicitly said 'I go outside', so scene changes to Вулиці. No combat, no roll needed.",
+            "skill_check_reasoning": "1. Чи блокує/атакує NPC гравця? НІ. 2. Дія — пересування без опору. Висновок: None.",
+            "gold_reasoning": "1. Конкретна ціна в діалозі? НІ. 2. Тип операції: відсутня. 3. Фінальна сума: none.",
             "action_type": "standard",
             "skill_used": "None",
             "difficulty": 0,
@@ -649,6 +659,8 @@ async def resolve_action_mechanics(user_input, profile, npc_reputation_context=N
         OUTPUT IN STRICT JSON FORMAT ONLY:
         {{
             "reasoning": "Your brief mechanical reasoning here",
+            "skill_check_reasoning": "ОБОВ'ЯЗКОВО: 1. Чи блокує/атакує/заважає NPC гравцю зараз? [ТАК/НІ]. 2. Якщо НІ — skill=None (НЕ КИДАЙ КУБИК). Якщо ТАК — яка навичка? Приклади None: забрати оплачене замовлення, очікувати, йти вулицею, дивитися навкруги. Висновок: [None / Інтрига / Бойові / Управління / Військові]",
+            "gold_reasoning": "ОБОВ'ЯЗКОВО: 1. Чи була названа КОНКРЕТНА ціна у поточному або попередньому ході? [ТАК: вказати суму / НІ]. 2. Тип: [купівля / продаж / відсутня]. 3. ПРАВИЛО: якщо ціна відома — вкажи ТОЧНЕ ЧИСЛО в gold_impact (напр. '-70' або '1000'). Абстрактні теги (spend_medium тощо) — ТІЛЬКИ якщо ціна невідома.",
             "action_type": "standard or training",
             "skill_used": "Бойові or Військові or Інтрига or Управління or None",
             "difficulty": 100,
