@@ -53,16 +53,16 @@ def _build_impact_hints(impact_logs: list) -> str:
         if "⚡ Енергія" in entry:
             m_new = re.search(r'-> (\d+)', entry)
             m_delta = re.search(r'\(([+-]?\d+)\)', entry)
-            new_val = int(m_new.group(1)) if m_new else 100
+            new_val = int(m_new.group(1)) if m_new else 1000
             delta = int(m_delta.group(1)) if m_delta else 0
 
             if delta >= 1:
                 hints.append("ВІДНОВЛЕННЯ ЕНЕРГІЇ: Персонаж відновився. GM може тонко згадати відчуття свіжості або прилив сил.")
-            elif new_val <= 29 and delta < 0:
+            elif new_val <= 290 and delta < 0:
                 hints.append("ВИСНАЖЕННЯ (КРИТИЧНЕ): Персонаж тяжко виснажений. GM ПОВИНЕН описати видиму боротьбу: тремтячі руки, переривчасте дихання, нетверда хода.")
-            elif new_val <= 59 and delta <= -10:
+            elif new_val <= 590 and delta <= -10:
                 hints.append("ВИСНАЖЕННЯ: Персонаж помітно втомлений. GM ПОВИНЕН вплести втому в наратив (наприклад: 'ноги стають важкими', 'хвиля знесилення накриває').")
-            # 60-100: без підказки — персонаж у нормі
+            # 590-1000: без підказки — персонаж у нормі
 
         elif "❤️ Здоров'я" in entry:
             m_vals = re.search(r'(\d+) -> (\d+)', entry)
@@ -133,7 +133,7 @@ async def process_game_turn(chat_id, user_input):
 
     # === P1 FIX: Фільтрований стан для GM (без числових статів) ===
     hp = safe_int(profile.get("Здоров'я", 100), 100)
-    energy = safe_int(profile.get("Енергія", 100), 100)
+    energy = safe_int(profile.get("Енергія", 1000), 1000)
     gold = safe_int(profile.get("Особисте Золото", 0), 0)
 
     def _qualitative(val, thresholds):
@@ -144,7 +144,7 @@ async def process_game_turn(chat_id, user_input):
         return thresholds[-1][1]
 
     hp_label = _qualitative(hp, [(0, "dead"), (29, "critically wounded — on the brink of death"), (49, "seriously wounded"), (69, "wounded"), (89, "lightly bruised"), (100, "healthy")])
-    energy_label = _qualitative(energy, [(0, "collapsed from exhaustion"), (20, "barely standing, trembling with fatigue"), (40, "visibly exhausted"), (60, "somewhat tired"), (80, "energetic"), (100, "full of vigour")])
+    energy_label = _qualitative(energy, [(0, "collapsed from exhaustion"), (200, "barely standing, trembling with fatigue"), (400, "visibly exhausted"), (600, "somewhat tired"), (800, "energetic"), (1000, "full of vigour")])
     gold_label = _qualitative(gold, [(0, "penniless"), (20, "a few coins"), (100, "modest purse"), (500, "comfortable wealth"), (2000, "wealthy"), (100000, "rich as a lord")])
 
     player_state_for_gm = {
@@ -227,7 +227,7 @@ async def process_game_turn(chat_id, user_input):
                     profile["temp_debuffs"] = current_debuffs
 
                 mechanical_updates["minutes_passed"] = days_spent * 1440
-                current_energy = safe_int(profile.get("Енергія", 100))
+                current_energy = safe_int(profile.get("Енергія", 1000))
                 profile["Енергія"] = max(0, current_energy - energy_cost)
 
                 if "skill_impact" not in mechanical_updates:

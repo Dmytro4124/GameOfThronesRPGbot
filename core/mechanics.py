@@ -10,7 +10,7 @@ from core.world_constants import is_valid_location, get_region_for_location, TRA
 
 # === КОНСТАНТИ СИСТЕМИ ===
 MINUTES_IN_DAY = 1440
-DEFAULT_ENERGY = 100
+DEFAULT_ENERGY = 1000
 DAYS_IN_MONTH = 30
 MONTHS_IN_YEAR = 12
 
@@ -114,13 +114,13 @@ def apply_system_impacts(profile, ai_impacts):
             "spend_large": (10, 16)
         }
         energy_ranges_positive = {
-            "restore_small": (10, 15),
-            "restore_medium": (16, 30)
+            "restore_small": (100, 150),
+            "restore_medium": (160, 300)
         }
 
         delta = 0
         if energy_impact in ["sleep", "restore_full"]:
-            delta = 100 - current_energy
+            delta = DEFAULT_ENERGY - current_energy
         elif energy_impact in energy_ranges_positive:
             min_cost, max_cost = energy_ranges_positive[energy_impact]
             delta = random.randint(min_cost, max_cost)
@@ -128,7 +128,7 @@ def apply_system_impacts(profile, ai_impacts):
             min_cost, max_cost = energy_ranges_negative[energy_impact]
             delta = -random.randint(min_cost, max_cost)
 
-        new_energy = max(0, min(100, current_energy + delta))
+        new_energy = max(0, min(DEFAULT_ENERGY, current_energy + delta))
 
         if new_energy != current_energy:
             profile["Енергія"] = new_energy
@@ -765,7 +765,7 @@ async def resolve_action_mechanics(user_input, profile, npc_reputation_context=N
     # МАТЕМАТИКА 2d50 ТА КРИТІВ ВІДБУВАЄТЬСЯ ТУТ
     # -------------------------------------------------
 
-    if current_energy <= 20:
+    if current_energy <= 200:
         circumstance = "DISADVANTAGE"
         data["verdict_text"] = "[СИСТЕМНА ВТОМА: Гравець ледве тримається на ногах]. " + data.get('verdict_text', '')
 
