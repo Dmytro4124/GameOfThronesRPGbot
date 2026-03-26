@@ -359,8 +359,19 @@ async def refresh_npc_database():
                 if row.get("Goal"): npc_card += f"- **Goal:** {row.get('Goal')}\n"
                 if row.get("Relation_Player"): npc_card += f"- **Attitude to Player:** {row.get('Relation_Player')}\n"
                 npc_card += f"- **Reputation Score:** {rep_score}\n"
-                if row.get("Memory_Anchor") and str(row.get("Memory_Anchor")).strip() != "-":
-                    npc_card += f"- **Memory Anchor:** {row.get('Memory_Anchor')}\n"
+                raw_anchor = str(row.get("Memory_Anchor", "")).strip()
+                if raw_anchor and raw_anchor != "-":
+                    try:
+                        anchor_list = json.loads(raw_anchor)
+                        if isinstance(anchor_list, list) and anchor_list:
+                            anchor_text = " | ".join(
+                                e.get("event", str(e)) for e in anchor_list if isinstance(e, dict)
+                            ) or raw_anchor
+                        else:
+                            anchor_text = raw_anchor
+                    except (json.JSONDecodeError, TypeError):
+                        anchor_text = raw_anchor
+                    npc_card += f"- **Memory Anchor:** {anchor_text}\n"
                 if row.get("Relation_NPCs"): npc_card += f"- **Attitude to other NPC:** {row.get('Relation_NPCs')}\n"
                 if row.get("Inventory") and str(row.get("Inventory")).strip() not in ["", "-"]:
                     npc_card += f"- **Inventory (Items & Gold):** {row.get('Inventory')}\n"
@@ -537,6 +548,7 @@ async def update_npcs_in_db(updates, legal_names_list_deprecated=None):
                 legal_names_lower_map[norm_name] = raw_name
 
         cells_to_update = []
+        memory_anchor_updates = []  # [(real_name, event_text)] — обробляється окремо через append
         global_legal_norm_names = list(legal_names_lower_map.keys())
 
         for update in updates:
@@ -544,7 +556,7 @@ async def update_npcs_in_db(updates, legal_names_list_deprecated=None):
             if not target_name:
                 continue
 
-            norm_target = target_name.lower().replace("’", "'").replace("`", "'").replace("‘", "'")
+            norm_target = target_name.lower().replace("’", "’").replace("`", "’").replace("’", "’")
             matches = difflib.get_close_matches(norm_target, global_legal_norm_names, n=1, cutoff=0.65)
 
             if matches:
@@ -553,9 +565,9 @@ async def update_npcs_in_db(updates, legal_names_list_deprecated=None):
                 row_idx = db_names_map[real_original_name]
 
                 if target_name != real_original_name:
-                    print(f"🔧 [АВТОКОРЕКЦІЯ] '{target_name}' виправлено на '{real_original_name}'")
+                    print(f"🔧 [АВТОКОРЕКЦІЯ] ‘{target_name}’ виправлено на ‘{real_original_name}’")
                 else:
-                    print(f"✅ [MATCH] '{real_original_name}' знайдено.")
+                    print(f"✅ [MATCH] ‘{real_original_name}’ знайдено.")
 
                 for field, new_val in update.items():
                     field_key = field.lower()
@@ -572,30 +584,38 @@ async def update_npcs_in_db(updates, legal_names_list_deprecated=None):
                     if field_key == "location":
                         if not is_valid_location(val_str) or val_str == TRAVEL_LOCATION:
                             print(f"🚫 [NPC ЛОКАЦІЯ ЗАБЛОКОВАНА] ШІ намагався записати неканонічне значення "
-                                  f"'{val_str}' у Location для NPC '{real_original_name}'. Пропускаємо.")
+                                  f"’{val_str}’ у Location для NPC ‘{real_original_name}’. Пропускаємо.")
                             continue
 
                     if field_key == "region" and not is_valid_region(val_str):
-                        print(f"🚫 [NPC РЕГІОН ЗАБЛОКОВАНИЙ] Неканонічне значення '{val_str}' "
-                              f"для NPC '{real_original_name}'. Пропускаємо.")
+                        print(f"🚫 [NPC РЕГІОН ЗАБЛОКОВАНИЙ] Неканонічне значення ‘{val_str}’ "
+                              f"для NPC ‘{real_original_name}’. Пропускаємо.")
+                        continue
+
+                    # Memory_Anchor НЕ перезаписуємо напряму — збираємо для append_memory_anchor,
+                    # щоб зберегти JSON-масив з 5 останніх подій (FIFO).
+                    if field_key == "memory_anchor":
+                        memory_anchor_updates.append((real_original_name, val_str))
                         continue
 
                     if field_key in col_map:
                         col_idx = col_map[field_key]
                         cells_to_update.append(gspread.Cell(row_idx, col_idx, val_str))
             else:
-                print(f"🛡️ [БЛОКУВАННЯ ГАЛЮЦИНАЦІЇ] ШІ придумав NPC '{target_name}'. Ігноруємо!")
+                print(f"🛡️ [БЛОКУВАННЯ ГАЛЮЦИНАЦІЇ] ШІ придумав NPC ‘{target_name}’. Ігноруємо!")
 
         if cells_to_update:
             worksheet.update_cells(cells_to_update)
             print(f"💾 [SAVED] Оновлено {len(cells_to_update)} полів існуючих NPC.")
-            return True
-        return False
+            return True, memory_anchor_updates
+        return bool(memory_anchor_updates), memory_anchor_updates
 
     try:
-        has_updated = await asyncio.to_thread(_sync_update)
+        has_updated, anchor_updates = await asyncio.to_thread(_sync_update)
         if has_updated:
             await refresh_npc_database()
+        for npc_name, event_text in anchor_updates:
+            await append_memory_anchor(npc_name, event_text, game_day=0, rep_change=0)
     except Exception as e:
         print(f"❌ [UPDATE ERROR] {e}")
 

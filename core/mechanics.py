@@ -619,6 +619,8 @@ async def resolve_action_mechanics(user_input, profile, npc_reputation_context=N
              c) ACTIVE VIOLENCE RULE: If Scene_Tension >= 3/4, the scene involves active combat. NPCs DO NOT stop attacking just because the player chose a non-combat action (talking, running, looking around). Apply appropriate health_impact even if the player's current action is social or passive.
            - gold_impact: EXACT NUMBER as string (e.g., "-5", "10") IF specified. Otherwise: "none", "spend_small", "spend_medium", "spend_large", "earn_small", "earn_medium", "earn_large".
            - energy_impact: "none", "spend_small" (minor stress/walk), "spend_medium" (argument, training), "spend_large" (combat, labor), "restore_small" (food/fire), "restore_medium" (tavern bed), "restore_full" (sleep).
+           - reputation_delta: Integer change in reputation (-20 to +20). Use ONLY for social actions (Інтрига/Управління). 0 for non-social or neutral outcomes. SUCCESS social → +5..+15. FAILURE social → -5..-15. Use 0 if no NPC is the target.
+           - reputation_target_npc: Exact NPC name from the active roster that is affected. "" if reputation_delta is 0.
            - clocks_impact: {{"Scene_Tension": 1}} (if suspicious/aggressive/fail), {{"Scene_Tension": "clear"}} (if player leaves the scene/location). Max is 4.
              CLEAR RULE: Output "clear" for Scene_Tension ONLY when the player physically leaves the current scene/location (and you also output a scene_impact or location_impact change).
              The engine will auto-apply a stepped reduction based on current tension — NOT a full reset:
@@ -642,6 +644,8 @@ async def resolve_action_mechanics(user_input, profile, npc_reputation_context=N
             "difficulty": 0,
             "circumstance": "NORMAL",
             "verdict_text": "Player walks outside.",
+            "reputation_delta": 0,
+            "reputation_target_npc": "",
             "updates": {{
                  "minutes_passed": 15,
                  "location_impact": "none",
@@ -666,6 +670,8 @@ async def resolve_action_mechanics(user_input, profile, npc_reputation_context=N
             "difficulty": 100,
             "circumstance": "NORMAL",
             "verdict_text": "Short instruction for GM",
+            "reputation_delta": 0,
+            "reputation_target_npc": "",
             "updates": {{
                  "minutes_passed": 15,
                  "location_impact": "none",
@@ -837,10 +843,14 @@ async def resolve_action_mechanics(user_input, profile, npc_reputation_context=N
     updates["circumstance"] = circumstance
     updates["difficulty"] = difficulty
 
-    # Reputation delta для соціальних навичок
-    if skill_used in ["Інтрига", "Управління"] and rep_target_npc:
-        updates["reputation_delta"] = get_reputation_delta(outcome)
-        updates["reputation_target_npc"] = rep_target_npc
+    # Reputation delta для соціальних навичок.
+    # Пріоритет: Python-детекція імені NPC з тексту дії.
+    # Fallback: ім'я NPC від AI Worker (коли гравець не називає NPC явно).
+    if skill_used in ["Інтрига", "Управління"]:
+        final_rep_target = rep_target_npc or str(data.get("reputation_target_npc", "")).strip()
+        if final_rep_target:
+            updates["reputation_delta"] = get_reputation_delta(outcome)
+            updates["reputation_target_npc"] = final_rep_target
 
     # --- ХАРДКОРНА СИСТЕМА ТРАВМ ТА ПРОКАЧКИ ---
     if outcome == "CRITICAL SUCCESS":
