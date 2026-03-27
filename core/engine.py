@@ -10,7 +10,7 @@ from core.prompts import (
     GAME_ERA_CONTEXT, build_summarize_turn_prompt, build_narrator_prompt,
     build_gm_logic_prompt, build_history_summary_prompt,
 )
-from core.world_constants import VALID_LOCATIONS_ORDERED, VALID_REGIONS_ORDERED, TRAVEL_LOCATION, get_region_for_location, LOCATION_DESCRIPTIONS
+from core.world_constants import VALID_LOCATIONS_ORDERED, VALID_REGIONS_ORDERED, TRAVEL_LOCATION, get_region_for_location, get_locations_for_region, LOCATION_DESCRIPTIONS
 from core.world import populate_contextual_npcs
 from database.operations import (
     get_user_data, save_user_data, get_relevant_context,
@@ -324,6 +324,8 @@ async def process_game_turn(chat_id, user_input):
     _action_slots = _action_slots_map.get(_tension_val, _action_slots_map["2"])
     _valid_locs_str = ", ".join(f'"{loc}"' for loc in VALID_LOCATIONS_ORDERED)
     _valid_regions_str = ", ".join(f'"{r}"' for r in VALID_REGIONS_ORDERED)
+    _region_locs = get_locations_for_region(curr_region)
+    _region_locs_str = ", ".join(f'"{loc}"' for loc in _region_locs) if _region_locs else _valid_locs_str
     _curr_loc_desc = LOCATION_DESCRIPTIONS.get(curr_loc, "")
     _loc_hint = f"\n    ОПИС ПОТОЧНОЇ ЛОКАЦІЇ: {_curr_loc_desc}" if _curr_loc_desc else ""
 
@@ -343,6 +345,7 @@ async def process_game_turn(chat_id, user_input):
         curr_scene=curr_scene,
         valid_locs_str=_valid_locs_str,
         valid_regions_str=_valid_regions_str,
+        region_locs_str=_region_locs_str,
         npc_context_text=npc_context_text,
         tension_label=_tension_label,
         mechanics_verdict=mechanics_verdict,

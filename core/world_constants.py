@@ -241,6 +241,11 @@ LOCATION_DESCRIPTIONS: dict = {
 
 # === ФУНКЦІЇ ВАЛІДАЦІЇ ===
 
+def get_locations_for_region(region: str) -> list:
+    """Повертає список канонічних локацій для заданого регіону."""
+    return [loc for loc, reg in LOCATION_TO_REGION.items() if reg == region]
+
+
 def get_region_for_location(location: str):
     """
     Повертає Регіон для вказаної Локації.

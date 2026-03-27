@@ -9,7 +9,7 @@ from core.prompts import (
     GAME_ERA_CONTEXT, build_famous_characters_prompt,
     build_initial_stats_prompt, build_game_intro_prompt, build_populate_npcs_prompt,
 )
-from core.world_constants import get_region_for_location
+from core.world_constants import get_region_for_location, get_locations_for_region, is_valid_location, VALID_LOCATIONS_ORDERED
 from config import TAB_NPC
 from database.canon_npc import get_canon_npcs_copy
 
@@ -44,15 +44,30 @@ async def generate_initial_stats(char_name, house_name, house_data):
     origin_region = house_data.get('Регіон', 'Вестерос')
     print(f"🎲 Генерую статистику для {char_name}...")
 
-    prompt = build_initial_stats_prompt(char_name, house_name, origin_region)
+    region_locs = get_locations_for_region(origin_region)
+    if region_locs:
+        valid_locations_str = ", ".join(f'"{loc}"' for loc in region_locs)
+    else:
+        valid_locations_str = ", ".join(f'"{loc}"' for loc in VALID_LOCATIONS_ORDERED[:30])
+
+    prompt = build_initial_stats_prompt(char_name, house_name, origin_region, valid_locations_str)
 
     profile = await ask_gemini(prompt)
     if profile:
         profile["Ім'я"] = char_name
         profile["Дім"] = house_name
-        # Auto-derive регіон — перезаписуємо відповідь ШІ гарантованим значенням
+        # Validate Location — якщо ШІ написав назву регіону замість локації, ставимо першу валідну локацію регіону
         loc = profile.get("Поточне місцезнаходження", "")
+        if not is_valid_location(loc):
+            fallback_loc = region_locs[0] if region_locs else VALID_LOCATIONS_ORDERED[0]
+            print(f"⚠️ [INITIAL STATS] Невалідна локація '{loc}' → замінено на '{fallback_loc}'")
+            profile["Поточне місцезнаходження"] = fallback_loc
+            loc = fallback_loc
+        # Auto-derive регіон — перезаписуємо відповідь ШІ гарантованим значенням
         profile["Регіон"] = get_region_for_location(loc) or origin_region
+        # Гарантуємо наявність сцени
+        if not profile.get("Поточна сцена"):
+            profile["Поточна сцена"] = loc
         return profile
     return None
 
@@ -282,7 +297,7 @@ async def populate_contextual_npcs(location, situation_context="Normal day, calm
             initial_rep = _map_relation_to_score(npc.get("Relation_Player", "Neutral"))
             row = [
                 location,
-                "Невідомо",
+                npc.get("Scene", location),
                 ai_gen_name,
                 npc.get("Description", "-"),
                 npc.get("Character", "-"),

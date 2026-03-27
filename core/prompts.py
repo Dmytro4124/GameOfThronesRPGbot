@@ -126,7 +126,7 @@ def build_gm_logic_prompt(
     profile_json,
     context_knowledge, event_injection, burst_injection,
     current_time_str, curr_region, curr_loc, is_traveling, loc_hint,
-    curr_scene, valid_locs_str, valid_regions_str,
+    curr_scene, valid_locs_str, valid_regions_str, region_locs_str,
     npc_context_text, tension_label,
     mechanics_verdict, impact_narrative_hints,
     history_text, user_input,
@@ -284,7 +284,14 @@ def build_gm_logic_prompt(
        Дія 4 — тип [{action_slots[3]}]: аналогічно
        Grimdark тон, українська мова для обох полів. Назву типу НЕ включати в тексти.
     7. ЗАБОРОНА БЕЗІМЕННИХ NPC: НІКОЛИ не вводь нового персонажа як "Лорд [Дім]" або "Леді [Дім]" без першого імені. Завжди давай конкретне ім'я.
-    8. ЛОКАЦІЇ NPC: Поле "Location" у npc_updates може містити ТІЛЬКИ значення зі списку канонічних регіонів (той самий список, що й для location_impact), АБО значення "GLOBAL". Ніколи не вигадуй нові назви міст чи замків для поля Location.
+    8. ТРИВИМІРНЕ ПОЛОЖЕННЯ NPC (Location / Scene):
+       РІВЕНЬ 1 — Location (місто/замок): бери ВИКЛЮЧНО зі списку нижче — це всі канонічні локації поточного регіону:
+       {region_locs_str}
+       Також допустимо "GLOBAL" (NPC доступний глобально).
+       ЗАБОРОНЕНО: будь-які інші рядки поза цим списком, включно з назвами регіонів ("Північ", "Пентос" як регіон).
+       РІВЕНЬ 2 — Scene (мікролокація всередині міста): вільний рядок, творчість ШІ.
+         Якщо NPC лишається в тій самій Location але йде в інший квартал/кімнату — оновлюй ТІЛЬКИ Scene, Location не чіпай.
+       Region НЕ включай у npc_updates — система визначає його автоматично.
     9. ПРИВАТНІ СЦЕНИ:
        - Якщо гравець входить у конкретний приватний простір (покої NPC, підземелля, особиста зала), ти ПОВИНЕН встановити поле "Scene" для NPC, що там знаходиться, рівно тому ж значенню, яке вказане в ПОТОЧНА СЦЕНА вище. Використовуй точний рядок без змін.
        - ЛОГІКА ІЗОЛЯЦІЇ: У наступному ході лише NPC з абсолютно такою ж сценою будуть у ростері.
@@ -544,7 +551,7 @@ def build_famous_characters_prompt(house_name) -> str:
     """
 
 
-def build_initial_stats_prompt(char_name, house_name, origin_region) -> str:
+def build_initial_stats_prompt(char_name, house_name, origin_region, valid_locations_str) -> str:
     return f"""
     <role>
 Ти — Архімейстер Цитаделі та провідний Game Balance Designer для RPG "Game of Thrones". Твоя експертиза — глибоке знання лору (канону) та жорсткий математичний баланс ігрової системи.
@@ -561,7 +568,12 @@ HOUSE: {house_name} (Origin: {origin_region})
 </input_data>
 
 <system_rules>
-1. LOCATION RULES (CRITICAL): Визначай "Поточне місцезнаходження" СУВОРО за каноном першої книги (298 CE), а не за регіоном походження. (Наприклад: Jorah Mormont -> Pentos, Theon Greyjoy -> Winterfell).
+1. LOCATION RULES (CRITICAL — 3 рівні):
+   - "Поточне місцезнаходження" (РІВЕНЬ 1 — місто/замок): ВИКЛЮЧНО зі списку канонічних локацій нижче. НЕ МОЖНА писати назву регіону ("Північ", "Пентос" як регіон, "Вільні Міста" тощо) — тільки конкретний населений пункт зі списку:
+     {valid_locations_str}
+   - "Поточна сцена" (РІВЕНЬ 2 — мікролокація): вільний рядок всередині міста/замку (наприклад: "Конюшня Вінтерфелла", "Таверна 'Сплячий лев'", "Вілла Ілліріо Мопатіса"). Це поле обов'язкове.
+   - "Регіон" (РІВЕНЬ 3): визначає система автоматично — не включай у JSON.
+   - ВИБІР ЛОКАЦІЇ за каноном першої книги (298 CE), а не за регіоном походження. (Наприклад: Jorah Mormont -> Квартал Магістрів, Theon Greyjoy -> Вінтерфелл).
 2. PERMISSION TO FAIL: Якщо {char_name} є неканонічним або повністю вигаданим, не галюцинуй. Прямо скажи "Персонаж не канонічний" в аналізі та згенеруй йому стандартний профіль для його {origin_region} без історичних зв'язків.
 3. МАТЕМАТИКА РУШІЯ:
    - Особисте Золото: Лорд (3000-5000), Еліта (1000-2999), Лицар (500-999), Інші (10-200).
@@ -576,20 +588,20 @@ HOUSE: {house_name} (Origin: {origin_region})
 
 <thought_algorithm>
 Ти маєш застосувати ToT (Tree of Thoughts) та Adversarial Validation у ключі "thought_process":
-1. Branch 1 (Lore Master): Визначає статус та канонічну локацію на вказаний час.
+1. Branch 1 (Lore Master): Визначає статус та канонічну локацію на вказаний час — і перевіряє, що вона є в списку valid_locations_str.
 2. Branch 2 (System Balancer): Пропонує цифри статів на основі статусу (Математика Рушія).
-3. Adversarial Check: Критикує гілки ("Чи не забагато золота для бастарда?", "Чи точно він у 298 році тут?").
+3. Adversarial Check: Критикує гілки ("Чи не забагато золота для бастарда?", "Чи точно він у 298 році тут?", "Чи локація є в канонічному списку?").
 4. Синтез: Фінальне рішення для JSON.
 </thought_algorithm>
 
 <few_shot_example>
 {{
-    "thought_process": "Branch 1: Jorah Mormont у 298 році — вигнанець у Пентосі. Branch 2: Як колишній лорд і лицар, має високі бойові навички (80), військовий досвід (65), але як вигнанець має мало золота (150). Adversarial Check: 150 золота підходить під правило 'Інші (10-200)'. Локація Пентос є каноном. Синтез успішний.",
+    "thought_process": "Branch 1: Jorah Mormont у 298 році — вигнанець у Пентосі, живе у вілі Ілліріо Мопатіса на пагорбах магістрів. Зі списку локацій: 'Квартал Магістрів' — правильна відповідь. Branch 2: Як колишній лорд і лицар, має високі бойові навички (80), військовий досвід (65), але як вигнанець має мало золота (150). Adversarial Check: 150 золота підходить під правило 'Інші (10-200)'. Локація 'Квартал Магістрів' є в списку. Синтез успішний.",
     "Ім'я": "Джорах Мормонт",
     "Дім": "Мормонт",
     "Титул": "Вигнанець / Лицар",
-    "Поточне місцезнаходження": "Пентос",
-    "Регіон": "Вільні Міста",
+    "Поточне місцезнаходження": "Квартал Магістрів",
+    "Поточна сцена": "Вілла Ілліріо Мопатіса — терасний сад з видом на бухту",
     "Володіння": "-",
     "Світогляд": "Відданий, меланхолійний, шукає спокути",
     "Здоров'я": 100,
@@ -734,7 +746,8 @@ def build_populate_npcs_prompt(location, situation_context, blacklist_str) -> st
         REQUIREMENTS:
         - Create a DIVERSE mix (Social standing, professions, hostility).
         - "Secrets" must be interesting plot hooks, but not break canonical story.
-        - Output 'Location' field in UKRAINIAN language (e.g., 'Вінтерфел', 'Пентос', 'Стіна').
+        - Location field is set by the system — do NOT include it in output.
+        - Scene: вільний рядок — мікролокація всередині "{location}" (наприклад: "Таверна 'Вепр і кубок'", "Ринкова площа біля воріт", "Кузня біля казарми"). Будь конкретним.
 
         === RELATION_PLAYER SCALE (ОБОВ'ЯЗКОВО) ===
         Поле Relation_Player ПОВИННО містити ТІЛЬКИ одне значення з цієї шкали (від найгіршого до найкращого):
@@ -750,6 +763,7 @@ def build_populate_npcs_prompt(location, situation_context, blacklist_str) -> st
         [
           {{
             "Name": "Name",
+            "Scene": "Мікролокація де зараз знаходиться NPC всередині {location}",
             "Description": "Atmospheric visual description",
             "Character": "Personality traits",
             "Goal": "Current desire",
