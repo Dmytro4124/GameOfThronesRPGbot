@@ -42,6 +42,6 @@ MODEL_NARRATOR_TEMP = 0.7  # Креативний літературний ви�
 CREDENTIALS_FILE = 'credentials.json'
 
 # Адміністраторська консоль
-ADMIN_TELEGRAM_IDS: list = [123456789]  # замінити на реальний Telegram ID адміна
+ADMIN_TELEGRAM_IDS: list = [494157543]  # замінити на реальний Telegram ID адміна
 GODMODE_USERS: set = set()              # runtime-toggle: автокрит у кубиках
 PUPPET_USERS: set = set()               # runtime-toggle: режим ляльковода (всі NPC лояльні)
