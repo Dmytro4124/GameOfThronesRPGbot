@@ -6,6 +6,11 @@ import asyncio
 
 # Імпортуємо нашого ШІ-клієнта для функцій, які потребують суддівства
 from core.ai_client import model_worker, clean_and_parse_json
+from core.prompts import (
+    build_validate_action_prompt, build_training_request_prompt,
+    build_training_success_narrative, build_training_failure_narrative,
+    build_training_miracle_narrative, build_resolve_mechanics_prompt,
+)
 from core.world_constants import is_valid_location, get_region_for_location, TRAVEL_LOCATION
 
 # === КОНСТАНТИ СИСТЕМИ ===
@@ -328,36 +333,7 @@ async def validate_action(user_input, profile):
     char_name = profile.get("Ім'я", "Герой")
     inventory_list = profile.get("Інвентар", "порожній") or "порожній"
 
-    prompt = f"""You are the Lore Keeper for "Game of Thrones" (Medieval Fantasy). Check the player’s action for legality.
-
-        PLAYER: {char_name}
-        ACTION: "{user_input}"
-        INVENTORY: {inventory_list}
-
-        === CRITICAL OVERRIDE — VERBAL BLUFF (CHECK FIRST) ===
-        If the action is PURELY verbal (speech, commands, declarations, boasts, lies) — return is_valid: true IMMEDIATELY. Verbal bluffs override ALL other rules.
-        ✅ "I tell her I have a dragon egg" — verbal claim, LEGAL.
-        ✅ "I shout that I am the true king" — declaration, LEGAL.
-
-        === BLOCK (is_valid: false) if ANY of these ===
-        1. OUTCOME CONTROL: Player describes RESULT, not attempt ("I cut off his head" ❌ vs "I swing at his neck" ✅; "I convince him" ❌ vs "I try to persuade" ✅).
-        2. NPC PUPPETING: Player writes what NPC does ("Drogo laughs" ❌, "The guard lets me pass" ❌). Player may give orders ("I order Jorah to attack" ✅).
-        3. ITEM FRAUD: Player PHYSICALLY produces/uses an item NOT in INVENTORY ("I pull out a Valyrian sword" ❌).
-        4. ANACHRONISMS: Modern technology or concepts (F-16, telephone, internet, NATO).
-        5. META-GAMING: Controlling the plot as author ("Skip to the end", "A dragon saves me").
-
-        === ALLOW (is_valid: true) ===
-        Risky actions, jokes, conversations, anything physically possible in Westeros.
-
-        === refusal_reason STYLE ===
-        Ukrainian ONLY. 1-2 sentences. Voice of a sardonic medieval Narrator. No modern or English words.
-
-        OUTPUT STRICTLY VALID JSON. NO MARKDOWN. NO BACKTICKS.
-        {{
-            "is_valid": true,
-            "refusal_reason": ""
-        }}
-        """
+    prompt = build_validate_action_prompt(char_name, user_input, inventory_list)
     try:
         def _sync_gen_val():
             return model_worker.generate_content(prompt)
@@ -383,26 +359,15 @@ async def process_training_request(user_input, profile, current_scene=None):
             "error": "Ваша енергія на нулі. В очах темніє, ноги не тримають. Тренування абсолютно неможливе — вам терміново потрібен сон, інакше ви втратите свідомість на місці."
         }
 
-    prompt = f"""YOU ARE THE GAME MASTER. The player might be trying to train a skill.
-
-    User Input: "{user_input}"
-    Current Scene: {current_scene or "Unknown"}
-    Player Skills: Бойові={profile.get("Бойові навички", 10)}, Військові={profile.get("Військові навички", 10)}, Інтрига={profile.get("Інтрига", 10)}, Управління={profile.get("Управління", 10)}
-    Player Gold: {profile.get("Особисте Золото", 0)}
-
-    RULES FOR TRAINING:
-    1. CONTEXT CHECK: Is the current scene safe to spend days training? (Active combat, stealth mission, or tense dialogue = impossible. Tavern, camp, training yard = possible).
-    2. METHOD CHECK: Solo ("I train") vs Mentor ("I pay a master / read a book").
-
-    OUTPUT STRICTLY VALID JSON ONLY. NO MARKDOWN. NO BACKTICKS. NO CODE FENCES.
-    {{
-        "is_training": true,
-        "is_possible": true,
-        "skill": "Бойові",
-        "method": "solo",
-        "reason_if_failed": ""
-    }}
-    """
+    prompt = build_training_request_prompt(
+        user_input=user_input,
+        current_scene=current_scene,
+        combat=profile.get("Бойові навички", 10),
+        military=profile.get("Військові навички", 10),
+        intrigue=profile.get("Інтрига", 10),
+        management=profile.get("Управління", 10),
+        gold=profile.get("Особисте Золото", 0),
+    )
 
     resp = None
     try:
@@ -466,15 +431,15 @@ async def process_training_request(user_input, profile, current_scene=None):
 
     if current_energy >= energy_cost:
         stat_gain = 1
-        story_prompt = f"SYSTEM: Player spends {cost_time_days} days and {cost_gold} gold practicing '{skill_target}' ({method}). They gain +1 to the skill but lose 40 Energy. Describe the grueling process."
+        story_prompt = build_training_success_narrative(skill_target, cost_time_days, cost_gold, method)
     else:
         if random.random() < 0.75:  # 75% травма
             temp_debuff = random.randint(15, 20)
             new_cooldown_mins = 14 * MINUTES_IN_DAY  # 14 днів кулдауну через травму
-            story_prompt = f"SYSTEM: Player tried to train '{skill_target}' while exhausted. IT WAS A DISASTER. They tore a muscle/had a breakdown. Gain NO stats, get -{temp_debuff} temporary debuff. Describe the painful failure."
+            story_prompt = build_training_failure_narrative(skill_target, temp_debuff)
         else:  # 25% диво
             stat_gain = 1
-            story_prompt = f"SYSTEM: Player fanatically trained '{skill_target}' while completely exhausted. Miraculously gained +1, but collapsed after. Describe this desperate push."
+            story_prompt = build_training_miracle_narrative(skill_target)
 
     return {
         "success": True,
@@ -559,136 +524,15 @@ async def resolve_action_mechanics(user_input, profile, npc_reputation_context=N
         verdict = "MECHANICAL VERDICT: EXHAUSTION COLLAPSE! GM INFO: ABSOLUTE OVERRIDE. The player's energy is 0. Ignore their requested action. Describe how they suddenly lose consciousness and collapse on the spot from complete exhaustion. Fast forward 8 hours of them being passed out. Describe what happens to them while they are defenseless."
         return verdict, updates
 
-    prompt = f"""<system>
-        You are the System Engine for a Grimdark RPG (Game of Thrones).
-        Your ONLY job is to calculate the mechanical outcome of the player's action using a ROLL-OVER system (Roll + Skill vs DC).
-        </system>
-
-        <data>
-        Player Action: "{user_input}"
-        Player Skills: {json.dumps(skills, ensure_ascii=False)}
-        Active Clocks (Tension): {json.dumps(clocks_info, ensure_ascii=False)}
-        NPC Reputation Context: {json.dumps(npc_reputation_context or {}, ensure_ascii=False)}
-        Current Scene: {current_scene or "Unknown"}
-        NPCs Present: {", ".join(npc_names) if npc_names else "None"}
-        Last Turn: {last_turn_summary or "Game start"}
-        </data>
-
-        <npc_reputation_guide>
-        If the player's action targets a specific NPC, consider their reputation score when setting DC:
-        - Score >= 80 (Devoted): Lower DC by 20, consider ADVANTAGE for social skills.
-        - Score 40-79 (Friendly): Lower DC by 10.
-        - Score -39 to 39 (Neutral): No modifier.
-        - Score -79 to -40 (Hostile): Raise DC by 20, consider DISADVANTAGE for social skills.
-        - Score <= -80 (Blood Enemy): Social actions should use maximum DC (140+).
-        NOTE: This guide applies ONLY to social skills (Інтрига, Управління). Combat/Military skills are unaffected by reputation.
-        - HOSTILE NPC RULE: If the action is directed at or involves a specific NPC with reputation score < -20,
-          you MUST assign a skill (Управління or Інтрига). NEVER use skill_used="None" for requests,
-          demands, or any interaction that requires NPC cooperation with a hostile NPC.
-          Exception: purely physical/environmental actions that don't require NPC cooperation
-          (walking past, looking around, picking up an object) may still be None.
-        </npc_reputation_guide>
-
-        <rules>
-        1. CLASSIFY REQUIRED SKILL (STRICT):
-           - "Бойові": Direct physical combat, sword fighting, wrestling, punching, kicking, shooting.
-             KEYWORD OVERRIDE: If the action contains physical violence words (бити, вдарити, рубати, стріляти, штрикнути, кулак, меч, ніж, атакувати, напасти, душити, ламати) — ALWAYS classify as "Бойові", regardless of previous context.
-           - "Інтрига": Sneaking, hiding, stealing, lying, bluffing, persuasion (ONLY if NO physical violence keywords are present).
-           - "Військові": Tactics, commanding, assessing battlefield, spotting ambushes.
-           - "Управління": Using noble status, bribery, trade, official orders.
-           - "None": Mundane tasks (walking, looking, casual chat). 🚨 THE "NO ROLL" RULE: If no NPC is actively attacking/stopping the player, use "None".
-
-        2. DETERMINE CIRCUMSTANCE:
-           - "ADVANTAGE": Surprise, high ground, great leverage.
-           - "NORMAL": Fair conditions, standard risk.
-           - "DISADVANTAGE": ONLY when physically injured, outnumbered in active combat, or acting while severely debilitated. Social pressure alone is NOT disadvantage.
-
-        3. ASSESS DIFFICULTY (Target DC):
-           - 60 (Very Easy): Beating a weak, unarmed peasant.
-           - 80 (Easy): A basic task, fighting a drunk thug.
-           - 100 (Normal): Standard challenge, fighting a trained guard.
-           - 120 (Hard): Fighting a skilled knight, sneaking into heavily guarded keep.
-           - 140 (Extreme): Dragon, multiple knights, deadly trap.
-           DC ESCALATION RULE: If the player's action targets royalty, high lords, or extremely powerful NPCs — DC MUST be at least 120. If the action is outrageous (accusing the King of treason, demanding a lordship, blatant lies with no proof) — DC MUST be 140.
-
-        4. INTENT CLASSIFICATION:
-           - If player attempts to spend a long period practicing/studying a specific skill -> "training".
-           - Otherwise -> "standard".
-
-        5. TAGS GUIDE (STRICT VALUES REQUIRED):
-           - minutes_passed: 1-2 (combat/quick action - STRICT OVERRIDE), 15-30 (conversation/lockpicking), 60-120 (travel), 480-600 (sleep).
-           - health_impact: "none", "heal_small", "dmg_light" (-5 HP), "dmg_medium" (-15 HP), "dmg_heavy" (-30 HP), "dmg_fatal" (-100 HP).
-             WHEN TO APPLY DAMAGE:
-             a) Enemy hits the player (SUCCESS of enemy attack or FAILURE of player defense).
-             b) Critical failure on any action.
-             c) ACTIVE VIOLENCE RULE: If Scene_Tension >= 3/4, the scene involves active combat. NPCs DO NOT stop attacking just because the player chose a non-combat action (talking, running, looking around). Apply appropriate health_impact even if the player's current action is social or passive.
-           - gold_impact: EXACT NUMBER as string (e.g., "-5", "10") IF specified. Otherwise: "none", "spend_small", "spend_medium", "spend_large", "earn_small", "earn_medium", "earn_large".
-           - energy_impact: "none", "spend_small" (minor stress/walk), "spend_medium" (argument, training), "spend_large" (combat, labor), "restore_small" (food/fire), "restore_medium" (tavern bed), "restore_full" (sleep).
-           - reputation_delta: Integer change in reputation (-20 to +20). Use ONLY for social actions (Інтрига/Управління). 0 for non-social or neutral outcomes. SUCCESS social → +5..+15. FAILURE social → -5..-15. Use 0 if no NPC is the target.
-           - reputation_target_npc: Exact NPC name from the active roster that is affected. "" if reputation_delta is 0.
-           - clocks_impact: {{"Scene_Tension": 1}} (if suspicious/aggressive/fail), {{"Scene_Tension": "clear"}} (if player leaves the scene/location). Max is 4.
-             CLEAR RULE: Output "clear" for Scene_Tension ONLY when the player physically leaves the current scene/location (and you also output a scene_impact or location_impact change).
-             The engine will auto-apply a stepped reduction based on current tension — NOT a full reset:
-             ST <= 2 → full clear | ST = 3 → drops to 1/4 | ST = 4 → drops to 2/4.
-             For escape actions (тікаю, біжу, тікати), output "clear" combined with a scene/location change.
-             Accusations, threats, insults, and aggressive actions MUST increment tension (+1). NEVER output "clear" during aggression or without a location change.
-
-        6. MOVEMENT AND LOCATIONS (CRITICAL):
-           - If the player explicitly leaves a room, building, or travels locally, you MUST output the new micro-location in "scene_impact" (e.g., "Гавань", "Вулиці", "Таверна"). Якщо гравець входить у КОНКРЕТНИЙ приватний простір NPC (покої, в'язниця, підвал), давай описову назву з іменем або функцією (напр. "Покої Неда Старка", "Темниця під вежею") — ця назва буде використана GM як якір сцени для ізоляції NPC.
-           - If they travel to an entirely new city or region, update "location_impact" (e.g., "Браавос", "Королівська Гавань") AND update "scene_impact" to a logical starting point there.
-           - If they stay in the current scene, output "none" for both.
-        </rules>
-
-        <example_output>
-        {{
-            "reasoning": "Player explicitly said 'I go outside', so scene changes to Вулиці. No combat, no roll needed.",
-            "skill_check_reasoning": "1. Чи блокує/атакує NPC гравця? НІ. 2. Дія — пересування без опору. Висновок: None.",
-            "gold_reasoning": "1. Конкретна ціна в діалозі? НІ. 2. Тип операції: відсутня. 3. Фінальна сума: none.",
-            "action_type": "standard",
-            "skill_used": "None",
-            "difficulty": 0,
-            "circumstance": "NORMAL",
-            "verdict_text": "Player walks outside.",
-            "reputation_delta": 0,
-            "reputation_target_npc": "",
-            "updates": {{
-                 "minutes_passed": 15,
-                 "location_impact": "none",
-                 "scene_impact": "Вулиці",
-                 "health_impact": "none",
-                 "energy_impact": "spend_small",
-                 "gold_impact": "none",
-                 "inventory_new": [],
-                 "inventory_lost": [],
-                 "clocks_impact": {{}}
-            }}
-        }}
-        </example_output>
-
-        OUTPUT IN STRICT JSON FORMAT ONLY:
-        {{
-            "reasoning": "Your brief mechanical reasoning here",
-            "skill_check_reasoning": "ОБОВ'ЯЗКОВО: 1. Чи блокує/атакує/заважає NPC гравцю зараз? [ТАК/НІ]. 2. Якщо НІ — skill=None (НЕ КИДАЙ КУБИК). Якщо ТАК — яка навичка? Приклади None: забрати оплачене замовлення, очікувати, йти вулицею, дивитися навкруги. Висновок: [None / Інтрига / Бойові / Управління / Військові]",
-            "gold_reasoning": "ОБОВ'ЯЗКОВО: 1. Чи була названа КОНКРЕТНА ціна у поточному або попередньому ході? [ТАК: вказати суму / НІ]. 2. Тип: [купівля / продаж / відсутня]. 3. ПРАВИЛО: якщо ціна відома — вкажи ТОЧНЕ ЧИСЛО в gold_impact (напр. '-70' або '1000'). Абстрактні теги (spend_medium тощо) — ТІЛЬКИ якщо ціна невідома.",
-            "action_type": "standard or training",
-            "skill_used": "Бойові or Військові or Інтрига or Управління or None",
-            "difficulty": 100,
-            "circumstance": "NORMAL",
-            "verdict_text": "Short instruction for GM",
-            "reputation_delta": 0,
-            "reputation_target_npc": "",
-            "updates": {{
-                 "minutes_passed": 15,
-                 "location_impact": "none",
-                 "scene_impact": "none",
-                 "health_impact": "none",
-                 "energy_impact": "spend_small",
-                 "gold_impact": "none",
-                 "inventory_new": [],
-                 "inventory_lost": [],
-                 "clocks_impact": {{}}
-            }}
-        }}"""
+    prompt = build_resolve_mechanics_prompt(
+        user_input=user_input,
+        skills=skills,
+        clocks_info=clocks_info,
+        npc_reputation_context=npc_reputation_context,
+        current_scene=current_scene,
+        npc_names=npc_names,
+        last_turn_summary=last_turn_summary,
+    )
 
     try:
         def _sync_gen_mech():

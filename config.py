@@ -29,7 +29,7 @@ TAB_NPC = 'NPC_DB'
 # Налаштування моделей Gemini
 MODEL_MAIN_NAME = 'gemma-3-27b-it'
 MODEL_WORKER_NAME = 'gemma-3-4b-it'
-MODEL_GM_LOGIC_NAME = 'gemma-3-4b-it'      # Логічний рушій (JSON стану світу)
+MODEL_GM_LOGIC_NAME = 'gemma-3-27b-it'      # Логічний рушій (JSON стану світу)
 MODEL_NARRATOR_NAME = 'gemma-3-27b-it'     # Письменник (художній текст)
 
 # Налаштування температури моделей

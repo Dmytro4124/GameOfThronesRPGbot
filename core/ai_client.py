@@ -2,6 +2,7 @@ import json
 import re
 import asyncio
 from google import genai
+from core.prompts import JSON_ONLY_INSTRUCTION
 from google.genai import types
 from config import (GEMINI_API_KEY, MODEL_MAIN_NAME, MODEL_WORKER_NAME, MODEL_MAIN_TEMP, MODEL_WORKER_TEMP,
                      MODEL_GM_LOGIC_NAME, MODEL_GM_LOGIC_TEMP, MODEL_NARRATOR_NAME, MODEL_NARRATOR_TEMP)
@@ -161,7 +162,7 @@ async def ask_gemini(prompt, use_worker=False):
     delay = 2
     active_model = model_worker if use_worker else model
 
-    strict_prompt = prompt + "\n\nВАЖЛИВО: Відповідай ТІЛЬКИ валідним JSON кодом. Без Markdown. Без слів 'Ось ваш JSON'."
+    strict_prompt = prompt + JSON_ONLY_INSTRUCTION
 
     for attempt in range(retries):
         try:
