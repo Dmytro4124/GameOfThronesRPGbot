@@ -29,10 +29,14 @@ TAB_NPC = 'NPC_DB'
 # Налаштування моделей Gemini
 MODEL_MAIN_NAME = 'gemma-3-27b-it'
 MODEL_WORKER_NAME = 'gemma-3-4b-it'
+MODEL_GM_LOGIC_NAME = 'gemma-3-4b-it'      # Логічний рушій (JSON стану світу)
+MODEL_NARRATOR_NAME = 'gemma-3-27b-it'     # Письменник (художній текст)
 
 # Налаштування температури моделей
 MODEL_MAIN_TEMP = 0.7   # Для генерації сюжету та креативних описів
 MODEL_WORKER_TEMP = 0.1 # Для точного суддівства та парсингу JSON
+MODEL_GM_LOGIC_TEMP = 0.1  # Детерміністична генерація JSON
+MODEL_NARRATOR_TEMP = 0.7  # Креативний літературний вихід
 
 # Інші константи
 CREDENTIALS_FILE = 'credentials.json'   

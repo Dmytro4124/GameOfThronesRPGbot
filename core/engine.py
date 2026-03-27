@@ -4,9 +4,9 @@ import json
 import re
 import asyncio
 
-from core.ai_client import model, model_worker, clean_and_parse_json
+from core.ai_client import model_worker, model_gm_logic, model_narrator, clean_and_parse_json
 from core.mechanics import apply_system_impacts, process_training_request, safe_int, resolve_action_mechanics, validate_action
-from core.prompts import GAME_ERA_CONTEXT
+from core.prompts import GAME_ERA_CONTEXT, NARRATOR_SYSTEM_PROMPT
 from core.world_constants import VALID_LOCATIONS_ORDERED, VALID_REGIONS_ORDERED, TRAVEL_LOCATION, get_region_for_location, LOCATION_DESCRIPTIONS
 from core.world import populate_contextual_npcs
 from database.operations import (
@@ -103,6 +103,47 @@ async def summarize_turn(gm_response):
         return resp.text.strip()
     except:
         return f"Гравець діє."
+
+
+def _build_narrator_prompt(user_input, director_notes, npc_context_text,
+                           player_name, player_house, current_scene,
+                           current_location, impact_narrative_hints):
+    last_name = player_name.split()[-1] if player_name else "Герой"
+    notes_text = "\n".join(f"- {note}" for note in director_notes)
+    parts = [NARRATOR_SYSTEM_PROMPT]
+    parts.append(f"""
+<player_identity>
+ГЕРОЙ: {player_name} з дому {player_house}.
+NPC звертаються до героя ТІЛЬКИ як "{last_name}" або "лорд/леді {player_house}".
+ЗАБОРОНА: НІКОЛИ не називай героя прізвищем іншого дому.
+</player_identity>""")
+    if npc_context_text:
+        parts.append(f"""
+<npc_cards>
+{npc_context_text}
+</npc_cards>""")
+    parts.append(f"""
+<director_notes>
+ФАКТИ (ДОТРИМУЙСЯ СТРОГО — не вигадуй нічого поза цим списком):
+{notes_text}
+</director_notes>""")
+    if impact_narrative_hints:
+        parts.append(f"""
+<system_impacts>
+{impact_narrative_hints}
+Вплети ці підказки в наратив БЕЗ чисел.
+</system_impacts>""")
+    parts.append(f"""
+<scene>
+Локація: {current_location}, Сцена: {current_scene}
+</scene>
+
+<player_action>
+"{user_input}"
+</player_action>
+
+Напиши художній наративний текст за фактами з director_notes. Закінчи запрошенням до дії.""")
+    return "\n".join(parts)
 
 
 async def process_game_turn(chat_id, user_input):
@@ -316,24 +357,22 @@ async def process_game_turn(chat_id, user_input):
     _curr_loc_desc = LOCATION_DESCRIPTIONS.get(curr_loc, "")
     _loc_hint = f"\n    ОПИС ПОТОЧНОЇ ЛОКАЦІЇ: {_curr_loc_desc}" if _curr_loc_desc else ""
 
-    prompt = f"""<system>
-    Роль: Неупереджений Майстер Гри (GM) для Grimdark RPG (Гра Престолів).
-    Мета: Описати безпосередні наслідки дії гравця, СТРОГО дотримуючись механічного вердикту.
-    Тон: Реалістичний, жорстокий, атмосферний. Світ не крутиться навколо гравця.
-    МОВА: Поле "story" ПОВИННО бути написане ВИКЛЮЧНО українською. Жодних англійських слів у наративі.
+    # ============ GM_LOGIC PROMPT (JSON стану світу, без story) ============
+    gm_logic_prompt = f"""<system>
+    Роль: Логічний Рушій Гри (Game Logic Engine) для Grimdark RPG (Гра Престолів).
+    Мета: Визначити наслідки дії гравця для стану світу, СТРОГО дотримуючись механічного вердикту.
+    Ти видаєш ВИКЛЮЧНО структуровані дані (JSON). Ти НЕ пишеш художній текст.
     </system>
 
     <player_identity>
     ГЕРОЙ ЦІЄї ІСТОРІЇ: {profile.get("Ім'я", "Невідомий")} з дому {profile.get("Дім", "Невідомий")}.
     АБСОЛЮТНЕ ПРАВИЛО: NPC звертаються до героя ТІЛЬКИ як "{profile.get("Ім'я", "").split()[-1] if profile.get("Ім'я", "") else "Герой"}" або "лорд/леді {profile.get("Дім", "")}".
-    ЗАБОРОНА: НІКОЛИ не називай героя прізвищем іншого дому. Герой НЕ є Ланністером, Старком, Таргарієном, Баратеоном чи іншим домом — ТІЛЬКИ {profile.get("Дім", "")}.
-    ПРИКЛАД ПОМИЛКИ: NPC каже "Ланністере" герою з дому {profile.get("Дім", "")} — це ГРУБЕ ПОРУШЕННЯ.
-    НАВІТЬ КОЛИ NPC РОЗЛЮЧЕНИЙ — він все одно використовує справжнє прізвище героя: "{profile.get("Ім'я", "").split()[-1] if profile.get("Ім'я", "") else "Герой"}".
+    ЗАБОРОНА: НІКОЛИ не називай героя прізвищем іншого дому — ТІЛЬКИ {profile.get("Дім", "")}.
     </player_identity>
 
     <player_state>
     {profile_json}
-    ПРИМІТКА GM: Використовуй поле "Wealth" для обмеження покупок гравця. Якщо "penniless" — гравець не може нічого купити.
+    ПРИМІТКА: Використовуй поле "Wealth" для обмеження покупок гравця. Якщо "penniless" — гравець не може нічого купити.
     </player_state>
 
     <world_context>
@@ -362,20 +401,13 @@ async def process_game_turn(chat_id, user_input):
     <mechanical_verdict>
     {mechanics_verdict}
     Інструкція: Ти ЗОБОВ'ЯЗАНИЙ дотримуватися цього вердикту.
-    - Якщо FAILURE: Опиши болісний або фрустраційний результат. Додай напруги.
-    - Якщо SUCCESS: Опиши тріумф.
-    - ЖОДНИХ ЧИСЕЛ (АБСОЛЮТНО): НІКОЛИ не пиши жодної цифри чи числа в тексті story.
-      Це стосується і чисел, які гравець згадує у своїй дії.
-      ОБОВ'ЯЗКОВА КОНВЕРТАЦІЯ — якщо гравець згадує число, конвертуй:
-        "5000 золотих" → "цілий статок", "важкий гаманець золота", "досить щоб купити лордство"
-        "100 солдатів" → "ціле військо", "невелика армія"
-        "3 дні" → "кілька днів", "кількаденна подорож"
-      У наративному світі немає арифметики. Тільки вага, масштаб і відчуття.
+    - Якщо FAILURE: результат болісний або фрустраційний.
+    - Якщо SUCCESS: результат тріумфальний.
     </mechanical_verdict>
-    {f'<system_impacts>{chr(10)}{impact_narrative_hints}{chr(10)}ПРАВИЛО: Ти ЗОБОВ\'ЯЗАНИЙ вплести вказані вище підказки в наратив БЕЗ використання чисел. Це обов\'язкові наративні акценти.{chr(10)}</system_impacts>' if impact_narrative_hints else ''}
+    {f'<system_impacts>{chr(10)}{impact_narrative_hints}{chr(10)}Врахуй ці підказки при формуванні director_notes.{chr(10)}</system_impacts>' if impact_narrative_hints else ''}
 
     <reputation_behavior_rules>
-    Ці правила визначають поведінку NPC в "story" НЕЗАЛЕЖНО від механічного результату кидка.
+    Ці правила визначають поведінку NPC НЕЗАЛЕЖНО від механічного результату кидка.
     Знайди Reputation Score у картці NPC (поле "Reputation Score") і застосуй відповідну поведінку:
 
     ВИСОКА РЕПУТАЦІЯ (Score >= 60): NPC допомагає проактивно. При SUCCESS — виконує охоче і повністю.
@@ -392,39 +424,10 @@ async def process_game_turn(chat_id, user_input):
 
     КРИВАВИЙ ВОРОГ (Score <= -60): NPC не виконує добровільно НІКОЛИ.
     Навіть при SUCCESS — діє лише під прямим примусом або відразу шукає спосіб зрадити.
-    Ворожість ОБОВ'ЯЗКОВО відображати в тексті story.
 
     Також враховуй поле "Attitude to Player" в картці NPC як текстовий маркер поточних відносин.
-    Він визначає ТОНАЛЬНІСТЬ та НЮАНСИ поведінки NPC у діалозі, незалежно від числового Score.
-    Приклади: "Прихильний" = NPC охоче слухає, може запропонувати допомогу першим.
-    "Підозрілий" = NPC відповідає коротко, перевіряє слова гравця, не розкривається.
-    "Нейтральний" = суто ділова взаємодія, без тепла чи холоду.
-    "Довіряє" = NPC може першим поділитись секретом або попередити про небезпеку.
+    Він визначає ТОНАЛЬНІСТЬ та НЮАНСИ поведінки NPC, незалежно від числового Score.
     </reputation_behavior_rules>
-
-    <npc_roleplay_rules>
-    При написанні story ти ЗОБОВ'ЯЗАНИЙ активно використовувати картку кожного NPC у сцені:
-
-    **Visual** (зовнішній вигляд):
-    Якщо NPC з'являється або діє — вплети 1-2 деталі зовнішності в текст.
-    НЕ переказуй опис повністю. Лише деталь, що підсилює момент.
-    Приклад: якщо Visual = "огрядний купець з жовтими зубами" → "він широко посміхнувся, відкривши жовті зуби"
-
-    **Personality** (риси характеру):
-    Манера мовлення, реакція на стрес, темп відповіді — все визначається Personality.
-    Грубий = короткі речення, прямі погрози. Підлесливий = довгі вступи, компліменти перед суттю.
-    ЗАБОРОНЕНО: всі NPC говорять однаковим "нейтральним" голосом.
-
-    **Goal** (поточна ціль):
-    Кожне рішення NPC повинно або наближати, або захищати його Goal.
-    Якщо прохання гравця збігається з Goal NPC — NPC схиліться до допомоги.
-    Якщо суперечить — NPC знайде причину відмовити або поставити умову.
-
-    **Memory Anchor** (ключові спогади):
-    Якщо Memory Anchor не порожній — NPC може САМ згадати минулу подію між ним і гравцем.
-    Використовуй Memory Anchor щоб NPC не виглядав як "амнезійний незнайомець".
-    Приклад: якщо anchor = "гравець врятував мені життя" → NPC сам піднімає цю тему або вдячно дивиться.
-    </npc_roleplay_rules>
 
     <field_mutation_rules>
     СТАТИЧНІ ПОЛЯ — КРИТИЧНО ВАЖЛИВО:
@@ -446,12 +449,9 @@ async def process_game_turn(chat_id, user_input):
 
     <golden_laws_of_agency>
     1. НЕ ЧІПАЙ ГРАВЦЯ: Ти керуєш NPC та фізикою. Гравець керує ТІЛЬКИ своїм Героєм.
-    2. БЕЗ ЧИТАННЯ ДУМОК: Ніколи не кажи гравцю що він відчуває чи думає. Показуй, а не розповідай.
-    3. БЕЗ ЧЕРЕВОМОВСТВА: Тобі ЗАБОРОНЕНО писати репліки від імені Героя.
-    4. НАМІР vs РЕЗУЛЬТАТ: Гравець описує НАМІР. Ти визначаєш РЕЗУЛЬТАТ на основі механічного вердикту.
-    5. СИГНАЛ ЗУПИНКИ: Ти ПОВИНЕН зупинити текст одразу після реакції NPC. Залиш хід гравцю.
-    6. ВИХІД ЗІ СЦЕНИ (КРИТИЧНО): Якщо дія гравця — ПІТИ, ВИЙТИ або ЗМІНИТИ ЛОКАЦІЮ — поточна сцена НЕГАЙНО ЗАВЕРШУЄТЬСЯ. Тобі СТРОГО ЗАБОРОНЕНО описувати реакції, думки чи дії NPC, яких гравець залишає позаду. Опиши ТІЛЬКИ перехід і нове оточення.
-    7. РУХ КОМПАНЬЙОНІВ: Якщо гравець переміщується в нову Сцену/Локацію, ти ПОВИНЕН оновити поля "Scene" та "Location" в npc_updates JSON для союзних NPC, які активно слідують за гравцем. Залишених позаду персонажів НЕ оновлювати.
+    2. НАМІР vs РЕЗУЛЬТАТ: Гравець описує НАМІР. Ти визначаєш РЕЗУЛЬТАТ на основі механічного вердикту.
+    3. ВИХІД ЗІ СЦЕНИ (КРИТИЧНО): Якщо дія гравця — ПІТИ, ВИЙТИ або ЗМІНИТИ ЛОКАЦІЮ — поточна сцена НЕГАЙНО ЗАВЕРШУЄТЬСЯ. В director_notes зазнач ТІЛЬКИ факт переходу і нове оточення. ЗАБОРОНЕНО описувати реакції NPC, яких гравець залишає позаду.
+    4. РУХ КОМПАНЬЙОНІВ: Якщо гравець переміщується в нову Сцену/Локацію, ти ПОВИНЕН оновити поля "Scene" та "Location" в npc_updates JSON для союзних NPC, які активно слідують за гравцем. Залишених позаду персонажів НЕ оновлювати.
     </golden_laws_of_agency>
 
     <history>
@@ -486,29 +486,40 @@ async def process_game_turn(chat_id, user_input):
     </economy_rules>
 
     <json_generation_rules>
-    0. АНАЛІЗ NPC (ОБОВ'ЯЗКОВО ПЕРШИМ): Заповни "npc_reasoning" ДО написання "story". Перерахуй кожного NPC з АКТИВНОГО РОСТЕРУ, з яким гравець взаємодіяв (прямо чи опосередковано). Для кожного вкажи ЩО ЗМІНИЛОСЬ: ставлення, локація, інвентар, мета, стан. Якщо ЖОДЕН NPC не змінився — явно напиши причину. Тільки після заповнення "npc_reasoning" — переходь до "npc_updates" та "story".
-    1. ПОСТІЙНІСТЬ ПРЕДМЕТІВ: Якщо фізичні предмети чи золото обмінюються, ти ПОВИНЕН оновити поле "Inventory" NPC.
-    2. СЕМАНТИКА ПОЛЯ: '' означає 'поле не змінилось — зберегти поточне значення в базі'. Якщо поле ЗМІНИЛОСЬ — пиши РЕАЛЬНЕ НОВЕ ЗНАЧЕННЯ, не порожній рядок. Якщо жодне поле об'єкта не має реального нового значення — НЕ включай цей NPC у масив взагалі.
-    3. ЗАБОРОНА ДЕКОРАТИВНИХ ЗНАЧЕНЬ: Не пиши "no change", "same", "без змін", "те саме", "не змінилось". Використовуй або реальне значення, або точно ''.
-    4. ПРАВИЛО ВИКЛИКУ NPC: Використовуй ТІЛЬКИ точні імена з ПРИСУТНІХ NPC.
-    5. ЗАПРОПОНОВАНІ ДІЇ: Надай рівно 4 об'єкти у ТОЧНО такому порядку:
+    0. АНАЛІЗ NPC (ОБОВ'ЯЗКОВО ПЕРШИМ): Заповни "npc_reasoning" ДО решти полів. Перерахуй кожного NPC з АКТИВНОГО РОСТЕРУ, з яким гравець взаємодіяв (прямо чи опосередковано). Для кожного вкажи ЩО ЗМІНИЛОСЬ: ставлення, локація, інвентар, мета, стан. Якщо ЖОДЕН NPC не змінився — явно напиши причину.
+    1. DIRECTOR_NOTES (ОБОВ'ЯЗКОВО): Масив з 3-7 коротких фактичних речень українською. Це технічне завдання для Письменника. Кожен рядок — один факт:
+       - Результат дії гравця (успіх/провал, що конкретно сталось)
+       - Реакція кожного залученого NPC (тон, емоція, конкретна дія чи відмова)
+       - Зміни середовища (погода, час доби, атмосфера)
+       - Підказки про фізичний стан гравця (якщо є system_impacts)
+       БЕЗ літературних прикрас. Тільки голі факти. Приклад: ["Успіх. Охоронець пропускає.", "Охоронець наляканий, голос тремтить.", "Починається дощ."]
+    2. ПОСТІЙНІСТЬ ПРЕДМЕТІВ: Якщо фізичні предмети чи золото обмінюються, ти ПОВИНЕН оновити поле "Inventory" NPC.
+    3. СЕМАНТИКА ПОЛЯ: '' означає 'поле не змінилось — зберегти поточне значення в базі'. Якщо поле ЗМІНИЛОСЬ — пиши РЕАЛЬНЕ НОВЕ ЗНАЧЕННЯ, не порожній рядок. Якщо жодне поле об'єкта не має реального нового значення — НЕ включай цей NPC у масив взагалі.
+    4. ЗАБОРОНА ДЕКОРАТИВНИХ ЗНАЧЕНЬ: Не пиши "no change", "same", "без змін", "те саме", "не змінилось". Використовуй або реальне значення, або точно ''.
+    5. ПРАВИЛО ВИКЛИКУ NPC: Використовуй ТІЛЬКИ точні імена з ПРИСУТНІХ NPC.
+    6. ЗАПРОПОНОВАНІ ДІЇ: Надай рівно 4 об'єкти у ТОЧНО такому порядку:
        Дія 1 — тип [{_action_slots[0]}]: {{"button": "короткий label до 5 слів", "intent": "розгорнутий намір від ПЕРШОЇ ОСОБИ, 10-15 слів, конкретні деталі як саме і навіщо"}}
        Дія 2 — тип [{_action_slots[1]}]: аналогічно
        Дія 3 — тип [{_action_slots[2]}]: аналогічно
        Дія 4 — тип [{_action_slots[3]}]: аналогічно
        Grimdark тон, українська мова для обох полів. Назву типу НЕ включати в тексти.
-    6. ЗАБОРОНА БЕЗІМЕННИХ NPC: НІКОЛИ не вводь нового персонажа як "Лорд [Дім]" або "Леді [Дім]" без першого імені. Завжди давай конкретне ім'я (наприклад, "Сер Ронет Калдер" замість "Лорд Ланністер", "Вартовий Маркос" замість "один з охоронців").
-    7. ЛОКАЦІЇ NPC: Поле "Location" у npc_updates може містити ТІЛЬКИ значення зі списку канонічних регіонів (той самий список, що й для location_impact), АБО значення "GLOBAL". Ніколи не вигадуй нові назви міст чи замків для поля Location.
-    8. ПРИВАТНІ СЦЕНИ:
+    7. ЗАБОРОНА БЕЗІМЕННИХ NPC: НІКОЛИ не вводь нового персонажа як "Лорд [Дім]" або "Леді [Дім]" без першого імені. Завжди давай конкретне ім'я.
+    8. ЛОКАЦІЇ NPC: Поле "Location" у npc_updates може містити ТІЛЬКИ значення зі списку канонічних регіонів (той самий список, що й для location_impact), АБО значення "GLOBAL". Ніколи не вигадуй нові назви міст чи замків для поля Location.
+    9. ПРИВАТНІ СЦЕНИ:
        - Якщо гравець входить у конкретний приватний простір (покої NPC, підземелля, особиста зала), ти ПОВИНЕН встановити поле "Scene" для NPC, що там знаходиться, рівно тому ж значенню, яке вказане в ПОТОЧНА СЦЕНА вище. Використовуй точний рядок без змін.
-       - ЛОГІКА ІЗОЛЯЦІЇ: У наступному ході лише NPC з абсолютно такою ж сценою будуть у ростері. NPC без сцени ("невідомо", порожній) залишаться у загальних зонах і НЕ з'являться в приватній кімнаті.
-       - ЗАБОРОНА: Ти НЕ МОЖЕШ описувати у "story" NPC, яких немає в АКТИВНОМУ РОСТЕРІ поточного ходу.
+       - ЛОГІКА ІЗОЛЯЦІЇ: У наступному ході лише NPC з абсолютно такою ж сценою будуть у ростері.
+       - ЗАБОРОНА: НЕ згадуй в director_notes NPC, яких немає в АКТИВНОМУ РОСТЕРІ.
     </json_generation_rules>
 
     ВІДПОВІДАЙ СТРОГО У ФОРМАТІ JSON:
     {{
         "reasoning": "Твоє коротке внутрішнє міркування про те, як світ/NPC реагують на дію гравця з урахуванням механічного вердикту.",
         "npc_reasoning": "ОБОВ'ЯЗКОВО: перерахуй кожного NPC з активного ростеру, з яким гравець взаємодіяв, і що саме змінилося (ставлення, локація, інвентар, мета, стан). Якщо жоден NPC не змінився — поясни чому.",
+        "director_notes": [
+            "Факт 1: результат дії (що саме сталося)",
+            "Факт 2: реакція NPC (тон, емоція, дія)",
+            "Факт 3: зміна середовища або стану"
+        ],
         "npc_updates": [
             {{
                 "Name": "<ТОЧНЕ ім'я з ростеру>",
@@ -524,30 +535,29 @@ async def process_game_turn(chat_id, user_input):
                 "Status": "<Active | Dead | Fled | Unconscious>"
             }}
         ],
-        "story": "Твій фінальний наративний текст українською. Заверши запрошенням до наступної дії.",
         "suggested_actions": [{{"button": "Текст кнопки", "intent": "Розгорнутий намір від першої особи"}}, ...]
     }}"""
 
     try:
-        def _sync_gen_main():
-            return model.generate_content(prompt)
+        # ============ КРОК 1: GM_Logic (легка модель → JSON) ============
+        t_gm_logic = time.time()
 
-        response = await asyncio.to_thread(_sync_gen_main)
-        raw_text = response.text.strip()
-        ai_data = clean_and_parse_json(raw_text)
+        def _sync_gen_gm_logic():
+            return model_gm_logic.generate_content(gm_logic_prompt)
 
-        if not ai_data and '"story":' in raw_text:
-            try:
-                story_match = re.search(r'"story"\s*:\s*"((?:[^"\\]|\\.)*)"', raw_text, re.DOTALL)
-                extracted_story = story_match.group(1).replace('\\"', '"').replace('\\n',
-                                                                                   '\n') if story_match else raw_text
-                ai_data = {"story": extracted_story, "updates": {}, "suggested_actions": []}
-            except:
-                ai_data = {"story": raw_text, "updates": {}, "suggested_actions": []}
+        gm_logic_response = await asyncio.to_thread(_sync_gen_gm_logic)
+        gm_logic_raw = gm_logic_response.text.strip()
+        ai_data = clean_and_parse_json(gm_logic_raw)
 
-        if not ai_data: ai_data = {"story": raw_text, "updates": {}, "suggested_actions": []}
+        # GM_Logic fallback якщо JSON не парситься
+        if not ai_data:
+            ai_data = {"director_notes": ["Дія мала неоднозначний результат."],
+                       "npc_updates": [], "suggested_actions": []}
 
-        story = ai_data.get("story", "...")
+        duration_gm_logic = time.time() - t_gm_logic
+        timing_details.append(f"🧠 GM_Logic: {duration_gm_logic:.2f}s")
+
+        # Витягуємо suggested_actions з GM_Logic
         raw_actions = ai_data.get("suggested_actions", [])
         button_texts = []
         intents_map = {}
@@ -565,19 +575,39 @@ async def process_game_turn(chat_id, user_input):
         user_sessions.setdefault(chat_id, {})["action_intents"] = intents_map
         suggested_actions = button_texts
 
+        # ============ КРОК 2: Narrator (важка модель → художній текст) ============
+        t_narrator = time.time()
+        director_notes = ai_data.get("director_notes", [])
+        if not director_notes:
+            director_notes = [ai_data.get("reasoning", "Щось сталося.")]
+
+        narrator_prompt = _build_narrator_prompt(
+            user_input=user_input,
+            director_notes=director_notes,
+            npc_context_text=npc_context_text,
+            player_name=profile.get("Ім'я", "Невідомий"),
+            player_house=profile.get("Дім", "Невідомий"),
+            current_scene=curr_scene,
+            current_location=curr_loc,
+            impact_narrative_hints=impact_narrative_hints
+        )
+
+        def _sync_gen_narrator():
+            return model_narrator.generate_content(narrator_prompt)
+
+        narrator_response = await asyncio.to_thread(_sync_gen_narrator)
+        story = narrator_response.text.strip()
+
+        # Retry якщо Narrator видав сміття
         if "Тут напиши" in story or len(story) < 20:
-            char_name = profile.get("Ім'я", "Герой")
-            scene_name = profile.get("Поточна сцена", "Невідомо")
-            verdict_brief = mechanics_verdict[:300]
-            def _sync_gen_fix():
-                return model.generate_content(
-                    f"Ти GM у грі Game of Thrones (298 рік). Гравець {char_name} у локації {scene_name}. Механічний вердикт: {verdict_brief}. Дія гравця: {user_input}. Опиши наслідки художньо українською. Не використовуй числа. Закінчи питанням.")
+            def _sync_gen_narrator_retry():
+                return model_narrator.generate_content(narrator_prompt)
 
-            fix_resp = await asyncio.to_thread(_sync_gen_fix)
-            story = fix_resp.text
+            retry_resp = await asyncio.to_thread(_sync_gen_narrator_retry)
+            story = retry_resp.text.strip()
 
-        duration = time.time() - t_start
-        timing_details.append(f"✍️ Story: {duration:.2f}s")
+        duration_narrator = time.time() - t_narrator
+        timing_details.append(f"✍️ Narrator: {duration_narrator:.2f}s")
 
         t_start = time.time()
         npc_changes = ai_data.get("npc_updates", [])

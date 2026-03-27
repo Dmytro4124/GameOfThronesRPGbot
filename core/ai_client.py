@@ -3,7 +3,8 @@ import re
 import asyncio
 from google import genai
 from google.genai import types
-from config import GEMINI_API_KEY, MODEL_MAIN_NAME, MODEL_WORKER_NAME, MODEL_MAIN_TEMP, MODEL_WORKER_TEMP
+from config import (GEMINI_API_KEY, MODEL_MAIN_NAME, MODEL_WORKER_NAME, MODEL_MAIN_TEMP, MODEL_WORKER_TEMP,
+                     MODEL_GM_LOGIC_NAME, MODEL_GM_LOGIC_TEMP, MODEL_NARRATOR_NAME, MODEL_NARRATOR_TEMP)
 
 # Ініціалізація клієнта
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -48,6 +49,8 @@ class AIWrapper:
 # Створюємо екземпляри моделей
 model = AIWrapper(MODEL_MAIN_NAME, temperature=MODEL_MAIN_TEMP)
 model_worker = AIWrapper(MODEL_WORKER_NAME, temperature=MODEL_WORKER_TEMP)
+model_gm_logic = AIWrapper(MODEL_GM_LOGIC_NAME, temperature=MODEL_GM_LOGIC_TEMP)
+model_narrator = AIWrapper(MODEL_NARRATOR_NAME, temperature=MODEL_NARRATOR_TEMP)
 
 
 def _fix_invalid_escapes(s: str) -> str:
