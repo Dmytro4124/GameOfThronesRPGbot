@@ -20,43 +20,39 @@ async def send_safe_message(bot: Bot, chat_id: int, text: str, reply_to_message_
     safe_text = _sanitize_markdown(text)
     max_len = 4000
 
+    # edit_text приймає тільки InlineKeyboardMarkup, але ми використовуємо ReplyKeyboardMarkup.
+    # Тому видаляємо placeholder і надсилаємо нове повідомлення через send_message.
+    if edit_message:
+        try:
+            await edit_message.delete()
+        except Exception:
+            pass
+        edit_message = None
+
     if len(safe_text) <= max_len:
-        if edit_message:
-            try:
-                await edit_message.edit_text(safe_text, parse_mode='Markdown', reply_markup=reply_markup)
-            except Exception as e:
-                print(f"⚠️ Edit Message Error (Markdown): {e}")
-                await edit_message.edit_text(safe_text, reply_markup=reply_markup)
-        else:
-            try:
-                await bot.send_message(
-                    chat_id, safe_text,
-                    reply_to_message_id=reply_to_message_id,
-                    parse_mode='Markdown',
-                    reply_markup=reply_markup
-                )
-            except Exception as e:
-                print(f"⚠️ Safe Message Error (Markdown): {e}")
-                await bot.send_message(chat_id, safe_text, reply_to_message_id=reply_to_message_id,
-                                       reply_markup=reply_markup)
+        try:
+            await bot.send_message(
+                chat_id, safe_text,
+                reply_to_message_id=reply_to_message_id,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            print(f"⚠️ Safe Message Error (Markdown): {e}")
+            await bot.send_message(chat_id, safe_text, reply_to_message_id=reply_to_message_id,
+                                   reply_markup=reply_markup)
     else:
         parts = [safe_text[i:i + max_len] for i in range(0, len(safe_text), max_len)]
         for i, part in enumerate(parts):
             markup = reply_markup if i == len(parts) - 1 else None
-            if i == 0 and edit_message:
-                try:
-                    await edit_message.edit_text(part, parse_mode='Markdown', reply_markup=markup)
-                except Exception as e:
-                    print(f"⚠️ Edit Message Part Error: {e}")
-                    await edit_message.edit_text(part, reply_markup=markup)
-            else:
-                try:
-                    await bot.send_message(chat_id, part, parse_mode='Markdown', reply_markup=markup)
-                except Exception as e:
-                    print(f"⚠️ Safe Message Part Error: {e}")
-                    await bot.send_message(chat_id, part, reply_markup=markup)
+            try:
+                await bot.send_message(chat_id, part, parse_mode='Markdown', reply_markup=markup)
+            except Exception as e:
+                print(f"⚠️ Safe Message Part Error: {e}")
+                await bot.send_message(chat_id, part, reply_markup=markup)
 
-            await asyncio.sleep(0.5)
+            if i < len(parts) - 1:
+                await asyncio.sleep(0.5)
 
 
 async def send_game_response(bot: Bot, chat_id: int, text: str, suggested_actions: list = None,

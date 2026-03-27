@@ -103,7 +103,7 @@ async def summarize_turn(gm_response):
 
 def _build_narrator_prompt(user_input, director_notes, npc_context_text,
                            player_name, player_house, current_scene,
-                           current_location, impact_narrative_hints):
+                           current_location, impact_narrative_hints, puppet_mode=False):
     return build_narrator_prompt(
         user_input=user_input,
         director_notes=director_notes,
@@ -113,6 +113,7 @@ def _build_narrator_prompt(user_input, director_notes, npc_context_text,
         current_scene=current_scene,
         current_location=current_location,
         impact_narrative_hints=impact_narrative_hints,
+        puppet_mode=puppet_mode,
     )
 
 
@@ -201,7 +202,8 @@ async def process_game_turn(chat_id, user_input):
     last_turn = history[-1]["content"] if history else ""
     mechanics_verdict, mechanical_updates = await resolve_action_mechanics(
         user_input, profile, npc_reputation_context,
-        current_scene=curr_scene, npc_names=legal_npc_names, last_turn_summary=last_turn
+        current_scene=curr_scene, npc_names=legal_npc_names, last_turn_summary=last_turn,
+        user_id=chat_id
     )
 
     # === БЛОКУВАННЯ РЕПУТАЦІЄЮ: NPC відмовляє через кровну ворожнечу ===
@@ -330,6 +332,8 @@ async def process_game_turn(chat_id, user_input):
     _loc_hint = f"\n    ОПИС ПОТОЧНОЇ ЛОКАЦІЇ: {_curr_loc_desc}" if _curr_loc_desc else ""
 
     # ============ GM_LOGIC PROMPT (JSON стану світу, без story) ============
+    from config import PUPPET_USERS
+    _puppet_mode = chat_id in PUPPET_USERS
     gm_logic_prompt = build_gm_logic_prompt(
         hero_name=profile.get("Ім'я", "Невідомий"),
         hero_house=profile.get("Дім", "Невідомий"),
@@ -353,6 +357,7 @@ async def process_game_turn(chat_id, user_input):
         history_text=history_text,
         user_input=user_input,
         action_slots=_action_slots,
+        puppet_mode=_puppet_mode,
     )
 
 
@@ -407,7 +412,8 @@ async def process_game_turn(chat_id, user_input):
             player_house=profile.get("Дім", "Невідомий"),
             current_scene=curr_scene,
             current_location=curr_loc,
-            impact_narrative_hints=impact_narrative_hints
+            impact_narrative_hints=impact_narrative_hints,
+            puppet_mode=_puppet_mode,
         )
 
         def _sync_gen_narrator():

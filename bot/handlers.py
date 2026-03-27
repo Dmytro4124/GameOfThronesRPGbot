@@ -18,6 +18,7 @@ from core.world import (
     background_canon_generation, populate_contextual_npcs
 )
 from core.engine import process_game_turn, user_sessions
+from config import ADMIN_TELEGRAM_IDS
 
 
 router = Router()
@@ -370,6 +371,13 @@ async def handle_general_messages(message: Message, bot: Bot):
     if not user_text:
         return
 
+    # --- ADMIN CHEAT INTERCEPTOR (до User Lock і session recovery) ---
+    if user_text.startswith('/') and chat_id in ADMIN_TELEGRAM_IDS:
+        from core.cheats import handle_cheat_command
+        await handle_cheat_command(message, bot)
+        return
+    # -----------------------------------------------------------------
+
     session = user_sessions.get(chat_id)
 
     # ❗ СИСТЕМА АВТО-ВІДНОВЛЕННЯ ❗
@@ -431,7 +439,10 @@ async def handle_general_messages(message: Message, bot: Bot):
             except Exception as e:
                 error_trace = traceback.format_exc()
                 print(error_trace)
-                await temp_msg.edit_text(f"⚠️ ТЕХНІЧНА ПОМИЛКА:\n\n{error_trace[-1000:]}")
+                try:
+                    await temp_msg.edit_text("⚠️ Технічна помилка. Спробуйте ще раз.", parse_mode=None)
+                except Exception:
+                    await bot.send_message(chat_id, "⚠️ Технічна помилка. Спробуйте ще раз.")
             finally:
                 typing_task.cancel()
 

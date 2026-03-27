@@ -39,4 +39,9 @@ MODEL_GM_LOGIC_TEMP = 0.1  # Детерміністична генерація J
 MODEL_NARRATOR_TEMP = 0.7  # Креативний літературний вихід
 
 # Інші константи
-CREDENTIALS_FILE = 'credentials.json'   
+CREDENTIALS_FILE = 'credentials.json'
+
+# Адміністраторська консоль
+ADMIN_TELEGRAM_IDS: list = [123456789]  # замінити на реальний Telegram ID адміна
+GODMODE_USERS: set = set()              # runtime-toggle: автокрит у кубиках
+PUPPET_USERS: set = set()               # runtime-toggle: режим ляльковода (всі NPC лояльні)

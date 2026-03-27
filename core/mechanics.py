@@ -481,7 +481,8 @@ def get_reputation_delta(outcome):
 
 
 async def resolve_action_mechanics(user_input, profile, npc_reputation_context=None,
-                                    current_scene=None, npc_names=None, last_turn_summary=None):
+                                    current_scene=None, npc_names=None, last_turn_summary=None,
+                                    user_id=None):
     """
     Асинхронний Worker (4b): Оцінює складність дії та рахує всю механіку (Здоров'я, Час, Золото, Енергія, Годинники, Локація).
     ІНТЕГРОВАНО: Система 2d50 (Roll-Over), Перевага/Недолік, Хардкорні Крити та Прокачка.
@@ -657,29 +658,36 @@ async def resolve_action_mechanics(user_input, profile, npc_reputation_context=N
     # Застосовуємо DC-модифікатор від репутації
     difficulty = max(40, difficulty + rep_dc_mod)
 
-    roll_1 = roll_2d50()
-    roll_2 = roll_2d50()
-
-    if circumstance == "ADVANTAGE":
-        natural_roll = max(roll_1, roll_2)
-        roll_str = f"[{roll_1}, {roll_2}] -> {natural_roll}"
-    elif circumstance == "DISADVANTAGE":
-        natural_roll = min(roll_1, roll_2)
-        roll_str = f"[{roll_1}, {roll_2}] -> {natural_roll}"
-    else:
-        natural_roll = roll_1
-        roll_str = f"{natural_roll}"
-
-    total_score = natural_roll + skill_val
-
-    if natural_roll >= 96:
+    from config import GODMODE_USERS
+    if user_id and user_id in GODMODE_USERS:
+        natural_roll = 100
+        roll_str = "💀 GODMODE"
+        total_score = 100
         outcome = "CRITICAL SUCCESS"
-    elif natural_roll <= 5:
-        outcome = "CRITICAL FAILURE"
-    elif total_score >= difficulty:
-        outcome = "SUCCESS"
     else:
-        outcome = "FAILURE"
+        roll_1 = roll_2d50()
+        roll_2 = roll_2d50()
+
+        if circumstance == "ADVANTAGE":
+            natural_roll = max(roll_1, roll_2)
+            roll_str = f"[{roll_1}, {roll_2}] -> {natural_roll}"
+        elif circumstance == "DISADVANTAGE":
+            natural_roll = min(roll_1, roll_2)
+            roll_str = f"[{roll_1}, {roll_2}] -> {natural_roll}"
+        else:
+            natural_roll = roll_1
+            roll_str = f"{natural_roll}"
+
+        total_score = natural_roll + skill_val
+
+        if natural_roll >= 96:
+            outcome = "CRITICAL SUCCESS"
+        elif natural_roll <= 5:
+            outcome = "CRITICAL FAILURE"
+        elif total_score >= difficulty:
+            outcome = "SUCCESS"
+        else:
+            outcome = "FAILURE"
 
     rep_info = f" [REP: {rep_dc_mod:+d} DC]" if rep_dc_mod else ""
     verdict_str = f"MECHANICAL VERDICT: {outcome}! (Skill: {skill_used} [{skill_val}], Roll: {natural_roll}, Total: {total_score} vs DC {difficulty}{rep_info}). GM INFO: {data.get('verdict_text')}"

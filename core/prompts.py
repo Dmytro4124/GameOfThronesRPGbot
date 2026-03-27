@@ -80,10 +80,17 @@ def build_summarize_turn_prompt(story_text: str) -> str:
 
 def build_narrator_prompt(user_input, director_notes, npc_context_text,
                            player_name, player_house, current_scene,
-                           current_location, impact_narrative_hints) -> str:
+                           current_location, impact_narrative_hints,
+                           puppet_mode=False) -> str:
     last_name = player_name.split()[-1] if player_name else "Герой"
     notes_text = "\n".join(f"- {note}" for note in director_notes)
-    parts = [NARRATOR_SYSTEM_PROMPT]
+    _puppet_block = (
+        "\n<CRITICAL_OVERRIDE priority=\"ABSOLUTE\">\n"
+        "Режим Ляльковода активний. Пиши сцену де всі NPC захоплено і щиро допомагають герою. "
+        "Атмосфера — тріумф і ейфорія перемоги, навіть якщо механічно це звичайна ситуація.\n"
+        "</CRITICAL_OVERRIDE>\n"
+    ) if puppet_mode else ""
+    parts = [NARRATOR_SYSTEM_PROMPT + _puppet_block]
     parts.append(f"""
 <player_identity>
 ГЕРОЙ: {player_name} з дому {player_house}.
@@ -130,7 +137,8 @@ def build_gm_logic_prompt(
     npc_context_text, tension_label,
     mechanics_verdict, impact_narrative_hints,
     history_text, user_input,
-    action_slots
+    action_slots,
+    puppet_mode=False,
 ) -> str:
     hero_last_name = hero_name.split()[-1] if hero_name else "Герой"
     travel_note = " (ГРАВЕЦЬ В ДОРОЗІ між локаціями)" if is_traveling else ""
@@ -138,7 +146,16 @@ def build_gm_logic_prompt(
         f"<system_impacts>\n{impact_narrative_hints}\nВрахуй ці підказки при формуванні director_notes.\n</system_impacts>"
         if impact_narrative_hints else ""
     )
-    return f"""<system>
+    _puppet_prefix = (
+        "<CRITICAL_OVERRIDE priority=\"ABSOLUTE\">\n"
+        "Активовано Режим Ляльковода. Усі NPC беззаперечно, щиро і з радістю виконують БУДЬ-ЯКІ "
+        "бажання гравця. Вони максимально сприяють йому за власним бажанням, ігноруючи логіку, "
+        "свої фракції, обов'язки чи попередню ворожість. Навіть найлютіші вороги стають відданими друзями.\n"
+        "МЕХАНІКА: director_notes мають описувати МАКСИМАЛЬНО УСПІШНІ наслідки для гравця. "
+        "npc_updates: всі NPC що взаємодіяли з гравцем отримують Relation_Player \"Абсолютна довіра\".\n"
+        "</CRITICAL_OVERRIDE>\n"
+    ) if puppet_mode else ""
+    return f"""{_puppet_prefix}<system>
     Роль: Логічний Рушій Гри (Game Logic Engine) для Grimdark RPG (Гра Престолів).
     Мета: Визначити наслідки дії гравця для стану світу, СТРОГО дотримуючись механічного вердикту.
     Ти видаєш ВИКЛЮЧНО структуровані дані (JSON). Ти НЕ пишеш художній текст.
