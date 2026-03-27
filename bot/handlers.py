@@ -1,5 +1,6 @@
 # bot/handlers.py
 import asyncio
+import random
 import traceback
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery
@@ -21,6 +22,20 @@ from core.engine import process_game_turn, user_sessions
 
 router = Router()
 PROCESSED_MESSAGES = set()
+active_processing: set = set()
+
+PLACEHOLDER_PHRASES = [
+    "🎲 Майстер підземель кидає кубики...",
+    "⏳ Гортаємо літописи Вестеросу...",
+    "⚔️ Оцінюємо реакцію персонажів...",
+]
+
+
+async def keep_typing(bot: Bot, chat_id: int):
+    """Підтримує статус 'typing' кожні 4 секунди до скасування таски."""
+    while True:
+        await bot.send_chat_action(chat_id, action="typing")
+        await asyncio.sleep(4)
 
 
 @router.message(Command("start"))
@@ -395,17 +410,30 @@ async def handle_general_messages(message: Message, bot: Bot):
                 display_intent = resolved_intent
             user_text = resolved_intent
 
-        await bot.send_chat_action(chat_id, action='typing')
+        # КРОК 1: User Lock — блокуємо паралельні ходи одного гравця
+        if chat_id in active_processing:
+            await message.answer("⏳ Зачекайте, ваш попередній хід ще обробляється Майстром...")
+            return
+        active_processing.add(chat_id)
 
         try:
-            response_text, suggested_actions = await process_game_turn(chat_id, user_text)
-            if display_intent:
-                response_text = f"🗣️ _{display_intent}_\n\n{response_text}"
-            await send_game_response(bot, chat_id, response_text, suggested_actions, reply_to_message_id=msg_id)
+            # КРОК 3: Тематична заглушка (буде замінена на фінальну відповідь)
+            temp_msg = await message.reply(random.choice(PLACEHOLDER_PHRASES))
 
-        except Exception as e:
-            import traceback
-            error_trace = traceback.format_exc()
-            print(error_trace)
-            error_msg = f"⚠️ ТЕХНІЧНА ПОМИЛКА:\n\n{error_trace[-1500:]}"
-            await message.answer(error_msg)
+            # КРОК 2: Фоновий typing на весь час обробки
+            typing_task = asyncio.create_task(keep_typing(bot, chat_id))
+            try:
+                response_text, suggested_actions = await process_game_turn(chat_id, user_text)
+                if display_intent:
+                    response_text = f"🗣️ _{display_intent}_\n\n{response_text}"
+                await send_game_response(bot, chat_id, response_text, suggested_actions,
+                                         edit_message=temp_msg)
+            except Exception as e:
+                error_trace = traceback.format_exc()
+                print(error_trace)
+                await temp_msg.edit_text(f"⚠️ ТЕХНІЧНА ПОМИЛКА:\n\n{error_trace[-1000:]}")
+            finally:
+                typing_task.cancel()
+
+        finally:
+            active_processing.discard(chat_id)
