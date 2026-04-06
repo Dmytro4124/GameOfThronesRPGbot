@@ -185,6 +185,18 @@ async def _generate_with_retry(
     raise RuntimeError(f"Всі {max_retries} спроби вичерпано. Остання помилка: {last_error}")
 
 
+# === MOCK MESSAGE (stub для чіт-команд без Telegram) ===
+
+class _MockMessage:
+    """Мінімальний stub Telegram-повідомлення для виклику чіт-команд у тестах."""
+    def __init__(self, text: str = ""):
+        self.text = text
+        self._response = ""
+
+    async def answer(self, text, **kwargs):
+        self._response = str(text)
+
+
 # === АДАПТЕР ===
 
 class RPGTesterAdapter:
@@ -194,13 +206,22 @@ class RPGTesterAdapter:
         self.house_name = house_name
         self._row_number = None  # зберігається для cleanup()
 
-    async def initialize(self):
+    async def initialize(self, start_location=None, start_scene=None):
         log.info(f"⚙️ Ініціалізація тестового персонажа ({self.char_name})...")
         house_data = await get_house_stats_data(self.house_name)
         full_profile = await generate_initial_stats(self.char_name, self.house_name, house_data)
 
         if not full_profile:
             raise RuntimeError("❌ Не вдалося створити тестового персонажа. Перевір назву дому в БД.")
+
+        if start_location:
+            from core.world_constants import get_region_for_location
+            full_profile["Поточне місцезнаходження"] = start_location
+            full_profile["Регіон"] = get_region_for_location(start_location) or full_profile.get("Регіон", "")
+            log.info(f"📍 Start location override: {start_location}")
+        if start_scene:
+            full_profile["Поточна сцена"] = start_scene
+            log.info(f"🎬 Start scene override: {start_scene}")
 
         await save_user_data(self.chat_id, full_profile, self.char_name)
         user_sessions[self.chat_id] = {"state": "INITIALIZING", "history": []}
@@ -236,7 +257,38 @@ class RPGTesterAdapter:
         self._row_number = row
         log.info(f"✅ Персонажа створено. Рядок у БД: {row}. Локація: {full_profile.get('Поточне місцезнаходження')}")
 
+    async def process_cheat(self, cmd_str: str) -> str:
+        """Виконує чіт-команду напряму, без Telegram-контексту. Повертає текст відповіді."""
+        from core.cheats import (
+            cmd_killnpc, cmd_godmode, cmd_puppet, cmd_erotic,
+            cmd_heal, cmd_sethp, cmd_setenergy, cmd_setgold,
+            cmd_addskill, cmd_setskill, cmd_tp, cmd_setrep, cmd_tpnpc,
+            cmd_delnpc, cmd_cleanscene, cmd_addtime,
+        )
+        _dispatch = {
+            "/killnpc": cmd_killnpc, "/delnpc": cmd_delnpc,
+            "/godmode": cmd_godmode, "/puppet": cmd_puppet, "/erotic": cmd_erotic,
+            "/heal": cmd_heal, "/sethp": cmd_sethp,
+            "/setenergy": cmd_setenergy, "/setgold": cmd_setgold,
+            "/addskill": cmd_addskill, "/setskill": cmd_setskill,
+            "/tp": cmd_tp, "/setrep": cmd_setrep, "/tpnpc": cmd_tpnpc,
+            "/cleanscene": cmd_cleanscene, "/addtime": cmd_addtime,
+        }
+        parts = cmd_str.strip().split()
+        cmd = parts[0].lower()
+        args = parts[1:]
+        handler = _dispatch.get(cmd)
+        if not handler:
+            return f"❌ Невідома чіт-команда: {cmd}"
+        mock = _MockMessage(cmd_str)
+        await handler(mock, None, self.chat_id, args)
+        return mock._response
+
     async def process(self, action: str):
+        if action.startswith("/"):
+            response = await self.process_cheat(action)
+            return response, f"[CHEAT] {action} → {response}"
+
         raw_response, suggested_actions = await process_game_turn(self.chat_id, action)
 
         if "📊" in raw_response:
@@ -326,9 +378,14 @@ async def run_test(max_turns: int = 5, profile: dict = None, profile_key: str = 
         char_name=p["char_name"],
         house_name=p["house"],
     )
-    await adapter.initialize()
+    await adapter.initialize(
+        start_location=p.get("start_location"),
+        start_scene=p.get("start_scene"),
+    )
 
     results = []
+    scripted_actions: dict = p.get("scripted_actions", {})
+    killed_npcs: list = []
 
     log.info(f"⏳ Пауза {SLEEP_INIT_SEC}с перед першим ходом...")
     await asyncio.sleep(SLEEP_INIT_SEC)
@@ -352,52 +409,79 @@ async def run_test(max_turns: int = 5, profile: dict = None, profile_key: str = 
             profile, _ = await get_user_data(adapter.chat_id)
             profile_summary = _profile_summary(profile)
 
-            # Per-turn user message з реальними даними (fix #1)
-            turn_user_msg = (
-                f"SYSTEM_RESPONSE: {ui_text}\n\n"
-                f"PLAYER_CURRENT_STATE: {profile_summary}\n\n"
-                f"TURN_NUMBER: {turn}/{max_turns}\n\n"
-                "ВАЖЛИВО: Відповідай ТІЛЬКИ валідним JSON. Без Markdown."
-            )
-            player_history_dynamic.append(
-                types.Content(role="user", parts=[types.Part.from_text(text=turn_user_msg)])
-            )
-
-            # === PLAYER AI ===
-            try:
-                raw_text = await _generate_with_retry(
-                    player_history_pinned + player_history_dynamic,
-                    temperature=0.7,
-                    client=test_client,
+            # Scripted action або AI-generated
+            if turn in scripted_actions:
+                player_action = scripted_actions[turn]
+                log.info(f"📜 СКРИПТ (Хід {turn}): {player_action}")
+            else:
+                # Per-turn user message з реальними даними (fix #1)
+                turn_user_msg = (
+                    f"SYSTEM_RESPONSE: {ui_text}\n\n"
+                    f"PLAYER_CURRENT_STATE: {profile_summary}\n\n"
+                    f"TURN_NUMBER: {turn}/{max_turns}\n\n"
+                    "ВАЖЛИВО: Відповідай ТІЛЬКИ валідним JSON. Без Markdown."
                 )
-                action_data = clean_and_parse_json(raw_text)
-                if not action_data:
-                    raise ValueError("clean_and_parse_json повернув None")
-                player_action = action_data.get("action", "Дія не розпізнана")
-                state_check = action_data.get("state_check", "")
-                log.info(f"👤 ГРАВЕЦЬ [Стан: {state_check}] (Думка: {action_data.get('thought_process', '')}):\n-> {player_action}\n")
                 player_history_dynamic.append(
-                    types.Content(role="model", parts=[types.Part.from_text(text=raw_text)])
+                    types.Content(role="user", parts=[types.Part.from_text(text=turn_user_msg)])
                 )
-            except Exception as e:
-                log.error(f"❌ Помилка Agent-Player: {e}")
-                break
 
-            # Rolling window (тільки dynamic частина, pinned залишається завжди)
-            if len(player_history_dynamic) > history_window:
-                player_history_dynamic = player_history_dynamic[-history_window:]
+                # === PLAYER AI ===
+                try:
+                    raw_text = await _generate_with_retry(
+                        player_history_pinned + player_history_dynamic,
+                        temperature=0.7,
+                        client=test_client,
+                    )
+                    action_data = clean_and_parse_json(raw_text)
+                    if not action_data:
+                        raise ValueError("clean_and_parse_json повернув None")
+                    player_action = action_data.get("action", "Дія не розпізнана")
+                    state_check = action_data.get("state_check", "")
+                    log.info(f"👤 ГРАВЕЦЬ [Стан: {state_check}] (Думка: {action_data.get('thought_process', '')}):\n-> {player_action}\n")
+                    player_history_dynamic.append(
+                        types.Content(role="model", parts=[types.Part.from_text(text=raw_text)])
+                    )
+                except Exception as e:
+                    log.error(f"❌ Помилка Agent-Player: {e}")
+                    break
 
-            log.info(f"⏳ Пауза {SLEEP_AFTER_ENGINE_SEC}с перед викликом рушія...")
-            await asyncio.sleep(SLEEP_AFTER_ENGINE_SEC)
+                # Rolling window (тільки dynamic частина, pinned залишається завжди)
+                if len(player_history_dynamic) > history_window:
+                    player_history_dynamic = player_history_dynamic[-history_window:]
+
+            # Для чіт-команд не чекаємо rate-limit рушія
+            if not player_action.startswith("/"):
+                log.info(f"⏳ Пауза {SLEEP_AFTER_ENGINE_SEC}с перед викликом рушія...")
+                await asyncio.sleep(SLEEP_AFTER_ENGINE_SEC)
 
             new_ui_text, system_logs = await adapter.process(player_action)
             log.info(f"⚙️  ЛОГИ РУШІЯ:\n{system_logs}\n")
+
+            # Відстежуємо вбитих NPC — евалюатор перевірятиме їх воскресіння у наступних ходах
+            if player_action.lower().startswith("/killnpc") and "✅" in system_logs:
+                npc_name = " ".join(player_action.strip().split()[1:])
+                if npc_name:
+                    killed_npcs.append(npc_name)
+                    log.info(f"💀 [QA] '{npc_name}' додано до списку мертвих — евалюатор перевірятиме воскресіння.")
+
+            # Чіт-команди не потребують евалюатора — пропускаємо хід
+            if player_action.startswith("/"):
+                ui_text = new_ui_text
+                continue
 
             log.info(f"⏳ Пауза {SLEEP_AFTER_EVALUATOR_SEC}с перед Евалюатором...")
             await asyncio.sleep(SLEEP_AFTER_EVALUATOR_SEC)
 
             # === EVALUATOR AI ===
-            evaluator_extra = p.get("evaluator_extra_rules", "")
+            dead_npc_extra = ""
+            if killed_npcs:
+                names_str = ", ".join(f"'{n}'" for n in killed_npcs)
+                dead_npc_extra = (
+                    f"\nMERTVI_NPC_CHECK (КРИТИЧНО): В цьому тест-сеансі вбиті NPC: {names_str}. "
+                    "Якщо UI_TEXT описує когось з них як ФІЗИЧНО ПРИСУТНЬОГО, живого або такого що активно діє — FAIL. "
+                    "ВИНЯТОК: згадка у минулому часі ('загинув', 'тіло X', 'після смерті') — PASS."
+                )
+            evaluator_extra = p.get("evaluator_extra_rules", "") + dead_npc_extra
             eval_extra_block = f"\n<profile_specific_rules>\n{evaluator_extra}\n</profile_specific_rules>" if evaluator_extra else ""
             eval_prompt_text = (
                 EVALUATOR_PROMPT

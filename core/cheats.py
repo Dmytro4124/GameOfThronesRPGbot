@@ -10,7 +10,7 @@ from database.sheets import db
 from database.canon_npc import _score_to_relation_text
 from core.mechanics import safe_int
 from core.world_constants import is_valid_location, get_region_for_location
-from config import TAB_NPC, GODMODE_USERS, PUPPET_USERS
+from config import TAB_NPC, GODMODE_USERS, PUPPET_USERS, EROTIC_USERS
 
 
 # ─────────────────────────── Helpers ────────────────────────────
@@ -389,6 +389,11 @@ async def cmd_killnpc(message, bot, chat_id, args):
         return f"✅ NPC '{matched_name}' позначено як Dead"
 
     result = await asyncio.to_thread(_sync_killnpc)
+    if result.startswith("✅"):
+        from database.operations import evict_npc_from_cache, refresh_npc_database
+        npc_name_matched = result.split("'")[1]
+        await refresh_npc_database()          # спочатку resync (може повернути стале)
+        evict_npc_from_cache(npc_name_matched)  # потім гарантоване видалення — завжди останнє
     await message.answer(result)
 
 
@@ -460,6 +465,7 @@ async def cmd_debug(message, bot, chat_id, args):
         await message.answer("❌ Профіль не знайдено"); return
     godmode_flag = "ON" if chat_id in GODMODE_USERS else "OFF"
     puppet_flag = "ON" if chat_id in PUPPET_USERS else "OFF"
+    erotic_flag = "ON" if chat_id in EROTIC_USERS else "OFF"
     name_key = "Ім'я"
     hp_key = "Здоров'я"
     p_name = profile.get(name_key, '?')
@@ -484,7 +490,7 @@ async def cmd_debug(message, bot, chat_id, args):
         f"Регіон: {p_region}\n"
         f"Час: {p_time}\n"
         f"Інвентар: {p_inv}\n"
-        f"Godmode: {godmode_flag} | Puppet: {puppet_flag}"
+        f"Godmode: {godmode_flag} | Puppet: {puppet_flag} | Erotic: {erotic_flag}"
     )
     await message.answer(text)
 
@@ -496,6 +502,15 @@ async def cmd_puppet(message, bot, chat_id, args):
     else:
         PUPPET_USERS.add(chat_id)
         await message.answer("🟢 Режим Ляльковода УВІМКНЕНО — всі NPC беззаперечно лояльні")
+
+
+async def cmd_erotic(message, bot, chat_id, args):
+    if chat_id in EROTIC_USERS:
+        EROTIC_USERS.discard(chat_id)
+        await message.answer("🔴 Еротичний режим ВИМКНЕНО")
+    else:
+        EROTIC_USERS.add(chat_id)
+        await message.answer("🔞 Еротичний режим УВІМКНЕНО — явні описи інтимних сцен")
 
 
 # ─────────────────────────── Диспетчер ───────────────────────────
@@ -518,7 +533,7 @@ async def handle_cheat_command(message, bot):
         "/clearinv": cmd_clearinv,
         "/addskill": cmd_addskill,
         "/setskill": cmd_setskill,
-        "/tp": cmd_tp,
+        "/tТакоp": cmd_tp,
         "/addtime": cmd_addtime,
         "/tpnpc": cmd_tpnpc,
         "/setrep": cmd_setrep,
@@ -528,6 +543,7 @@ async def handle_cheat_command(message, bot):
         "/godmode": cmd_godmode,
         "/debug": cmd_debug,
         "/puppet": cmd_puppet,
+        "/erotic": cmd_erotic,
     }
     handler = dispatch.get(cmd)
     if handler:

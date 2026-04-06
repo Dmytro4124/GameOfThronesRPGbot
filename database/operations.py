@@ -23,6 +23,7 @@ from config import (
 # ================= ГЛОБАЛЬНІ КЕШІ ТА КОНСТАНТИ =================
 LORE_CACHE = []
 NPC_CACHE = {}
+DEAD_NPC_NAMES: set = set()  # Імена NPC зі Status=Dead; оновлюється разом з NPC_CACHE
 LORE_VECTORS = None
 
 EMBEDDINGS_FILE = "lore_embeddings.npy"
@@ -322,7 +323,7 @@ async def get_relevant_context(user_text, current_location):
 
 async def refresh_npc_database():
     """Асинхронно завантажує NPC з Google Sheets у пам'ять бота (З урахуванням Сцени)"""
-    global NPC_CACHE
+    global NPC_CACHE, DEAD_NPC_NAMES
 
     def _sync_refresh():
         try:
@@ -331,11 +332,17 @@ async def refresh_npc_database():
 
             raw_data = worksheet.get_all_records()
             new_cache = {}
+            dead_names = set()
             count = 0
 
             for row in raw_data:
                 status = str(row.get("Status", "Active")).strip()
-                if status.lower() != "active": continue
+                if status.lower() != "active":
+                    if status.lower() == "dead":
+                        dead_name = str(row.get("Name", "")).strip()
+                        if dead_name:
+                            dead_names.add(dead_name)
+                    continue
 
                 loc = str(row.get("Location", "GLOBAL")).strip()
                 scene = str(row.get("Scene", "Невідомо")).strip()  # ДОДАНО СЦЕНУ
@@ -390,17 +397,30 @@ async def refresh_npc_database():
                 })
                 count += 1
 
-            return new_cache, count
+            return new_cache, dead_names, count
         except Exception as e:
             print(f"❌ [NPC DB ERROR] {e}")
-            return None, 0
+            return None, set(), 0
 
-    result, count = await asyncio.to_thread(_sync_refresh)
+    result, dead_result, count = await asyncio.to_thread(_sync_refresh)
     if result is not None:
         NPC_CACHE = result
-        print(f"✅ [NPC DB] Завантажено {count} персонажів.", flush=True)
+        DEAD_NPC_NAMES = dead_result
+        print(f"✅ [NPC DB] Завантажено {count} активних, {len(dead_result)} мертвих персонажів.", flush=True)
         return True
     return False
+
+
+def get_dead_npc_names() -> set:
+    """Повертає копію множини імен мертвих NPC (Status=Dead)."""
+    return set(DEAD_NPC_NAMES)
+
+
+def evict_npc_from_cache(matched_name: str):
+    """Миттєво видаляє NPC з NPC_CACHE без звернення до Google Sheets."""
+    global NPC_CACHE
+    for loc in list(NPC_CACHE.keys()):
+        NPC_CACHE[loc] = [n for n in NPC_CACHE[loc] if n.get("name") != matched_name]
 
 
 def get_location_npcs(current_location, current_scene, current_region=None):
@@ -507,7 +527,10 @@ def find_best_match(query_name, distinct_names, threshold=0.75):
     return None
 
 
-async def update_npcs_in_db(updates, legal_names_list_deprecated=None):
+async def update_npcs_in_db(updates, legal_names_list_deprecated=None,
+                            player_new_location: str = None, player_location_changed: bool = False,
+                            player_new_scene: str = None, player_scene_changed: bool = False,
+                            companion_npcs: list = None):
     """
     Асинхронно оновлює існуючих NPC.
     Вбудовано жорстку нормалізацію регістру та апострофів для difflib.
@@ -568,6 +591,15 @@ async def update_npcs_in_db(updates, legal_names_list_deprecated=None):
                 else:
                     print(f"✅ [MATCH] ‘{real_original_name}’ знайдено.")
 
+                # Смерть незворотна: якщо NPC вже Dead у DB — блокуємо будь-які оновлення
+                if "status" in col_map:
+                    status_col_idx = col_map["status"] - 1
+                    row_data = all_values[row_idx - 1]
+                    current_db_status = row_data[status_col_idx].strip().lower() if len(row_data) > status_col_idx else ""
+                    if current_db_status == "dead":
+                        print(f"🚫 [СМЕРТЬ НЕЗВОРОТНА] ‘{real_original_name}’ вже мертвий — оновлення заблоковано.")
+                        continue
+
                 for field, new_val in update.items():
                     field_key = field.lower()
                     if field_key == "name": continue
@@ -585,11 +617,56 @@ async def update_npcs_in_db(updates, legal_names_list_deprecated=None):
                             print(f"🚫 [NPC ЛОКАЦІЯ ЗАБЛОКОВАНА] ШІ намагався записати неканонічне значення "
                                   f"’{val_str}’ у Location для NPC ‘{real_original_name}’. Пропускаємо.")
                             continue
+                        if player_location_changed and player_new_location and val_str.strip() == player_new_location.strip():
+                            if real_original_name not in (companion_npcs or []):
+                                print(f"🚫 [TELEPORT BLOCKED] ШІ намагався перемістити ‘{real_original_name}’ "
+                                      f"у ‘{val_str}’ = нова локація гравця. Пропускаємо телепортацію.")
+                                continue
+                            else:
+                                print(f"✅ [COMPANION TRAVEL] ‘{real_original_name}’ подорожує з гравцем → ‘{val_str}’")
 
                     if field_key == "region" and not is_valid_region(val_str):
                         print(f"🚫 [NPC РЕГІОН ЗАБЛОКОВАНИЙ] Неканонічне значення ‘{val_str}’ "
                               f"для NPC ‘{real_original_name}’. Пропускаємо.")
                         continue
+
+                    if field_key == "scene":
+                        words = val_str.split()
+                        if len(words) > 3:
+                            val_str = " ".join(words[:3])
+                            print(f"✂️ [СЦЕНА ОБРІЗАНА] ‘{new_val}’ → ‘{val_str}’ для ‘{real_original_name}’")
+                        if val_str.strip().lower() in ("невідомо", "global", "unknown", ""):
+                            print(f"🚫 [СЦЕНА ЗАБЛОКОВАНА] Сміттєве значення ‘{val_str}’ для ‘{real_original_name}’.")
+                            continue
+                        # Валідація через LOCATION_SCENES — autocorrect через difflib
+                        if "location" in col_map:
+                            _loc_col_idx = col_map["location"] - 1
+                            _row_data = all_values[row_idx - 1]
+                            _npc_location = _row_data[_loc_col_idx].strip() if len(_row_data) > _loc_col_idx else ""
+                            if _npc_location:
+                                from core.world_constants import is_valid_scene, get_scenes_for_location
+                                if not is_valid_scene(_npc_location, val_str):
+                                    _valid = get_scenes_for_location(_npc_location)
+                                    _close = difflib.get_close_matches(val_str, _valid, n=1, cutoff=0.4)
+                                    if _close:
+                                        print(f"🔧 [СЦЕНА АВТОКОРЕКЦІЯ] ‘{val_str}’ → ‘{_close[0]}’ для ‘{real_original_name}’")
+                                        val_str = _close[0]
+                                    else:
+                                        print(f"🚫 [СЦЕНА НЕВАЛІДНА] ‘{val_str}’ не в списку для ‘{_npc_location}’. Пропускаємо.")
+                                        continue
+
+                    # Scene Drag Guard: блокуємо перетягування NPC до нової сцени гравця
+                    if field_key == "scene" and player_scene_changed and player_new_scene:
+                        if val_str.strip().lower() == player_new_scene.strip().lower():
+                            if real_original_name in (companion_npcs or []):
+                                print(f"✅ [COMPANION SCENE] '{real_original_name}' переходить з гравцем → '{val_str}'")
+                            elif "scene" in col_map:
+                                _scene_col_idx = col_map["scene"] - 1
+                                _cur_npc_scene = row_data[_scene_col_idx].strip() if len(row_data) > _scene_col_idx else ""
+                                if _cur_npc_scene.lower() != player_new_scene.strip().lower():
+                                    print(f"🚫 [SCENE DRAG BLOCKED] '{real_original_name}' намагається перейти до "
+                                          f"'{val_str}' = нова сцена гравця. Поточна сцена NPC: '{_cur_npc_scene}'. Блокуємо.")
+                                    continue
 
                     # Memory_Anchor НЕ перезаписуємо напряму — збираємо для append_memory_anchor,
                     # щоб зберегти JSON-масив з 5 останніх подій (FIFO).

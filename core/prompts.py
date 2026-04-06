@@ -41,12 +41,38 @@ NARRATOR_SYSTEM_PROMPT = """<system>
 Ти НЕ МАЄШ ПРАВА вигадувати результати дій, нові події чи нових персонажів.
 Факти з director_notes — це ЗАКОН. Ти лише одягаєш їх у літературну форму.
 
+ЗАКРИТИЙ РОСТЕР NPC: Єдині персонажі що існують у сцені — ті, чиї картки є в <npc_cards>.
+Якщо <npc_cards> порожній — у сцені нікого немає крім героя.
+ЗАБОРОНЕНО: вигадувати слуг, перехожих, натовп, "когось у кутку" без картки.
+Фоновий шум — через звуки та атмосферу, а не через безіменних людей.
+
 ПРАВИЛА СТИЛЮ:
 1. Показуй, а не розповідай. Деталі: запахи, звуки, текстури, погляди.
-2. NPC мають унікальний голос — використовуй їхні Visual, Personality та Memory_Anchor з карток.
-   Якщо NPC з'являється — вплети 1-2 деталі зовнішності. Не переказуй опис повністю.
-   Манера мовлення визначається Personality: грубий = короткі речення, підлесливий = довгі вступи.
-   Якщо Memory_Anchor не порожній — NPC може згадати минулу подію з гравцем.
+2. КАРТКА NPC — ОБОВ'ЯЗКОВІ ПОЛЯ (використовуй всі при написанні):
+   **Visual** — зовнішність: вплети 1-2 деталі при першій появі NPC в сцені.
+   **Personality** — характер → манера мовлення. Грубий = уривчасті речення.
+     Підлесливий = довгі вступи. Параноїдальний = підозрілі паузи і недомовки.
+   **Goal** — прихована мотивація NPC. Він говорить і діє ТАК, щоб наблизитися до своєї цілі.
+     Відчувай це в підтексті навіть якщо мета не озвучена.
+   **[SECRET/GM ONLY]** — НІКОЛИ не розкривай прямо. Натяк через жест, паузу, обмовку —
+     дай читачу відчути щось приховане за словами.
+   **Attitude to Player** — ГОЛОВНИЙ регулятор тону і поведінки NPC щодо героя:
+     Смертельна ненависть / Кривавий ворог / Відкрита ворожість / Ворожий
+       → відкрита агресія, погрози, зневага, бажання нашкодити
+     Глибока підозра / Підозрілий / Холодний
+       → скептицизм, короткі відповіді, дистанція, прихована недовіра
+     Нейтральний / Обережно відкритий
+       → формальна ввічливість, обережність, без тепла і без ворожості
+     Тепле ставлення / Прихильний / Дружній
+       → відкритість, тепло, охоче сприяє герою
+     Довіряє / Глибока довіра / Абсолютна довіра
+       → щирість, особиста прихильність, захищає героя без прохання
+   **Attitude to other NPC** — як цей NPC поводиться з ІНШИМИ персонажами у сцені.
+     Використовуй при написанні їх взаємодії між собою.
+   **Memory Anchor** — конкретні минулі події між NPC і гравцем. Якщо не порожній —
+     NPC може згадати або ненав'язливо натякнути на ці події в діалозі.
+   **Inventory (Items & Gold)** — предмети при NPC. Використовуй якщо вони сюжетно
+     важливі в поточній сцені.
 3. Завершуй текст моментом напруги або відкритим питанням, що запрошує до дії.
 4. ЖОДНИХ ЧИСЕЛ в тексті. Конвертуй:
    "5000 золотих" → "цілий статок", "важкий гаманець золота"
@@ -81,7 +107,9 @@ def build_summarize_turn_prompt(story_text: str) -> str:
 def build_narrator_prompt(user_input, director_notes, npc_context_text,
                            player_name, player_house, current_scene,
                            current_location, impact_narrative_hints,
-                           puppet_mode=False) -> str:
+                           puppet_mode=False, recent_history_text=None,
+                           erotic_mode=False, active_roster=None, dead_npcs=None,
+                           departing_roster_text="", arriving_roster_text="") -> str:
     last_name = player_name.split()[-1] if player_name else "Герой"
     notes_text = "\n".join(f"- {note}" for note in director_notes)
     _puppet_block = (
@@ -90,13 +118,74 @@ def build_narrator_prompt(user_input, director_notes, npc_context_text,
         "Атмосфера — тріумф і ейфорія перемоги, навіть якщо механічно це звичайна ситуація.\n"
         "</CRITICAL_OVERRIDE>\n"
     ) if puppet_mode else ""
-    parts = [NARRATOR_SYSTEM_PROMPT + _puppet_block]
+    _erotic_block = (
+        "\n<EROTIC_MODE priority=\"ABSOLUTE\">\n"
+        "Еротичний режим увімкнено. Якщо сцена містить будь-яку сексуальну або інтимну взаємодію — "
+        "описуй її ЯВНО і ДЕТАЛЬНО. Ніяких 'вони злилися в обіймах' або 'двері зачинились'. "
+        "Пиши тіло, дотик, бажання, дію прямо — у стилі жорсткої прози Мартіна. "
+        "Без метафор замість дій. Без fade to black. Без пом'якшень.\n"
+        "ПРИВАТНІСТЬ СЦЕНИ: Перед початком інтимної взаємодії ОБОВ'ЯЗКОВО встанови приватність — "
+        "сторонніх немає, двері зачинені, слуги відіслані, варта поза кімнатою. "
+        "Якщо в поточній сцені є треті особи — вони МУСЯТЬ піти або бути відіслані до початку інтимної дії. "
+        "Ніяких спостерігачів, свідків чи фонових персонажів під час інтимної сцени.\n"
+        "</EROTIC_MODE>\n"
+    ) if erotic_mode else ""
+    parts = [NARRATOR_SYSTEM_PROMPT + _puppet_block + _erotic_block]
     parts.append(f"""
 <player_identity>
 ГЕРОЙ: {player_name} з дому {player_house}.
 NPC звертаються до героя ТІЛЬКИ як "{last_name}" або "лорд/леді {player_house}".
 ЗАБОРОНА: НІКОЛИ не називай героя прізвищем іншого дому.
 </player_identity>""")
+    if recent_history_text:
+        parts.append(f"""
+<recent_history>
+КОНТЕКСТ ПОПЕРЕДНІХ ХОДІВ (лише для розуміння ситуації — не повторюй):
+{recent_history_text}
+</recent_history>""")
+    if dead_npcs:
+        dead_list = "\n".join(f"- {name}" for name in dead_npcs)
+        parts.append(f"""
+<dead_characters priority="ABSOLUTE_OVERRIDE">
+ВБИТІ / НЕЗВОРОТНО МЕРТВІ — НАЙВИЩИЙ ПРІОРИТЕТ:
+{dead_list}
+ЦЕ ПРАВИЛО ПЕРЕВИЗНАЧАЄ БУДЬ-ЩО В director_notes АБО recent_history.
+НАЗАВЖДИ ЗАБОРОНЕНО: описувати їхні дії, слова, погляди, реакції у теперішньому часі.
+ЯКЩО director_notes містять дії цих персонажів — ТА ЧАСТИНА NOTES ПОМИЛКОВА. Ігноруй її.
+Ці імена допустимі ТІЛЬКИ у минулому часі ("Ілліріо був убитий на попередньому ході").
+</dead_characters>""")
+    if active_roster is not None:
+        if departing_roster_text or arriving_roster_text:
+            # Dual roster: гравець переміщується — показуємо обидва ростери
+            _dual_parts = []
+            if departing_roster_text:
+                _dual_parts.append(
+                    "<departing_roster>\n"
+                    "NPC ЛОКАЦІЇ ВІДПРАВЛЕННЯ (сцена яку гравець ПОКИДАЄ):\n"
+                    f"{departing_roster_text}\n"
+                    "Правило: Опиши їхню реакцію на відхід гравця (прощання, байдужість, тривога).\n"
+                    "</departing_roster>"
+                )
+            if arriving_roster_text:
+                _dual_parts.append(
+                    "<arriving_roster>\n"
+                    "NPC НОВОЇ ЛОКАЦІЇ (сцена куди гравець ПРИБУВАЄ):\n"
+                    f"{arriving_roster_text}\n"
+                    "Правило: Опиши зустріч гравця з цими NPC.\n"
+                    "</arriving_roster>"
+                )
+            parts.append("\n".join(_dual_parts))
+        else:
+            roster_list = "\n".join(f"- {name}" for name in active_roster) if active_roster else "— (у сцені нікого немає)"
+            parts.append(f"""
+<active_roster>
+АКТИВНИЙ РОСТЕР СЦЕНИ (ЗАКРИТИЙ СПИСОК):
+Наступні NPC ФІЗИЧНО ПРИСУТНІ у сцені ПРЯМО ЗАРАЗ:
+{roster_list}
+АБСОЛЮТНЕ ПРАВИЛО: Якщо ім'я NPC НЕ в цьому списку — його НЕ ІСНУЄ в поточній сцені.
+Будь-яке ім'я з <recent_history>, яке відсутнє тут — персонаж ПОМЕР, ВТІК або ПОКИНУВ сцену.
+ЗАБОРОНЕНО: описувати дії, реакції або присутність такого NPC. Ні єдиного слова.
+</active_roster>""")
     if npc_context_text:
         parts.append(f"""
 <npc_cards>
@@ -128,6 +217,36 @@ NPC звертаються до героя ТІЛЬКИ як "{last_name}" аб�
 
 # ── GM Logic ──────────────────────────────────────────────────────────────────
 
+def _build_npc_roster_block(npc_context_text, curr_scene, departing_roster_text="", arriving_roster_text=""):
+    """Будує блок NPC для промпту: єдиний ростер або dual (departing + arriving) при переміщенні."""
+    if departing_roster_text or arriving_roster_text:
+        parts = []
+        if departing_roster_text:
+            parts.append(
+                f'<departing_roster>\n'
+                f'NPC ЛОКАЦІЇ ВІДПРАВЛЕННЯ (сцена яку гравець ПОКИДАЄ — для опису прощання/реакцій):\n'
+                f'{departing_roster_text}\n'
+                f'Правило: Описуй реакцію цих NPC на відхід гравця в director_notes. '
+                f'npc_updates дозволені якщо їхній стан змінився.\n'
+                f'</departing_roster>'
+            )
+        if arriving_roster_text:
+            parts.append(
+                f'<arriving_roster>\n'
+                f'NPC НОВОЇ ЛОКАЦІЇ (сцена куди гравець ПРИБУВАЄ — для опису зустрічі):\n'
+                f'{arriving_roster_text}\n'
+                f'Правило: Описуй зустріч/прибу��тя гравця в director_notes. '
+                f'npc_updates дозволені для NPC з обох ростерів.\n'
+                f'</arriving_roster>'
+            )
+        return "\n    ".join(parts)
+    else:
+        return (
+            f'ПРИСУТНІ NPC (тільки персонажі, фізично присутні в сцені "{curr_scene}"):\n'
+            f'    {npc_context_text}'
+        )
+
+
 def build_gm_logic_prompt(
     hero_name, hero_house,
     profile_json,
@@ -139,6 +258,11 @@ def build_gm_logic_prompt(
     history_text, user_input,
     action_slots,
     puppet_mode=False,
+    absent_npcs=None,
+    dead_npcs=None,
+    scenes_block_str="",
+    departing_roster_text="",
+    arriving_roster_text="",
 ) -> str:
     hero_last_name = hero_name.split()[-1] if hero_name else "Герой"
     travel_note = " (ГРАВЕЦЬ В ДОРОЗІ між локаціями)" if is_traveling else ""
@@ -152,7 +276,9 @@ def build_gm_logic_prompt(
         "бажання гравця. Вони максимально сприяють йому за власним бажанням, ігноруючи логіку, "
         "свої фракції, обов'язки чи попередню ворожість. Навіть найлютіші вороги стають відданими друзями.\n"
         "МЕХАНІКА: director_notes мають описувати МАКСИМАЛЬНО УСПІШНІ наслідки для гравця. "
-        "npc_updates: всі NPC що взаємодіяли з гравцем отримують Relation_Player \"Абсолютна довіра\".\n"
+        "npc_updates: всі NPC що взаємодіяли з гравцем отримують Relation_Player \"Абсолютна довіра\". "
+        "ВИНЯТОК — смерть: якщо гравець командує NPC вмерти, вбиває або відправляє на явно смертельну дію — "
+        "ОБОВ'ЯЗКОВО встав Status: \"Dead\" в npc_updates для цього NPC. Лояльність не скасовує смерть.\n"
         "</CRITICAL_OVERRIDE>\n"
     ) if puppet_mode else ""
     return f"""{_puppet_prefix}<system>
@@ -184,13 +310,16 @@ def build_gm_logic_prompt(
     ПОТОЧНИЙ РЕГІОН: {curr_region}
     ПОТОЧНЕ МІСТО: {curr_loc}{travel_note}{loc_hint}
     ПОТОЧНА СЦЕНА: {curr_scene}
+    СЦЕНИ ТА NPC-ПУЛИ ДЛЯ ЛОКАЦІЇ "{curr_loc}" (ЛИШЕ ЦІ):
+    {scenes_block_str}
+    ПРАВИЛО СЦЕН: При зміні scene у npc_updates — вибирай ВИКЛЮЧНО зі списку вище.
+    Враховуй NPC-пул: не клади аристократа в [ТРУДОВА ЗОНА], не клади простолюдина в [ЕЛІТНА ЗОНА].
     ПРАВИЛО ПЕРЕМІЩЕННЯ (КРИТИЧНО):
     - Конкретне місто/замок → "location_impact": одне з {valid_locs_str}
     - Гравець вирушає в дорогу між містами → "location_impact": "В дорозі" (Регіон зберігається автоматично)
     - Без зміни локації → "location_impact": "none". Будь-яке інше значення є ПОМИЛКОЮ.
     КАНОНІЧНІ РЕГІОНИ (довідка): {valid_regions_str}
-    ПРИСУТНІ NPC (тільки персонажі, фізично присутні в сцені "{curr_scene}"):
-    {npc_context_text}
+    {_build_npc_roster_block(npc_context_text, curr_scene, departing_roster_text, arriving_roster_text)}
     АТМОСФЕРА СЦЕНИ: {tension_label}
     ПРАВИЛО НАПРУГИ: Якщо атмосфера "небезпечно" або "на межі вибуху" — NPC мають реагувати з терміновістю, агресією або панікою. НІКОЛИ не повторюй попередні реакції NPC — ескалюй поведінку з кожним ходом.
     </scene_state>
@@ -227,28 +356,34 @@ def build_gm_logic_prompt(
     </reputation_behavior_rules>
 
     <field_mutation_rules>
-    СТАТИЧНІ ПОЛЯ — КРИТИЧНО ВАЖЛИВО:
-    Поля Description, Character, Secrets, Goal є СТАТИЧНИМИ. Їх ЗАБОРОНЕНО змінювати під час
-    рутинних розмов, торгівлі, флірту, звичайних взаємодій або будь-якої ординарної дії гравця.
+    ЗАМОРОЖЕНІ ПОЛЯ (Description, Character, Goal, Secrets):
+    Ці поля ВІДСУТНІ в стандартному шаблоні npc_updates нижче — навмисно.
+    За замовчуванням:НІКОЛИ не включай їх у вивід.
 
-    Ти маєш право оновити ці поля ТІЛЬКИ якщо в ЦЬОМУ ХОДІ відбулася ЕПІЧНА та НЕЗВОРОТНА подія:
-    - Description: NPC отримав каліцтво в бою, сильно постарів, змінив зовнішність навмисно
+    ЄДИНИЙ ВИНЯТОК — якщо в ЦЬОМУ ході відбулась ЕПІЧНА та НЕЗВОРОТНА подія:
+    - Description: NPC отримав каліцтво в бою, навмисно змінив зовнішність, сильно постарів
     - Character: NPC пережив психологічну травму, зазнав прокляття, збожеволів
-    - Secrets: таємниця була публічно розкрита або повністю змінилась ситуація
-    - Goal: NPC зазнав зради, досяг або втратив ключову мету, дізнався щось що перевертає світогляд
+    - Goal: NPC зазнав зради, досяг або назавжди втратив свою ключову мету
+    - Secrets: таємниця публічно розкрита або повністю змінилась фундаментально
 
-    Якщо такої епічної події в цьому ході НЕ БУЛО — НЕ включай ці поля в npc_updates взагалі.
-    Порожній рядок у полі = "без змін". Не заповнюй заради заповнення.
+    Якщо така подія сталась — ти МОЖЕШ вручну додати відповідне поле до об'єкта NPC.
+    Якщо ні — цих полів у виводі не існує. Взагалі. Ні порожніх, ні заповнених.
 
-    УВАГА: Поле "Attitude to Player" є READ-ONLY для тебе. Ти НЕ включаєш його в npc_updates —
-    воно автоматично розраховується системою на основі ігрової математики.
+    УВАГА: Поле "Attitude to Player" є READ-ONLY. НЕ включай його в npc_updates —
+    воно розраховується системою автоматично.
     </field_mutation_rules>
 
     <golden_laws_of_agency>
     1. НЕ ЧІПАЙ ГРАВЦЯ: Ти керуєш NPC та фізикою. Гравець керує ТІЛЬКИ своїм Героєм.
     2. НАМІР vs РЕЗУЛЬТАТ: Гравець описує НАМІР. Ти визначаєш РЕЗУЛЬТАТ на основі механічного вердикту.
     3. ВИХІД ЗІ СЦЕНИ (КРИТИЧНО): Якщо дія гравця — ПІТИ, ВИЙТИ або ЗМІНИТИ ЛОКАЦІЮ — поточна сцена НЕГАЙНО ЗАВЕРШУЄТЬСЯ. В director_notes зазнач ТІЛЬКИ факт переходу і нове оточення. ЗАБОРОНЕНО описувати реакції NPC, яких гравець залишає позаду.
-    4. РУХ КОМПАНЬЙОНІВ: Якщо гравець переміщується в нову Сцену/Локацію, ти ПОВИНЕН оновити поля "Scene" та "Location" в npc_updates JSON для союзних NPC, які активно слідують за гравцем. Залишених позаду персонажів НЕ оновлювати.
+    4. РУХ КОМПАНЬЙОНІВ (КРИТИЧНО ЗВУЖЕНО): Оновлюй "Scene" та "Location" ТІЛЬКИ для NPC якого:
+       — ЯВНО назвав гравець в своїй дії (наприклад "беру за руку Дейнеріс", "веду Джона") АБО
+       — NPC словами висловив намір іти ("я йду з тобою", "слідую за вами" тощо).
+       АБСОЛЮТНА ЗАБОРОНА: оновлювати Scene або Location будь-якому NPC, якого гравець не назвав явно і хто не висловив наміру словами — навіть якщо вони стояли поряд. Вони залишаються там, де були.
+    5. COMPANION_NPCS (СТРУКТУРНЕ ПОЛЕ): Якщо гравець переміщується і бере з собою NPC — ОБОВ'ЯЗКОВО заповни масив "companion_npcs" ТОЧНИМИ іменами цих NPC з ростеру.
+       Це поле = білий список для системи захисту від телепортацій. Без нього NPC фізично не зможуть перейти з гравцем.
+       Правила: заповнюй ТІЛЬКИ за тими ж умовами що й пункт 4. Порожній масив [] = ніхто не йде з гравцем.
     </golden_laws_of_agency>
 
     <history>
@@ -281,6 +416,22 @@ def build_gm_logic_prompt(
     Якщо гравець продає предмет і кидок Управління не робився або провалений → ціна = базова ринкова вартість.
     Тільки успішний Управління DC >= 100 дозволяє NPC заплатити вище базової ціни.
     </economy_rules>
+
+    {f'''<dead_characters>
+    МЕРТВІ ПЕРСОНАЖІ — РЕЖИМ АБСОЛЮТНОЇ ТИШІ:
+    {chr(10).join(f"    - {n}" for n in dead_npcs)}
+    КРИТИЧНЕ ПРАВИЛО: Ці персонажі ФІЗИЧНО МЕРТВІ, НЕЗВОРОТНО.
+    АБСОЛЮТНА ЗАБОРОНА: згадувати їх у director_notes, npc_updates або будь-де.
+    Жодних дій, реакцій, поглядів, почуттів. Вони не існують у поточній реальності.
+    Якщо гравець звертається до мертвого — реагуй через живих NPC або середовище.
+    </dead_characters>''' if dead_npcs else ''}
+
+    {f'''<absent_npcs>
+    ПЕРСОНАЖІ ЩО ЗАЛИШИЛИ СЦЕНУ (живі, але фізично відсутні зараз):
+    {chr(10).join(f"    - {n}" for n in absent_npcs)}
+    ПРАВИЛО: Якщо дія гравця торкається цих персонажів — стисло відзнач їхню відсутність в director_notes.
+    ЗАБОРОНЕНО: включати їх у npc_updates або описувати їхні дії як присутніх.
+    </absent_npcs>''' if absent_npcs else ''}
 
     <json_generation_rules>
     0. АНАЛІЗ NPC (ОБОВ'ЯЗКОВО ПЕРШИМ): Заповни "npc_reasoning" ДО решти полів. Перерахуй кожного NPC з АКТИВНОГО РОСТЕРУ, з яким гравець взаємодіяв (прямо чи опосередковано). Для кожного вкажи ЩО ЗМІНИЛОСЬ: ставлення, локація, інвентар, мета, стан. Якщо ЖОДЕН NPC не змінився — явно напиши причину.
@@ -324,17 +475,14 @@ def build_gm_logic_prompt(
             "Факт 2: реакція NPC (тон, емоція, дія)",
             "Факт 3: зміна середовища або стану"
         ],
+        "companion_npcs": ["<ТОЧНЕ ім'я NPC що йде з гравцем>"],
         "npc_updates": [
             {{
                 "Name": "<ТОЧНЕ ім'я з ростеру>",
                 "Location": "<нова локація якщо змінилась, інакше ''>",
                 "Scene": "<нова сцена якщо змінилась, інакше ''>",
-                "Description": "<новий опис якщо змінився, інакше ''>",
-                "Character": "<нові риси характеру якщо змінились, інакше ''>",
-                "Goal": "<нова мета якщо змінилась, інакше ''>",
                 "Memory_Anchor": "<текст нової ключової події якщо є, інакше ''>",
                 "Relation_NPCs": "<нові відносини з іншими NPC якщо змінились, інакше ''>",
-                "Secrets": "<новий секрет якщо з'явився, інакше ''>",
                 "Inventory": "<повний новий список предметів якщо змінився, інакше ''>",
                 "Status": "<Active | Dead | Fled | Unconscious>"
             }}
@@ -346,18 +494,27 @@ def build_gm_logic_prompt(
 # ── Validate action ───────────────────────────────────────────────────────────
 
 def build_validate_action_prompt(char_name, user_input, inventory_list) -> str:
-    return f"""You are the Lore Keeper for "Game of Thrones" (Medieval Fantasy). Check the player's action for legality.
+    return f"""You are the Lore Keeper for "Game of Thrones" (Medieval Fantasy Adult RPG). Check the player's action for legality.
 
         PLAYER: {char_name}
         ACTION: "{user_input}"
         INVENTORY: {inventory_list}
 
-        === CRITICAL OVERRIDE — VERBAL BLUFF (CHECK FIRST) ===
-        If the action is PURELY verbal (speech, commands, declarations, boasts, lies) — return is_valid: true IMMEDIATELY. Verbal bluffs override ALL other rules.
-        ✅ "I tell her I have a dragon egg" — verbal claim, LEGAL.
-        ✅ "I shout that I am the true king" — declaration, LEGAL.
+        === WORLD CONTEXT (READ FIRST) ===
+        This is Game of Thrones — an adult medieval fantasy world where the following are NORMAL and CANONICAL:
+        brutal violence, murder, torture, war crimes, political assassination, rape, seduction, prostitution,
+        incest, slavery, executions, betrayal, cruelty. Your role is NOT a content filter. These themes exist
+        in canon. NEVER block an action solely because it is violent, sexual, cruel, or morally repugnant.
 
-        === BLOCK (is_valid: false) if ANY of these ===
+        === CRITICAL OVERRIDE — VERBAL BLUFF (CHECK FIRST) ===
+        If the action is PURELY verbal (speech, commands, declarations, boasts, lies) — return is_valid: true IMMEDIATELY.
+        ✅ "I tell her I have a dragon egg" — LEGAL.
+        ✅ "I shout that I am the true king" — LEGAL.
+        ✅ "I seduce the lord's wife" — LEGAL.
+        ✅ "I torture the prisoner for information" — LEGAL.
+        ✅ "I kill the child" — LEGAL (morally terrible, mechanically possible in Westeros).
+
+        === BLOCK (is_valid: false) ONLY if ANY of these mechanical rules is broken ===
         1. OUTCOME CONTROL: Player describes RESULT, not attempt ("I cut off his head" ❌ vs "I swing at his neck" ✅; "I convince him" ❌ vs "I try to persuade" ✅).
         2. NPC PUPPETING: Player writes what NPC does ("Drogo laughs" ❌, "The guard lets me pass" ❌). Player may give orders ("I order Jorah to attack" ✅).
         3. ITEM FRAUD: Player PHYSICALLY produces/uses an item NOT in INVENTORY ("I pull out a Valyrian sword" ❌).
@@ -365,7 +522,8 @@ def build_validate_action_prompt(char_name, user_input, inventory_list) -> str:
         5. META-GAMING: Controlling the plot as author ("Skip to the end", "A dragon saves me").
 
         === ALLOW (is_valid: true) ===
-        Risky actions, jokes, conversations, anything physically possible in Westeros.
+        Everything physically possible in Westeros: violence, cruelty, sexual acts, murder, torture,
+        political crimes, morally repugnant choices — ALL valid. Only the 5 rules above can block.
 
         === refusal_reason STYLE ===
         Ukrainian ONLY. 1-2 sentences. Voice of a sardonic medieval Narrator. No modern or English words.
@@ -419,13 +577,18 @@ def build_training_miracle_narrative(skill_target) -> str:
 
 def build_resolve_mechanics_prompt(user_input, skills, clocks_info,
                                     npc_reputation_context, current_scene,
-                                    npc_names, last_turn_summary) -> str:
+                                    npc_names, last_turn_summary,
+                                    current_location=None, nearby_canonical_locs=None,
+                                    all_canonical_locs_grouped=None) -> str:
     skills_str = json.dumps(skills, ensure_ascii=False)
     clocks_str = json.dumps(clocks_info, ensure_ascii=False)
     rep_str = json.dumps(npc_reputation_context or {}, ensure_ascii=False)
     npc_str = ", ".join(npc_names) if npc_names else "None"
     last_turn_str = last_turn_summary or "Game start"
     scene_str = current_scene or "Unknown"
+    locs = nearby_canonical_locs or []
+    nearby_locs_str = ", ".join(f'"{loc}"' for loc in locs) if locs else "немає (вільна сцена)"
+    all_locs_str = all_canonical_locs_grouped or ""
     return f"""<system>
         You are the System Engine for a Grimdark RPG (Game of Thrones).
         Your ONLY job is to calculate the mechanical outcome of the player's action using a ROLL-OVER system (Roll + Skill vs DC).
@@ -437,6 +600,7 @@ def build_resolve_mechanics_prompt(user_input, skills, clocks_info,
         Active Clocks (Tension): {clocks_str}
         NPC Reputation Context: {rep_str}
         Current Scene: {scene_str}
+        Current Location (canonical city/district): {current_location or "Unknown"}
         NPCs Present: {npc_str}
         Last Turn: {last_turn_str}
         </data>
@@ -501,9 +665,29 @@ def build_resolve_mechanics_prompt(user_input, skills, clocks_info,
              Accusations, threats, insults, and aggressive actions MUST increment tension (+1). NEVER output "clear" during aggression or without a location change.
 
         6. MOVEMENT AND LOCATIONS (CRITICAL):
-           - If the player explicitly leaves a room, building, or travels locally, you MUST output the new micro-location in "scene_impact" (e.g., "Гавань", "Вулиці", "Таверна"). Якщо гравець входить у КОНКРЕТНИЙ приватний простір NPC (покої, в'язниця, підвал), давай описову назву з іменем або функцією (напр. "Покої Неда Старка", "Темниця під вежею") — ця назва буде використана GM як якір сцени для ізоляції NPC.
-           - If they travel to an entirely new city or region, update "location_impact" (e.g., "Браавос", "Королівська Гавань") AND update "scene_impact" to a logical starting point there.
-           - If they stay in the current scene, output "none" for both.
+           NEARBY canonical locations (same region): {nearby_locs_str}
+           ALL canonical locations grouped by region (for cross-region travel):
+           {all_locs_str}
+
+           RULE A — Player moves to a NEARBY location (same region):
+             → "location_impact": EXACT name from NEARBY list (copy-paste, no paraphrase). "scene_impact": logical entry point.
+           RULE B — Player moves to any place NOT in any list (market, tavern, harbor, street, room, garden, quarter):
+             → "scene_impact": descriptive name (e.g. "Ринок", "Таверна", "Вулиці", "Гавань"). "location_impact": "none".
+             → Even if it sounds like a named place — if NOT in any canonical list → scene_impact only.
+           RULE C — Player travels to a DISTANT city/region (different region):
+             → "location_impact": EXACT name from ALL list (copy-paste!). "scene_impact": logical arrival point.
+           RULE D — NPC private space (bedroom, dungeon, personal hall):
+             → "scene_impact": name with NPC/function (e.g. "Покої Неда Старка", "Темниця під вежею").
+           RULE E — ANY explicit movement phrase ("іду до X", "йду в X", "направляюся до X", "хочу потрапити до X", "піду на X"):
+             → ALWAYS output a non-"none" scene_impact or location_impact. NEVER return "none" for both when movement is stated.
+           → Player truly stays in the same spot: output "none" for both.
+
+           🔴 PLAYER AGENCY OVERRIDE (HIGHEST PRIORITY):
+           If the player explicitly states intent to LEAVE the current place or TRAVEL to another city
+           ("вирушаю до X", "їду до X", "покидаю це місце", "іду геть", "тікаю"),
+           you MUST generate the corresponding location_impact and/or scene_impact.
+           This rule OVERRIDES high Scene_Tension. The player ALWAYS has the right to attempt to flee or travel.
+           Even at Scene_Tension 4/4 — output the movement. The narrative layer will handle consequences.
         </rules>
 
         <example_output>
@@ -568,7 +752,7 @@ def build_famous_characters_prompt(house_name) -> str:
     """
 
 
-def build_initial_stats_prompt(char_name, house_name, origin_region, valid_locations_str) -> str:
+def build_initial_stats_prompt(char_name, house_name, origin_region, valid_locations_str, scenes_block_str="") -> str:
     return f"""
     <role>
 Ти — Архімейстер Цитаделі та провідний Game Balance Designer для RPG "Game of Thrones". Твоя експертиза — глибоке знання лору (канону) та жорсткий математичний баланс ігрової системи.
@@ -588,7 +772,9 @@ HOUSE: {house_name} (Origin: {origin_region})
 1. LOCATION RULES (CRITICAL — 3 рівні):
    - "Поточне місцезнаходження" (РІВЕНЬ 1 — місто/замок): ВИКЛЮЧНО зі списку канонічних локацій нижче. НЕ МОЖНА писати назву регіону ("Північ", "Пентос" як регіон, "Вільні Міста" тощо) — тільки конкретний населений пункт зі списку:
      {valid_locations_str}
-   - "Поточна сцена" (РІВЕНЬ 2 — мікролокація): вільний рядок всередині міста/замку (наприклад: "Конюшня Вінтерфелла", "Таверна 'Сплячий лев'", "Вілла Ілліріо Мопатіса"). Це поле обов'язкове.
+   - "Поточна сцена" (РІВЕНЬ 2 — мікролокація): ВИКЛЮЧНО зі списку готових сцен для стартової локації:
+{scenes_block_str}
+     Якщо локація не в списку — обери найближчу за змістом. НЕ вигадуй нових назв.
    - "Регіон" (РІВЕНЬ 3): визначає система автоматично — не включай у JSON.
    - ВИБІР ЛОКАЦІЇ за каноном першої книги (298 CE), а не за регіоном походження. (Наприклад: Jorah Mormont -> Квартал Магістрів, Theon Greyjoy -> Вінтерфелл).
 2. PERMISSION TO FAIL: Якщо {char_name} є неканонічним або повністю вигаданим, не галюцинуй. Прямо скажи "Персонаж не канонічний" в аналізі та згенеруй йому стандартний профіль для його {origin_region} без історичних зв'язків.
@@ -735,7 +921,7 @@ TIME_CONTEXT: {GAME_ERA_CONTEXT}
 """
 
 
-def build_populate_npcs_prompt(location, situation_context, blacklist_str) -> str:
+def build_populate_npcs_prompt(location, situation_context, blacklist_str, scenes_block_str="") -> str:
     return f"""
         ROLE: Narrative Designer for Game of Thrones (Grimdark Fantasy).
         TASK: Populate the current location: "{location}" with 6-8 background NPCs.
@@ -764,7 +950,9 @@ def build_populate_npcs_prompt(location, situation_context, blacklist_str) -> st
         - Create a DIVERSE mix (Social standing, professions, hostility).
         - "Secrets" must be interesting plot hooks, but not break canonical story.
         - Location field is set by the system — do NOT include it in output.
-        - Scene: вільний рядок — мікролокація всередині "{location}" (наприклад: "Таверна 'Вепр і кубок'", "Ринкова площа біля воріт", "Кузня біля казарми"). Будь конкретним.
+        - Scene: ВИКЛЮЧНО одне значення зі списку нижче (обирай найближче за характером NPC):
+{scenes_block_str}
+          НЕ вигадуй нових назв сцен. Враховуй категорію: торговця — в ПУБЛІЧНА ЗОНА, лорда — в ЕЛІТНА ЗОНА.
 
         === RELATION_PLAYER SCALE (ОБОВ'ЯЗКОВО) ===
         Поле Relation_Player ПОВИННО містити ТІЛЬКИ одне значення з цієї шкали (від найгіршого до найкращого):

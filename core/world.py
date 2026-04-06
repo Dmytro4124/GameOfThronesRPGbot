@@ -9,7 +9,7 @@ from core.prompts import (
     GAME_ERA_CONTEXT, build_famous_characters_prompt,
     build_initial_stats_prompt, build_game_intro_prompt, build_populate_npcs_prompt,
 )
-from core.world_constants import get_region_for_location, get_locations_for_region, is_valid_location, VALID_LOCATIONS_ORDERED
+from core.world_constants import get_region_for_location, get_locations_for_region, is_valid_location, VALID_LOCATIONS_ORDERED, format_scenes_for_prompt, LOCATION_SCENES
 from config import TAB_NPC
 from database.canon_npc import get_canon_npcs_copy
 
@@ -44,13 +44,10 @@ async def generate_initial_stats(char_name, house_name, house_data):
     origin_region = house_data.get('Регіон', 'Вестерос')
     print(f"🎲 Генерую статистику для {char_name}...")
 
-    region_locs = get_locations_for_region(origin_region)
-    if region_locs:
-        valid_locations_str = ", ".join(f'"{loc}"' for loc in region_locs)
-    else:
-        valid_locations_str = ", ".join(f'"{loc}"' for loc in VALID_LOCATIONS_ORDERED[:30])
+    valid_locations_str = ", ".join(f'"{loc}"' for loc in VALID_LOCATIONS_ORDERED)
+    _scenes_block = format_scenes_for_prompt(origin_region)
 
-    prompt = build_initial_stats_prompt(char_name, house_name, origin_region, valid_locations_str)
+    prompt = build_initial_stats_prompt(char_name, house_name, origin_region, valid_locations_str, scenes_block_str=_scenes_block)
 
     profile = await ask_gemini(prompt)
     if profile:
@@ -59,14 +56,15 @@ async def generate_initial_stats(char_name, house_name, house_data):
         # Validate Location — якщо ШІ написав назву регіону замість локації, ставимо першу валідну локацію регіону
         loc = profile.get("Поточне місцезнаходження", "")
         if not is_valid_location(loc):
-            fallback_loc = region_locs[0] if region_locs else VALID_LOCATIONS_ORDERED[0]
+            fallback_loc = VALID_LOCATIONS_ORDERED[0]
             print(f"⚠️ [INITIAL STATS] Невалідна локація '{loc}' → замінено на '{fallback_loc}'")
             profile["Поточне місцезнаходження"] = fallback_loc
             loc = fallback_loc
         # Auto-derive регіон — перезаписуємо відповідь ШІ гарантованим значенням
         profile["Регіон"] = get_region_for_location(loc) or origin_region
-        # Гарантуємо наявність сцени
-        if not profile.get("Поточна сцена"):
+        # Гарантуємо наявність сцени — блокуємо "Невідомо"/GLOBAL/порожні значення
+        curr_scene = profile.get("Поточна сцена", "")
+        if not curr_scene or curr_scene.strip().lower() in ("невідомо", "global", "unknown", ""):
             profile["Поточна сцена"] = loc
         return profile
     return None
@@ -79,7 +77,7 @@ async def get_narrative_intro(profile):
     profile_json = json.dumps(profile, ensure_ascii=False, indent=2)
     current_location = profile.get("Поточне місцезнаходження", "Вестерос")
 
-    prompt = build_game_intro_prompt(profile_json, current_location)
+    prompt = build_game_intro_prompt(profile_json, current_location)  # noqa: uses narrative, no scenes needed
     try:
         def _sync_gen():
             return model.generate_content(prompt)
@@ -133,7 +131,7 @@ async def background_canon_generation(excluded_name=None):
 
                 row = [
                     npc.get("Location", "Westeros"),
-                    npc.get("Scene", "Невідомо"),
+                    npc.get("Scene") or npc.get("Location", "Вестерос"),
                     name,
                     npc.get("Description", "-"),
                     npc.get("Character", "-"),
@@ -200,7 +198,7 @@ async def background_canon_generation(excluded_name=None):
         print("❌ [CANON GEN] Не вдалося записати жодного канонічного NPC!")
 
 
-async def populate_contextual_npcs(location, situation_context="Normal day, calm atmosphere", excluded_name=None):
+async def populate_contextual_npcs(location, situation_context="Normal day, calm atmosphere", excluded_name=None, excluded_dead_names: set = None):
     """Асинхронно генерує NPC, які відповідають ПОТОЧНІЙ СИТУАЦІЇ в локації. Блокує канонічні імена."""
     print(f"🏘️ [LOCAL POP] Аналізую локацію: {location}...")
 
@@ -258,7 +256,8 @@ async def populate_contextual_npcs(location, situation_context="Normal day, calm
 
     blacklist_str = ", ".join(canon_names)
 
-    prompt = build_populate_npcs_prompt(location, situation_context, blacklist_str)
+    _scenes_block = format_scenes_for_prompt(location)
+    prompt = build_populate_npcs_prompt(location, situation_context, blacklist_str, scenes_block_str=_scenes_block)
     try:
         def _sync_ai_gen():
             return model.generate_content(prompt)
@@ -274,6 +273,13 @@ async def populate_contextual_npcs(location, situation_context="Normal day, calm
 
             if excluded_name and find_best_match(ai_gen_name, [excluded_name], threshold=0.8):
                 continue
+
+            # Fix 2: Блок мертвих NPC — fuzzy-пошук по excluded_dead_names
+            if excluded_dead_names:
+                dead_matches = difflib.get_close_matches(ai_gen_name, excluded_dead_names, n=1, cutoff=0.7)
+                if dead_matches:
+                    print(f"⚰️ [POP BLOCKED] AI намагався додати мертвого NPC '{ai_gen_name}' (схожий на '{dead_matches[0]}'). Пропускаємо.")
+                    continue
 
             is_canon_clone = False
             if canon_names:
@@ -295,9 +301,14 @@ async def populate_contextual_npcs(location, situation_context="Normal day, calm
             # ОНОВЛЕНО: Додано Scene, Inventory, Reputation_Score та Region
             from database.canon_npc import _map_relation_to_score
             initial_rep = _map_relation_to_score(npc.get("Relation_Player", "Neutral"))
+            _scene_raw = npc.get("Scene", location)
+            _scene_words = str(_scene_raw).split()
+            _scene_val = " ".join(_scene_words[:3])
+            if not _scene_val or _scene_val.strip().lower() in ("невідомо", "global", "unknown"):
+                _scene_val = location
             row = [
                 location,
-                npc.get("Scene", location),
+                _scene_val,
                 ai_gen_name,
                 npc.get("Description", "-"),
                 npc.get("Character", "-"),

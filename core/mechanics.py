@@ -11,7 +11,12 @@ from core.prompts import (
     build_training_success_narrative, build_training_failure_narrative,
     build_training_miracle_narrative, build_resolve_mechanics_prompt,
 )
-from core.world_constants import is_valid_location, get_region_for_location, TRAVEL_LOCATION
+import difflib
+from core.world_constants import (
+    is_valid_location, get_region_for_location, get_locations_for_region,
+    TRAVEL_LOCATION, is_valid_scene, get_scenes_for_location,
+    VALID_LOCATIONS_ORDERED, LOCATION_TO_REGION, VALID_REGIONS_ORDERED,
+)
 
 # === КОНСТАНТИ СИСТЕМИ ===
 MINUTES_IN_DAY = 1440
@@ -313,9 +318,29 @@ def apply_system_impacts(profile, ai_impacts):
 
     new_scene = ai_impacts.get("scene_impact", "none")
     if new_scene and str(new_scene).lower() not in ["none", "немає", "без змін", "", "null"]:
+        new_scene = str(new_scene).strip()
+        # Валідація: обрізка сцени до 3 слів (як для NPC)
+        words = new_scene.split()
+        if len(words) > 3:
+            new_scene = " ".join(words[:3])
+            print(f"✂️ [PLAYER SCENE TRIM] Обрізано до 3 слів: '{new_scene}'")
+        # Валідація: canonical scene check + difflib autocorrect
+        current_loc = profile.get("Поточне місцезнаходження", "")
+        if current_loc and current_loc != TRAVEL_LOCATION:
+            if not is_valid_scene(current_loc, new_scene):
+                valid_scenes = get_scenes_for_location(current_loc)
+                close = difflib.get_close_matches(new_scene, valid_scenes, n=1, cutoff=0.4)
+                if close:
+                    print(f"🔧 [PLAYER SCENE AUTOCORRECT] '{new_scene}' → '{close[0]}'")
+                    new_scene = close[0]
+                else:
+                    fallback = get_scenes_for_location(current_loc)
+                    if fallback:
+                        print(f"🔧 [PLAYER SCENE FALLBACK] '{new_scene}' → '{fallback[0]}'")
+                        new_scene = fallback[0]
         old_scene = profile.get("Поточна сцена", "Невідомо")
         if old_scene != new_scene:
-            profile["Поточна сцена"] = str(new_scene).strip()
+            profile["Поточна сцена"] = new_scene
             logs.append(f"🚪 Сцена: {old_scene} -> {new_scene}")
 
     return profile, logs
@@ -482,7 +507,7 @@ def get_reputation_delta(outcome):
 
 async def resolve_action_mechanics(user_input, profile, npc_reputation_context=None,
                                     current_scene=None, npc_names=None, last_turn_summary=None,
-                                    user_id=None):
+                                    user_id=None, current_location=None):
     """
     Асинхронний Worker (4b): Оцінює складність дії та рахує всю механіку (Здоров'я, Час, Золото, Енергія, Годинники, Локація).
     ІНТЕГРОВАНО: Система 2d50 (Roll-Over), Перевага/Недолік, Хардкорні Крити та Прокачка.
@@ -525,6 +550,18 @@ async def resolve_action_mechanics(user_input, profile, npc_reputation_context=N
         verdict = "MECHANICAL VERDICT: EXHAUSTION COLLAPSE! GM INFO: ABSOLUTE OVERRIDE. The player's energy is 0. Ignore their requested action. Describe how they suddenly lose consciousness and collapse on the spot from complete exhaustion. Fast forward 8 hours of them being passed out. Describe what happens to them while they are defenseless."
         return verdict, updates
 
+    _curr_region = get_region_for_location(current_location or "")
+    nearby_locs = get_locations_for_region(_curr_region) if _curr_region else []
+
+    # Компактний формат: групуємо всі локації за регіонами
+    _region_groups = {}
+    for loc, reg in LOCATION_TO_REGION.items():
+        _region_groups.setdefault(reg, []).append(loc)
+    all_locs_grouped = "; ".join(
+        f"{reg}: {', '.join(_region_groups[reg])}"
+        for reg in VALID_REGIONS_ORDERED if reg in _region_groups
+    )
+
     prompt = build_resolve_mechanics_prompt(
         user_input=user_input,
         skills=skills,
@@ -533,6 +570,9 @@ async def resolve_action_mechanics(user_input, profile, npc_reputation_context=N
         current_scene=current_scene,
         npc_names=npc_names,
         last_turn_summary=last_turn_summary,
+        current_location=current_location,
+        nearby_canonical_locs=nearby_locs,
+        all_canonical_locs_grouped=all_locs_grouped,
     )
 
     try:
@@ -547,6 +587,8 @@ async def resolve_action_mechanics(user_input, profile, npc_reputation_context=N
     if not data:
         # Безпечний фолбек у разі падіння API ШІ
         return "MECHANICAL VERDICT: AUTO_SUCCESS", {"minutes_passed": 5, "skill_used": "Немає", "outcome": "SUCCESS", "difficulty": 0}
+
+    print(f"🛠️ [WORKER RAW JSON]: {data}")
 
     skill_used = data.get("skill_used", "None")
     circumstance = data.get("circumstance", "NORMAL")

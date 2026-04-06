@@ -10,12 +10,12 @@ from core.prompts import (
     GAME_ERA_CONTEXT, build_summarize_turn_prompt, build_narrator_prompt,
     build_gm_logic_prompt, build_history_summary_prompt,
 )
-from core.world_constants import VALID_LOCATIONS_ORDERED, VALID_REGIONS_ORDERED, TRAVEL_LOCATION, get_region_for_location, get_locations_for_region, LOCATION_DESCRIPTIONS
+from core.world_constants import VALID_LOCATIONS_ORDERED, VALID_REGIONS_ORDERED, TRAVEL_LOCATION, get_region_for_location, get_locations_for_region, LOCATION_DESCRIPTIONS, format_scenes_for_prompt
 from core.world import populate_contextual_npcs
 from database.operations import (
     get_user_data, save_user_data, get_relevant_context,
     get_location_npcs, update_npcs_in_db,
-    update_npc_reputation, append_memory_anchor
+    update_npc_reputation, append_memory_anchor, get_dead_npc_names
 )
 
 user_sessions = {}
@@ -103,7 +103,10 @@ async def summarize_turn(gm_response):
 
 def _build_narrator_prompt(user_input, director_notes, npc_context_text,
                            player_name, player_house, current_scene,
-                           current_location, impact_narrative_hints, puppet_mode=False):
+                           current_location, impact_narrative_hints,
+                           puppet_mode=False, recent_history_text=None,
+                           erotic_mode=False, active_roster=None, dead_npcs=None,
+                           departing_roster_text="", arriving_roster_text=""):
     return build_narrator_prompt(
         user_input=user_input,
         director_notes=director_notes,
@@ -114,6 +117,12 @@ def _build_narrator_prompt(user_input, director_notes, npc_context_text,
         current_location=current_location,
         impact_narrative_hints=impact_narrative_hints,
         puppet_mode=puppet_mode,
+        recent_history_text=recent_history_text,
+        erotic_mode=erotic_mode,
+        active_roster=active_roster,
+        dead_npcs=dead_npcs,
+        departing_roster_text=departing_roster_text,
+        arriving_roster_text=arriving_roster_text,
     )
 
 
@@ -188,6 +197,19 @@ async def process_game_turn(chat_id, user_input):
         curr_loc, curr_scene, current_region=curr_region
     )
 
+    # === B+C: відстежуємо зникнення NPC між ходами (розділяємо мертвих та просто відсутніх) ===
+    _dead_names_cache = get_dead_npc_names()
+    prev_legal_npc_names = user_sessions.get(chat_id, {}).get("prev_legal_npc_names", [])
+    absent_npcs_raw = [n for n in prev_legal_npc_names if n not in set(legal_npc_names)]
+    dead_npcs = [n for n in absent_npcs_raw if n in _dead_names_cache]
+    absent_npcs = [n for n in absent_npcs_raw if n not in _dead_names_cache]
+    # Мертві ніколи не повернуться — не зберігаємо їх у prev_legal_npc_names
+    user_sessions.setdefault(chat_id, {})["prev_legal_npc_names"] = [n for n in legal_npc_names if n not in _dead_names_cache]
+    if dead_npcs or absent_npcs:
+        print(f"☠️ [B+C] Мертві: {dead_npcs} | Зниклі живі: {absent_npcs} | Активний: {legal_npc_names}")
+    else:
+        print(f"👁️ [B+C] Ростер стабільний: {legal_npc_names}")
+
     duration = time.time() - t_start
     timing_details.append(f"📚 Data: {duration:.2f}s")
 
@@ -203,7 +225,7 @@ async def process_game_turn(chat_id, user_input):
     mechanics_verdict, mechanical_updates = await resolve_action_mechanics(
         user_input, profile, npc_reputation_context,
         current_scene=curr_scene, npc_names=legal_npc_names, last_turn_summary=last_turn,
-        user_id=chat_id
+        user_id=chat_id, current_location=curr_loc
     )
 
     # === БЛОКУВАННЯ РЕПУТАЦІЄЮ: NPC відмовляє через кровну ворожнечу ===
@@ -274,6 +296,43 @@ async def process_game_turn(chat_id, user_input):
     logs.extend(impact_logs)
     impact_narrative_hints = _build_impact_hints(impact_logs)
 
+    # === REFRESH: Перечитуємо loc/scene/region якщо apply_system_impacts їх змінила ===
+    # Зберігаємо "ростер відправлення" ПЕРЕД rebuild (для dual roster промптів)
+    departing_npc_context = npc_context_text
+    departing_npc_names = list(legal_npc_names)
+    arriving_npc_context = ""
+    arriving_npc_names = []
+    location_or_scene_changed = False
+
+    _post_loc   = profile.get("Поточне місцезнаходження", curr_loc)
+    _post_scene = profile.get("Поточна сцена", curr_scene)
+    _post_region = profile.get("Регіон", get_region_for_location(_post_loc) or curr_region)
+    if _post_scene != curr_scene or _post_loc != curr_loc:
+        location_or_scene_changed = True
+        curr_loc    = _post_loc
+        curr_scene  = _post_scene
+        curr_region = _post_region
+        npc_context_text, legal_npc_names, npc_reputation_context = get_location_npcs(
+            curr_loc, curr_scene, current_region=curr_region
+        )
+        # "Ростер прибуття" = NPC нової локації/сцени
+        arriving_npc_context = npc_context_text
+        arriving_npc_names = list(legal_npc_names)
+        # Перераховуємо dead/absent з оновленим Ростером
+        _dnames_post = get_dead_npc_names()
+        _absent_raw_post = [n for n in prev_legal_npc_names if n not in set(legal_npc_names)]
+        dead_npcs   = [n for n in _absent_raw_post if n in _dnames_post]
+        absent_npcs = [n for n in _absent_raw_post if n not in _dnames_post]
+        user_sessions.setdefault(chat_id, {})["prev_legal_npc_names"] = [
+            n for n in legal_npc_names if n not in _dnames_post
+        ]
+        print(f"🔄 [ROSTER REBUILD] {old_scene}/{old_location} → {curr_scene}/{curr_loc} | Новий Ростер: {legal_npc_names}")
+        print(f"🔄 [DUAL ROSTER] Departing: {len(departing_npc_names)} NPC {departing_npc_names} | Arriving: {len(arriving_npc_names)} NPC {arriving_npc_names}")
+    else:
+        # Нема переміщення — departing не потрібний
+        departing_npc_context = ""
+        departing_npc_names = []
+
     # === BURST CHECK: годинник щойно досяг максимуму ===
     burst_clock = profile.pop("_burst_this_turn", None)
     is_exhaustion_collapse = (
@@ -332,8 +391,10 @@ async def process_game_turn(chat_id, user_input):
     _loc_hint = f"\n    ОПИС ПОТОЧНОЇ ЛОКАЦІЇ: {_curr_loc_desc}" if _curr_loc_desc else ""
 
     # ============ GM_LOGIC PROMPT (JSON стану світу, без story) ============
-    from config import PUPPET_USERS
+    from config import PUPPET_USERS, EROTIC_USERS
     _puppet_mode = chat_id in PUPPET_USERS
+    _erotic_mode = chat_id in EROTIC_USERS
+    _scenes_block_str = format_scenes_for_prompt(curr_loc)
     gm_logic_prompt = build_gm_logic_prompt(
         hero_name=profile.get("Ім'я", "Невідомий"),
         hero_house=profile.get("Дім", "Невідомий"),
@@ -358,6 +419,11 @@ async def process_game_turn(chat_id, user_input):
         user_input=user_input,
         action_slots=_action_slots,
         puppet_mode=_puppet_mode,
+        absent_npcs=absent_npcs,
+        dead_npcs=dead_npcs,
+        scenes_block_str=_scenes_block_str,
+        departing_roster_text=departing_npc_context if location_or_scene_changed else "",
+        arriving_roster_text=arriving_npc_context if location_or_scene_changed else "",
     )
 
 
@@ -404,6 +470,34 @@ async def process_game_turn(chat_id, user_input):
         if not director_notes:
             director_notes = [ai_data.get("reasoning", "Щось сталося.")]
 
+        # Fix 1: Санітайзер director_notes — видаляє згадки мертвих NPC до Narrator
+        if dead_npcs:
+            _dead_lower = {n.lower(): n for n in dead_npcs}
+            _correction_added = set()
+            _clean_notes = []
+            for note in director_notes:
+                note_lower = note.lower()
+                _found_dead = next((orig for low, orig in _dead_lower.items() if low in note_lower), None)
+                if _found_dead:
+                    if _found_dead not in _correction_added:
+                        _clean_notes.append(f"КОРЕКЦІЯ: {_found_dead} мертвий — відсутній у сцені. Не згадуй його дій.")
+                        _correction_added.add(_found_dead)
+                        print(f"🧹 [NOTES SANITIZED] Видалено згадку мертвого '{_found_dead}' з director_notes.")
+                else:
+                    _clean_notes.append(note)
+            director_notes = _clean_notes
+
+        _recent_hist_text = "\n".join(
+            f"{m['role']}: {m['content']}" for m in history[-10:]
+        ) if history else ""
+
+        # Fix 3: Анотація history — попереджає Narrator про мертвих NPC у свіжій пам'яті
+        if dead_npcs:
+            _dead_list_str = ", ".join(dead_npcs)
+            _recent_hist_text = (_recent_hist_text or "") + (
+                f"\n\n[СИСТЕМНА НОТАТКА ДЛЯ КОНТЕКСТУ: Такі NPC МЕРТВІ і НЕ існують у поточній реальності: "
+                f"{_dead_list_str}. Все що ти читаєш про них в попередніх ходах — минуле.]"
+            )
         narrator_prompt = _build_narrator_prompt(
             user_input=user_input,
             director_notes=director_notes,
@@ -414,27 +508,36 @@ async def process_game_turn(chat_id, user_input):
             current_location=curr_loc,
             impact_narrative_hints=impact_narrative_hints,
             puppet_mode=_puppet_mode,
+            recent_history_text=_recent_hist_text,
+            erotic_mode=_erotic_mode,
+            active_roster=legal_npc_names,
+            dead_npcs=dead_npcs,
+            departing_roster_text=departing_npc_context if location_or_scene_changed else "",
+            arriving_roster_text=arriving_npc_context if location_or_scene_changed else "",
         )
 
         def _sync_gen_narrator():
             return model_narrator.generate_content(narrator_prompt)
 
         narrator_response = await asyncio.to_thread(_sync_gen_narrator)
-        story = narrator_response.text.strip()
+        story = narrator_response.text.strip() if narrator_response and narrator_response.text else ""
 
-        # Retry якщо Narrator видав сміття
-        if "Тут напиши" in story or len(story) < 20:
+        # Retry якщо Narrator видав сміття або None
+        if not story or "Тут напиши" in story or len(story) < 20:
             def _sync_gen_narrator_retry():
                 return model_narrator.generate_content(narrator_prompt)
 
             retry_resp = await asyncio.to_thread(_sync_gen_narrator_retry)
-            story = retry_resp.text.strip()
+            story = retry_resp.text.strip() if retry_resp and retry_resp.text else "..."
 
         duration_narrator = time.time() - t_narrator
         timing_details.append(f"✍️ Narrator: {duration_narrator:.2f}s")
 
         t_start = time.time()
         npc_changes = ai_data.get("npc_updates", [])
+        companion_npcs = ai_data.get("companion_npcs", [])
+        if companion_npcs:
+            print(f"🤝 [COMPANIONS] NPC що рухаються з гравцем: {companion_npcs}")
         if not npc_changes and npc_context_text:
             npc_rsn = ai_data.get("npc_reasoning", "—")
             print(f"[NPC_WARN] npc_updates=[] при наявних NPC у сцені. npc_reasoning: {npc_rsn[:300]}")
@@ -498,16 +601,27 @@ async def process_game_turn(chat_id, user_input):
                         _atmosphere_cache[new_loc] = situation
                     except:
                         situation = "A tense day in Westeros."
-                await populate_contextual_npcs(new_loc, situation, excluded_name=char_name)
+                await populate_contextual_npcs(new_loc, situation, excluded_name=char_name,
+                                               excluded_dead_names=get_dead_npc_names())
 
             await asyncio.create_task(travel_population_task(new_location, current_char_name))
 
         async def background_task(chat_id_arg, user_id_arg, profile_arg, char_name_arg, input_arg, story_arg,
-                                  npc_changes_arg, legal_names_arg, mech_updates_arg=None):
+                                  npc_changes_arg, legal_names_arg, mech_updates_arg=None,
+                                  new_location_arg=None, player_location_changed_arg=False,
+                                  player_new_scene_arg=None, player_scene_changed_arg=False,
+                                  companion_npcs_arg=None):
             try:
                 await save_user_data(user_id_arg, profile_arg, char_name_arg)
                 if npc_changes_arg:
-                    await update_npcs_in_db(npc_changes_arg, legal_names_arg)
+                    await update_npcs_in_db(
+                        npc_changes_arg, legal_names_arg,
+                        player_new_location=new_location_arg,
+                        player_location_changed=player_location_changed_arg,
+                        player_new_scene=player_new_scene_arg,
+                        player_scene_changed=player_scene_changed_arg,
+                        companion_npcs=companion_npcs_arg,
+                    )
 
                 # Оновлення репутації NPC після соціальних перевірок
                 if mech_updates_arg:
@@ -556,9 +670,18 @@ async def process_game_turn(chat_id, user_input):
             except Exception as exept:
                 print(f"❌ [BG ERROR] {exept}")
 
+        _player_loc_changed  = (old_location != new_location)
+        _player_scene_changed = (old_scene != curr_scene)
         await asyncio.create_task(
-            background_task(chat_id, user_id, profile, profile.get("Ім'я"), user_input, story, npc_changes,
-                            legal_npc_names, mechanical_updates))
+            background_task(
+                chat_id, user_id, profile, profile.get("Ім'я"), user_input, story, npc_changes,
+                legal_npc_names, mechanical_updates,
+                new_location_arg=new_location,
+                player_location_changed_arg=_player_loc_changed,
+                player_new_scene_arg=curr_scene,
+                player_scene_changed_arg=_player_scene_changed,
+                companion_npcs_arg=companion_npcs,
+            ))
 
         duration = time.time() - t_start
         timing_details.append(f"💾 Save: {duration:.2f}s")

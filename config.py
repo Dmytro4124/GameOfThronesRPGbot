@@ -45,3 +45,4 @@ CREDENTIALS_FILE = 'credentials.json'
 ADMIN_TELEGRAM_IDS: list = [494157543]  # замінити на реальний Telegram ID адміна
 GODMODE_USERS: set = set()              # runtime-toggle: автокрит у кубиках
 PUPPET_USERS: set = set()               # runtime-toggle: режим ляльковода (всі NPC лояльні)
+EROTIC_USERS: set = set()              # runtime-toggle: еротичний режим (явні сексуальні описи)
