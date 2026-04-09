@@ -504,6 +504,24 @@ async def cmd_puppet(message, bot, chat_id, args):
         await message.answer("🟢 Режим Ляльковода УВІМКНЕНО — всі NPC беззаперечно лояльні")
 
 
+async def cmd_thoughts(message, bot, chat_id, args):
+    from core.ai_client import get_thoughts_log
+    entries = get_thoughts_log()
+    if not entries:
+        await message.answer("💭 Роздумів немає — зробіть хід спочатку.")
+        return
+    lines = []
+    for i, e in enumerate(entries, 1):
+        short_model = e["model"].replace("gemma-4-31b-it", "G4").replace("gemma-3-27b-it", "G3")
+        thought_preview = e["thought"][:600].strip()
+        lines.append(f"[{i}] {short_model}\n{thought_preview}")
+    text = "\n\n─────\n\n".join(lines)
+    # Telegram limit 4096
+    if len(text) > 4000:
+        text = text[:4000] + "\n..."
+    await message.answer(f"💭 Роздуми останнього ходу:\n\n{text}")
+
+
 async def cmd_erotic(message, bot, chat_id, args):
     if chat_id in EROTIC_USERS:
         EROTIC_USERS.discard(chat_id)
@@ -544,6 +562,7 @@ async def handle_cheat_command(message, bot):
         "/debug": cmd_debug,
         "/puppet": cmd_puppet,
         "/erotic": cmd_erotic,
+        "/thoughts": cmd_thoughts,
     }
     handler = dispatch.get(cmd)
     if handler:

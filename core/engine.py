@@ -3,12 +3,15 @@ import time
 import json
 import re
 import asyncio
+import logging
 
-from core.ai_client import model_worker, model_gm_logic, model_narrator, clean_and_parse_json
+logger = logging.getLogger(__name__)
+
+from core.ai_client import model_worker, model_gm_logic, model_narrator, clean_and_parse_json, clear_thoughts
 from core.mechanics import apply_system_impacts, process_training_request, safe_int, resolve_action_mechanics, validate_action
 from core.prompts import (
-    GAME_ERA_CONTEXT, build_summarize_turn_prompt, build_narrator_prompt,
-    build_gm_logic_prompt, build_history_summary_prompt,
+    GAME_ERA_CONTEXT, build_summarize_turn_prompt, build_summarize_full_turn_prompt,
+    build_narrator_prompt, build_gm_logic_prompt, build_history_summary_prompt,
 )
 from core.world_constants import VALID_LOCATIONS_ORDERED, VALID_REGIONS_ORDERED, TRAVEL_LOCATION, get_region_for_location, get_locations_for_region, LOCATION_DESCRIPTIONS, format_scenes_for_prompt
 from core.world import populate_contextual_npcs
@@ -101,6 +104,19 @@ async def summarize_turn(gm_response):
         return f"Гравець діє."
 
 
+async def summarize_full_turn(user_input, gm_response):
+    """Об'єднана сумаризація: дія гравця + результат GM → одне речення."""
+    prompt = build_summarize_full_turn_prompt(user_input, gm_response)
+    try:
+        def _sync_gen():
+            return model_worker.generate_content(prompt)
+
+        resp = await asyncio.to_thread(_sync_gen)
+        return resp.text.strip()
+    except Exception:
+        return f"{user_input[:100]} → ..."
+
+
 def _build_narrator_prompt(user_input, director_notes, npc_context_text,
                            player_name, player_house, current_scene,
                            current_location, impact_narrative_hints,
@@ -126,7 +142,13 @@ def _build_narrator_prompt(user_input, director_notes, npc_context_text,
     )
 
 
-async def process_game_turn(chat_id, user_input):
+async def process_game_turn(chat_id, user_input, progress_callback=None, narrator_queue=None):
+    """
+    Головний ігровий цикл.
+    progress_callback: async callable(str) — оновлює статус для гравця.
+    narrator_queue: asyncio.Queue — якщо передано, стрімить narrator-текст чанками замість блокуючого виклику.
+    """
+    clear_thoughts()
     debug_log = ""
     global_start = time.time()
     debug_log += f"🚀 [START] Хід гравця {chat_id}..."
@@ -217,10 +239,14 @@ async def process_game_turn(chat_id, user_input):
     logs = []
 
     # === ЦЕНЗОР: Перевірка дії до будь-якої механіки ===
+    if progress_callback:
+        await progress_callback("🎲 Оцінюємо дію...")
     is_valid, refusal_reason = await validate_action(user_input, profile)
     if not is_valid:
         return refusal_reason + "\n\n📊 🛑 Дію заблоковано Цензором.", []
 
+    if progress_callback:
+        await progress_callback("⚔️ Кидаємо кубики...")
     last_turn = history[-1]["content"] if history else ""
     mechanics_verdict, mechanical_updates = await resolve_action_mechanics(
         user_input, profile, npc_reputation_context,
@@ -429,6 +455,8 @@ async def process_game_turn(chat_id, user_input):
 
     try:
         # ============ КРОК 1: GM_Logic (легка модель → JSON) ============
+        if progress_callback:
+            await progress_callback("🌍 Оновлюємо стан світу...")
         t_gm_logic = time.time()
 
         def _sync_gen_gm_logic():
@@ -445,6 +473,9 @@ async def process_game_turn(chat_id, user_input):
 
         duration_gm_logic = time.time() - t_gm_logic
         timing_details.append(f"🧠 GM_Logic: {duration_gm_logic:.2f}s")
+
+        # Зберігаємо ai_data в сесію для QA-валідації
+        user_sessions[chat_id]['last_ai_data'] = ai_data
 
         # Витягуємо suggested_actions з GM_Logic
         raw_actions = ai_data.get("suggested_actions", [])
@@ -465,10 +496,16 @@ async def process_game_turn(chat_id, user_input):
         suggested_actions = button_texts
 
         # ============ КРОК 2: Narrator (важка модель → художній текст) ============
+        if progress_callback:
+            # Показуємо результати кубиків одразу, поки Narrator думає
+            preview = "✍️ Пишемо історію...\n\n"
+            if logs:
+                preview += "📊 " + " | ".join(logs)
+            await progress_callback(preview)
         t_narrator = time.time()
         director_notes = ai_data.get("director_notes", [])
         if not director_notes:
-            director_notes = [ai_data.get("reasoning", "Щось сталося.")]
+            director_notes = ["Щось сталося."]
 
         # Fix 1: Санітайзер director_notes — видаляє згадки мертвих NPC до Narrator
         if dead_npcs:
@@ -516,19 +553,74 @@ async def process_game_turn(chat_id, user_input):
             arriving_roster_text=arriving_npc_context if location_or_scene_changed else "",
         )
 
-        def _sync_gen_narrator():
-            return model_narrator.generate_content(narrator_prompt)
+        if narrator_queue is not None:
+            # === STREAMING MODE: стрімимо narrator-текст чанками через queue ===
+            _loop = asyncio.get_event_loop()
 
-        narrator_response = await asyncio.to_thread(_sync_gen_narrator)
-        story = narrator_response.text.strip() if narrator_response and narrator_response.text else ""
+            def _sync_stream_narrator():
+                chunks = []
+                print("🔵 [STREAM] Narrator streaming started...")
+                try:
+                    for chunk in model_narrator.generate_content_stream(narrator_prompt):
+                        text = chunk.text if chunk.text else ""
+                        if text:
+                            chunks.append(text)
+                            _loop.call_soon_threadsafe(narrator_queue.put_nowait, text)
+                            print(f"🔵 [STREAM] Chunk #{len(chunks)}: {len(text)} chars")
+                        try:
+                            fr = chunk.candidates[0].finish_reason if chunk.candidates else None
+                            if fr and str(fr) not in ("FinishReason.STOP", "STOP", "1", "None"):
+                                print(f"🔵 [STREAM] finish_reason={fr}")
+                        except Exception:
+                            pass
+                except Exception as e:
+                    print(f"🔴 [STREAM] Error during streaming: {e}")
+                    return ""  # порожній → retry спрацює
+                print(f"🔵 [STREAM] Done. Total chunks: {len(chunks)}")
+                return "".join(chunks)
 
-        # Retry якщо Narrator видав сміття або None
-        if not story or "Тут напиши" in story or len(story) < 20:
-            def _sync_gen_narrator_retry():
+            story = await asyncio.to_thread(_sync_stream_narrator)
+            story = story.strip() if story else ""
+            # None надсилається ПІСЛЯ перевірки на обрізання — див. нижче
+        else:
+            # === BLOCKING MODE: стандартний виклик ===
+            def _sync_gen_narrator():
                 return model_narrator.generate_content(narrator_prompt)
 
-            retry_resp = await asyncio.to_thread(_sync_gen_narrator_retry)
-            story = retry_resp.text.strip() if retry_resp and retry_resp.text else "..."
+            narrator_response = await asyncio.to_thread(_sync_gen_narrator)
+            story = narrator_response.text.strip() if narrator_response and narrator_response.text else ""
+
+        # Retry якщо Narrator видав сміття, обрізаний текст або None
+        _story_truncated = story and len(story) > 20 and not story.rstrip().endswith(('.', '!', '?', '…', '"', '*'))
+        if _story_truncated:
+            print(f"⚠️ [NARRATOR] Текст обрізаний (не закінчується розділовим знаком): ...{story[-50:]!r}")
+        if not story or "Тут напиши" in story or len(story) < 20 or _story_truncated:
+            if narrator_queue is not None:
+                # Streaming retry: consumer ще живий (None не надсилали), тому пушимо нові чанки
+                def _sync_stream_retry():
+                    chunks = []
+                    try:
+                        for chunk in model_narrator.generate_content_stream(narrator_prompt):
+                            text = chunk.text if chunk.text else ""
+                            if text:
+                                chunks.append(text)
+                                _loop.call_soon_threadsafe(narrator_queue.put_nowait, text)
+                    except Exception as e:
+                        print(f"🔴 [STREAM RETRY] Error: {e}")
+                    return "".join(chunks)
+
+                story = await asyncio.to_thread(_sync_stream_retry)
+                story = story.strip() if story else "..."
+                narrator_queue.put_nowait(None)  # сигнал завершення після retry
+            else:
+                def _sync_gen_narrator_retry():
+                    return model_narrator.generate_content(narrator_prompt)
+
+                retry_resp = await asyncio.to_thread(_sync_gen_narrator_retry)
+                story = retry_resp.text.strip() if retry_resp and retry_resp.text else "..."
+        elif narrator_queue is not None:
+            # Перший стрім вдався — надсилаємо сигнал завершення
+            narrator_queue.put_nowait(None)
 
         duration_narrator = time.time() - t_narrator
         timing_details.append(f"✍️ Narrator: {duration_narrator:.2f}s")
@@ -539,8 +631,7 @@ async def process_game_turn(chat_id, user_input):
         if companion_npcs:
             print(f"🤝 [COMPANIONS] NPC що рухаються з гравцем: {companion_npcs}")
         if not npc_changes and npc_context_text:
-            npc_rsn = ai_data.get("npc_reasoning", "—")
-            print(f"[NPC_WARN] npc_updates=[] при наявних NPC у сцені. npc_reasoning: {npc_rsn[:300]}")
+            print(f"[NPC_WARN] npc_updates=[] при наявних NPC у сцені.")
 
         if safe_int(profile.get("Здоров'я", 100)) <= 0:
             story += "\n\n💀 *ВАШ ДОЗОР ЗАКІНЧИВСЯ. Ви загинули.*"
@@ -588,23 +679,26 @@ async def process_game_turn(chat_id, user_input):
             current_char_name = profile.get("Ім'я", "")
 
             async def travel_population_task(new_loc, char_name):
-                if new_loc in _atmosphere_cache:
-                    situation = _atmosphere_cache[new_loc]
-                else:
-                    try:
-                        def _sync_gen_travel():
-                            return model_worker.generate_content(
-                                f'Describe atmosphere in "{new_loc}" (Year 298) in 1 sentence.')
+                try:
+                    if new_loc in _atmosphere_cache:
+                        situation = _atmosphere_cache[new_loc]
+                    else:
+                        try:
+                            def _sync_gen_travel():
+                                return model_worker.generate_content(
+                                    f'Describe atmosphere in "{new_loc}" (Year 298) in 1 sentence.')
 
-                        situation_resp = await asyncio.to_thread(_sync_gen_travel)
-                        situation = situation_resp.text.strip()
-                        _atmosphere_cache[new_loc] = situation
-                    except:
-                        situation = "A tense day in Westeros."
-                await populate_contextual_npcs(new_loc, situation, excluded_name=char_name,
-                                               excluded_dead_names=get_dead_npc_names())
+                            situation_resp = await asyncio.to_thread(_sync_gen_travel)
+                            situation = situation_resp.text.strip()
+                            _atmosphere_cache[new_loc] = situation
+                        except Exception:
+                            situation = "A tense day in Westeros."
+                    await populate_contextual_npcs(new_loc, situation, excluded_name=char_name,
+                                                   excluded_dead_names=get_dead_npc_names())
+                except Exception as e:
+                    logger.error(f"[BG] travel_population_task failed: {e}", exc_info=True)
 
-            await asyncio.create_task(travel_population_task(new_location, current_char_name))
+            asyncio.create_task(travel_population_task(new_location, current_char_name))
 
         async def background_task(chat_id_arg, user_id_arg, profile_arg, char_name_arg, input_arg, story_arg,
                                   npc_changes_arg, legal_names_arg, mech_updates_arg=None,
@@ -640,13 +734,13 @@ async def process_game_turn(chat_id, user_input):
                             rep_change=rep_delta
                         )
 
-                short_hist_turn = await summarize_turn(story_arg)
-                short_user_inp = await summarize_turn(input_arg)
+                # Один AI-виклик замість двох: об'єднана сумаризація input + story
+                clean_story = story_arg.split("📊")[0][:800]
+                turn_summary = await summarize_full_turn(input_arg, clean_story)
 
                 if chat_id_arg in user_sessions:
                     hist = user_sessions[chat_id_arg].get('history', [])
-                    hist.append({"role": "User", "content": short_user_inp})
-                    hist.append({"role": "GM", "content": short_hist_turn})
+                    hist.append({"role": "Turn", "content": turn_summary})
 
                     if len(hist) > 20:
                         # Sliding window: стискаємо старі записи, зберігаємо останні 15 verbatim
@@ -667,12 +761,12 @@ async def process_game_turn(chat_id, user_input):
                             user_sessions[chat_id_arg]['history'] = hist[-20:]
                     else:
                         user_sessions[chat_id_arg]['history'] = hist
-            except Exception as exept:
-                print(f"❌ [BG ERROR] {exept}")
+            except Exception as e:
+                logger.error(f"[BG] background_task failed: {e}", exc_info=True)
 
         _player_loc_changed  = (old_location != new_location)
         _player_scene_changed = (old_scene != curr_scene)
-        await asyncio.create_task(
+        asyncio.create_task(
             background_task(
                 chat_id, user_id, profile, profile.get("Ім'я"), user_input, story, npc_changes,
                 legal_npc_names, mechanical_updates,
@@ -687,10 +781,10 @@ async def process_game_turn(chat_id, user_input):
         timing_details.append(f"💾 Save: {duration:.2f}s")
         total_time = time.time() - global_start
 
-        debug_msg = "⏱️ *ТЕХНІЧНИЙ ЗВІТ ХОДУ:*\n━━━━━━━━━━━━━━━━\n"
+        debug_msg = "⏱️ ТЕХНІЧНИЙ ЗВІТ ХОДУ:\n━━━━━━━━━━━━━━━━\n"
         debug_msg += "\n".join(timing_details)
         debug_msg += "\n━━━━━━━━━━━━━━━━"
-        debug_msg += f"\n🏁 *ВСЬОГО:* `{total_time:.2f}s`"
+        debug_msg += f"\n🏁 ВСЬОГО: {total_time:.2f}s"
         user_sessions[chat_id]['last_debug_time'] = debug_msg
 
         story = _sanitize_story(story)
@@ -701,4 +795,10 @@ async def process_game_turn(chat_id, user_input):
     except Exception as e:
         import traceback
         traceback.print_exc()
+        # Якщо streaming вже запущений — надсилаємо сигнал завершення, щоб consumer не висів 120с
+        if narrator_queue is not None:
+            try:
+                narrator_queue.put_nowait(None)
+            except Exception:
+                pass
         return "📜 *Ворон згубив вашого листа... Спробуйте ще раз.*", []

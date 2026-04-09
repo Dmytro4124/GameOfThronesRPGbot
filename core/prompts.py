@@ -102,6 +102,18 @@ def build_summarize_turn_prompt(story_text: str) -> str:
     """
 
 
+def build_summarize_full_turn_prompt(user_input: str, story_text: str) -> str:
+    return f"""Стисни цей RPG хід в ОДНЕ коротке речення (максимум 20 слів, українською).
+    Формат: "[ХТО] [ДІЯ] → [РЕЗУЛЬТАТ]". Збережи імена персонажів, локації та ключові наслідки.
+    Дія гравця: "{user_input}"
+    Результат GM: "{story_text}"
+    Приклади:
+    - "Візеріс переконав стражника пропустити його → пройшов у замок."
+    - "Арія напала на бандита, але провалилась → поранена, втратила меч."
+    - "Гравець тренував Дипломатію з майстром → навичка +2, витрачено 3 дні."
+    """
+
+
 # ── Narrator ──────────────────────────────────────────────────────────────────
 
 def build_narrator_prompt(user_input, director_notes, npc_context_text,
@@ -287,6 +299,15 @@ def build_gm_logic_prompt(
     Ти видаєш ВИКЛЮЧНО структуровані дані (JSON). Ти НЕ пишеш художній текст.
     </system>
 
+    <thinking_directives>
+    Перед генерацією JSON, ОБОВ'ЯЗКОВО подумай про:
+    1. МЕХАНІЧНИЙ ВЕРДИКТ: Що сталося за механікою (успіх/провал)? Як це впливає на NPC?
+    2. NPC АНАЛІЗ: Для КОЖНОГО NPC з активного ростеру — що змінилося? Ставлення, локація, інвентар, мета, стан? Якщо нічого — чому?
+    3. ІЗОЛЯЦІЯ СЦЕН: Чи кожен NPC в npc_updates ФІЗИЧНО присутній у поточній сцені? Перевір departing_roster та arriving_roster.
+    4. COMPANION_NPCS: Чи гравець ЯВНО назвав NPC для подорожі? Якщо ні — companion_npcs = [].
+    5. SCENE CONSISTENCY: Якщо гравець переміщується — NPC старої сцени НЕ повинні мати оновлень, якщо вони не в companion_npcs.
+    </thinking_directives>
+
     <player_identity>
     ГЕРОЙ ЦІЄї ІСТОРІЇ: {hero_name} з дому {hero_house}.
     АБСОЛЮТНЕ ПРАВИЛО: NPC звертаються до героя ТІЛЬКИ як "{hero_last_name}" або "лорд/леді {hero_house}".
@@ -395,6 +416,9 @@ def build_gm_logic_prompt(
     </current_turn>
 
     <economy_rules>
+    ТРАНЗАКЦІЯ ВВАЖАЄТЬСЯ ЗАВЕРШЕНОЮ тільки якщо: NPC прийняв оплату І гравець отримав товар/послугу.
+    Якщо NPC відмовився — gold НЕ змінюється (Worker вже виставив gold_impact="none"). Відображай відмову в npc_updates.
+
     БАЗОВІ ЦІНИ (референс — реалії середньовічного Ессосу/Вестеросу):
     - Звичайний одяг: 1–10 золотих
     - Якісна шовкова сукня (ринковий максимум): 30–80 золотих
@@ -434,7 +458,6 @@ def build_gm_logic_prompt(
     </absent_npcs>''' if absent_npcs else ''}
 
     <json_generation_rules>
-    0. АНАЛІЗ NPC (ОБОВ'ЯЗКОВО ПЕРШИМ): Заповни "npc_reasoning" ДО решти полів. Перерахуй кожного NPC з АКТИВНОГО РОСТЕРУ, з яким гравець взаємодіяв (прямо чи опосередковано). Для кожного вкажи ЩО ЗМІНИЛОСЬ: ставлення, локація, інвентар, мета, стан. Якщо ЖОДЕН NPC не змінився — явно напиши причину.
     1. DIRECTOR_NOTES (ОБОВ'ЯЗКОВО): Масив з 3-7 коротких фактичних речень українською. Це технічне завдання для Письменника. Кожен рядок — один факт:
        - Результат дії гравця (успіх/провал, що конкретно сталось)
        - Реакція кожного залученого NPC (тон, емоція, конкретна дія чи відмова)
@@ -468,8 +491,8 @@ def build_gm_logic_prompt(
 
     ВІДПОВІДАЙ СТРОГО У ФОРМАТІ JSON:
     {{
-        "reasoning": "Твоє коротке внутрішнє міркування про те, як світ/NPC реагують на дію гравця з урахуванням механічного вердикту.",
-        "npc_reasoning": "ОБОВ'ЯЗКОВО: перерахуй кожного NPC з активного ростеру, з яким гравець взаємодіяв, і що саме змінилося (ставлення, локація, інвентар, мета, стан). Якщо жоден NPC не змінився — поясни чому.",
+        "reasoning": "Коротке внутрішнє міркування: що сталося за механікою, як реагує світ і кожен NPC зі сцени?",
+        "npc_reasoning": "Для КОЖНОГО NPC з активного ростеру: що змінилось (ставлення, локація, інвентар, стан, мета)? Якщо нічого — чому?",
         "director_notes": [
             "Факт 1: результат дії (що саме сталося)",
             "Факт 2: реакція NPC (тон, емоція, дія)",
@@ -594,6 +617,72 @@ def build_resolve_mechanics_prompt(user_input, skills, clocks_info,
         Your ONLY job is to calculate the mechanical outcome of the player's action using a ROLL-OVER system (Roll + Skill vs DC).
         </system>
 
+        <thinking_directives>
+        MANDATORY PRE-GENERATION CHECKLIST — answer every gate IN ORDER before writing JSON:
+
+        [GATE 1 — FREE ACTION?]
+        Is the action one of: greeting, casual talk, looking around, reading a document, examining an object,
+        moving within the same location, waiting, resting briefly, drawing/sheathing a weapon without combat?
+        → YES → energy_impact="none", and likely skill_used="None", difficulty=0. Jump to GATE 4.
+        → NO  → continue to GATE 2.
+
+        [GATE 2 — SKILL NEEDED?]
+        Is an NPC actively attacking or physically blocking the player RIGHT NOW in this turn?
+        → NO  → skill_used="None", difficulty=0.
+                 Exception: hostile NPC (rep < -20) AND player is explicitly requesting their cooperation.
+        → YES → assign skill: Бойові / Інтрига / Управління / Військові. Continue to GATE 3.
+
+        [GATE 3 — DC SELECTION — ENUM ONLY]
+        Choose EXACTLY ONE value from: 50 | 60 | 70 | 80 | 100 | 120 | 140
+        Values outside this list (90, 110, 130, 160, etc.) DO NOT EXIST — map to nearest allowed.
+        Base DC on the NATURE OF THE ACTION, not the target's rank:
+        · Polite / formal request to ANY NPC (including lords and royalty) → 80
+        · Bold demand or veiled threat → 100
+        · Outright lie, false accusation, outrageous claim → 120
+        · Direct assault on king in public / near-impossible feat → 140
+
+        [GATE 4 — GOLD CHECK]
+        Primary question: Did gold PHYSICALLY leave the player's possession this turn?
+        → NO (offer refused, pending, NPC ignored, bribe rejected) → gold_impact="none". STOP.
+        → YES, VOLUNTARY (purchase complete, bribe accepted, payment delivered and received)
+           → deduct exact amount or appropriate tag.
+        → YES, INVOLUNTARY (thrown away in desperation, knocked from hand, stolen, gambling loss)
+           → gold_impact="-N" (exact amount) ALWAYS. Physical departure = deduction. NPC "consent" is irrelevant.
+
+        [GATE 5 — MOVEMENT?]
+        Did player explicitly state intent to move to a different place?
+        → YES → generate non-"none" scene_impact or location_impact (even at high Scene_Tension).
+        → NO  → "none" for both.
+        </thinking_directives>
+
+        <antiexamples>
+        These outputs are WRONG. Study them to avoid the same mistakes:
+
+        ❌ WRONG (DC outside allowed enum):
+        Action: "Я погрожую найманцю словесно"
+        "difficulty": 160    ← ILLEGAL. 160 ∉ [50,60,70,80,100,120,140].
+        ✅ CORRECT:
+        "difficulty": 100    ← Hard. Verbal threat to an experienced fighter = DC 100, not Legendary.
+
+        ❌ WRONG (energy for a passive/free action):
+        Action: "Я повільно піднімаю руки і кажу спокійним тоном"
+        "energy_impact": "spend_small"    ← WRONG. No exertion, no combat, no labor.
+        ✅ CORRECT:
+        "energy_impact": "none"    ← FREE ACTION: raising hands and speaking costs zero energy.
+
+        ❌ WRONG (gold not deducted for involuntary physical loss):
+        Action: "У відчаї кидаю весь гаманець під ноги найманцю і тікаю. Він підбирає золото."
+        "gold_impact": "none"    ← WRONG. Gold physically left the player's possession.
+        ✅ CORRECT:
+        "gold_impact": "-50"    ← Involuntary loss: physical departure = deduction. Consent is irrelevant.
+
+        ❌ WRONG (gold deducted for a refused offer):
+        Action: "Пропоную хабар варті. Вартовий відштовхує монету і кричить 'Геть!'"
+        "gold_impact": "-10"    ← WRONG. NPC rejected the offer. No exchange occurred.
+        ✅ CORRECT:
+        "gold_impact": "none"    ← Refused offer: gold never left the player's hand.
+        </antiexamples>
+
         <data>
         Player Action: "{user_input}"
         Player Skills: {skills_str}
@@ -635,12 +724,34 @@ def build_resolve_mechanics_prompt(user_input, skills, clocks_info,
            - "DISADVANTAGE": ONLY when physically injured, outnumbered in active combat, or acting while severely debilitated. Social pressure alone is NOT disadvantage.
 
         3. ASSESS DIFFICULTY (Target DC):
-           - 60 (Very Easy): Beating a weak, unarmed peasant.
-           - 80 (Easy): A basic task, fighting a drunk thug.
-           - 100 (Normal): Standard challenge, fighting a trained guard.
-           - 120 (Hard): Fighting a skilled knight, sneaking into heavily guarded keep.
-           - 140 (Extreme): Dragon, multiple knights, deadly trap.
-           DC ESCALATION RULE: If the player's action targets royalty, high lords, or extremely powerful NPCs — DC MUST be at least 120. If the action is outrageous (accusing the King of treason, demanding a lordship, blatant lies with no proof) — DC MUST be 140.
+           - 50 (Trivial): No real resistance. Unarmed peasant, open unlocked door, asking a commoner for directions.
+           - 60 (Very Easy): Basic task without real opposition. Threatening a coward, simple physical chore.
+           - 70 (Easy): Familiar situation, mild resistance. Convincing a sympathetic ally, sneaking past one distracted guard.
+           - 80 (Normal): Standard challenge requiring skill. Negotiating at a market, asking a lord for a small favor,
+             fighting a trained city guard, scouting a lightly guarded area, bluffing a common soldier.
+           - 100 (Hard): Experienced opposition or complex social context. Convincing a skeptical lord, lying to an
+             educated noble, fighting a skilled knight, sneaking into a guarded manor.
+           - 120 (Extreme): Elite opposition or outrageous social demand. Deceiving the Hand of the King, fighting
+             multiple trained knights simultaneously, sneaking into a heavily fortified keep.
+           - 140 (Legendary): Nearly impossible. Assassinating a king in a throne room full of guards, fighting a
+             master swordsman alone, facing dragons or overwhelming forces.
+
+           SOCIAL ACTION EXAMPLES (for calibration):
+           - Greeting / small talk with anyone → FREE ACTION (skill_used=None, difficulty=0)
+           - Politely asking a lord for information or a minor favor → DC 80 (Normal)
+           - Negotiating a trade deal with a merchant → DC 80 (Normal)
+           - Convincing a skeptical noble to grant a favor → DC 100 (Hard)
+           - Lying to a maester or experienced lord → DC 100 (Hard)
+           - Accusing someone of treason before witnesses → DC 120 (Extreme)
+
+           DC ESCALATION RULE (action-based and status-based):
+           DC is determined by the NATURE OF THE ACTION, not by the target's rank alone.
+           - Polite / formal request to a lord or royalty → DC 80 (Normal). Do NOT escalate because of their title.
+           - Bold demand or veiled threat toward any NPC → DC 100 (Hard).
+           - Outright lie, false accusation, or outrageous claim → DC 120 (Extreme).
+           - Direct threat or assassination attempt on the King/Queen in public → DC 140 (Legendary).
+           NEVER set DC >= 120 simply because the target is a high lord or royalty.
+           Only escalate for HOSTILE or DISHONEST actions, regardless of target status.
 
         4. INTENT CLASSIFICATION:
            - If player attempts to spend a long period practicing/studying a specific skill -> "training".
@@ -654,7 +765,20 @@ def build_resolve_mechanics_prompt(user_input, skills, clocks_info,
              b) Critical failure on any action.
              c) ACTIVE VIOLENCE RULE: If Scene_Tension >= 3/4, the scene involves active combat. NPCs DO NOT stop attacking just because the player chose a non-combat action (talking, running, looking around). Apply appropriate health_impact even if the player's current action is social or passive.
            - gold_impact: EXACT NUMBER as string (e.g., "-5", "10") IF specified. Otherwise: "none", "spend_small", "spend_medium", "spend_large", "earn_small", "earn_medium", "earn_large".
+             GOLD RULE (CRITICAL): gold_impact is NEGATIVE only when the transaction is PHYSICALLY COMPLETE
+             (player received the item/service AND NPC accepted the payment). In ALL other cases — "none":
+             · NPC rejected the offer, ignored it, or demanded different terms → "none"
+             · Player offered a bribe that was refused → "none"
+             · NPC agreed in principle but exchange has not happened yet → "none"
+             Gold deduction happens at the moment of completed exchange — NOT at the moment of asking.
            - energy_impact: "none", "spend_small" (minor stress/walk), "spend_medium" (argument, training), "spend_large" (combat, labor), "restore_small" (food/fire), "restore_medium" (tavern bed), "restore_full" (sleep).
+             FREE ACTIONS (energy_impact MUST be "none"):
+             · Greeting, casual conversation, asking a simple question
+             · Looking around a scene, reading a document, examining an object
+             · Moving between adjacent scenes within the same location
+             · Waiting, resting briefly (not sleeping), watching from cover
+             · Drawing or sheathing a weapon (preparation, no combat yet)
+             Only use "spend_small" or higher for: active combat, prolonged tense argument, hard labor, long travel.
            - reputation_delta: Integer change in reputation (-20 to +20). Use ONLY for social actions (Інтрига/Управління). 0 for non-social or neutral outcomes. SUCCESS social → +5..+15. FAILURE social → -5..-15. Use 0 if no NPC is the target.
            - reputation_target_npc: Exact NPC name from the active roster that is affected. "" if reputation_delta is 0.
            - clocks_impact: {{"Scene_Tension": 1}} (if suspicious/aggressive/fail), {{"Scene_Tension": "clear"}} (if player leaves the scene/location). Max is 4.
@@ -692,9 +816,8 @@ def build_resolve_mechanics_prompt(user_input, skills, clocks_info,
 
         <example_output>
         {{
-            "reasoning": "Player explicitly said 'I go outside', so scene changes to Вулиці. No combat, no roll needed.",
-            "skill_check_reasoning": "1. Чи блокує/атакує NPC гравця? НІ. 2. Дія — пересування без опору. Висновок: None.",
-            "gold_reasoning": "1. Конкретна ціна в діалозі? НІ. 2. Тип операції: відсутня. 3. Фінальна сума: none.",
+            "skill_check_reasoning": "GATE 2: No NPC is attacking or blocking. Movement action. → skill_used=None, difficulty=0.",
+            "gold_reasoning": "GATE 4: Did gold physically leave possession? NO. → gold_impact=none.",
             "action_type": "standard",
             "skill_used": "None",
             "difficulty": 0,
@@ -707,7 +830,7 @@ def build_resolve_mechanics_prompt(user_input, skills, clocks_info,
                  "location_impact": "none",
                  "scene_impact": "Вулиці",
                  "health_impact": "none",
-                 "energy_impact": "spend_small",
+                 "energy_impact": "none",
                  "gold_impact": "none",
                  "inventory_new": [],
                  "inventory_lost": [],
@@ -718,12 +841,12 @@ def build_resolve_mechanics_prompt(user_input, skills, clocks_info,
 
         OUTPUT IN STRICT JSON FORMAT ONLY:
         {{
-            "reasoning": "Your brief mechanical reasoning here",
-            "skill_check_reasoning": "ОБОВ'ЯЗКОВО: 1. Чи блокує/атакує/заважає NPC гравцю зараз? [ТАК/НІ]. 2. Якщо НІ — skill=None (НЕ КИДАЙ КУБИК). Якщо ТАК — яка навичка? Приклади None: забрати оплачене замовлення, очікувати, йти вулицею, дивитися навкруги. Висновок: [None / Інтрига / Бойові / Управління / Військові]",
-            "gold_reasoning": "ОБОВ'ЯЗКОВО: 1. Чи була названа КОНКРЕТНА ціна у поточному або попередньому ході? [ТАК: вказати суму / НІ]. 2. Тип: [купівля / продаж / відсутня]. 3. ПРАВИЛО: якщо ціна відома — вкажи ТОЧНЕ ЧИСЛО в gold_impact (напр. '-70' або '1000'). Абстрактні теги (spend_medium тощо) — ТІЛЬКИ якщо ціна невідома.",
+            "skill_check_reasoning": "GATE 2: Is an NPC actively attacking/blocking the player RIGHT NOW? [YES/NO]. If NO → skill_used=None. If YES → which skill and why?",
+            "difficulty_reasoning": "GATE 3: Nature of the action (NOT the target's rank)? Which enum value [50|60|70|80|100|120|140] fits and why?",
+            "gold_reasoning": "GATE 4: Did gold PHYSICALLY leave the player's possession? [YES/NO]. If YES → voluntary (purchase/bribe) or involuntary (thrown/knocked/stolen)? Final value?",
             "action_type": "standard or training",
             "skill_used": "Бойові or Військові or Інтрига or Управління or None",
-            "difficulty": 100,
+            "difficulty": 80,
             "circumstance": "NORMAL",
             "verdict_text": "Short instruction for GM",
             "reputation_delta": 0,
@@ -733,7 +856,7 @@ def build_resolve_mechanics_prompt(user_input, skills, clocks_info,
                  "location_impact": "none",
                  "scene_impact": "none",
                  "health_impact": "none",
-                 "energy_impact": "spend_small",
+                 "energy_impact": "none",
                  "gold_impact": "none",
                  "inventory_new": [],
                  "inventory_lost": [],
@@ -876,25 +999,23 @@ TIME_CONTEXT: {GAME_ERA_CONTEXT}
    - Зупиняй сцену рівно в той момент, коли виникає напруга і потрібна реакція гравця.
 </system_rules>
 
-<thought_algorithm>
-У ключі "reasoning" виконай Tree of Thoughts ПЕРЕД написанням прологу:
+<thinking_directives>
+Перед написанням прологу, подумай:
 1. Sensory Anchor: Які 3 головні запахи/звуки цієї локації?
 2. Canon Integration: Який hook підходить локації та як органічно вписати туди профіль героя?
 3. Agency Check: В якій точці напруги текст має обірватися, щоб дати гравцю вибір?
 4. Actions Draft: 4 принципово різні реакції гравця на цей момент (агресивна / соціальна / обережна / дика).
-Після цього заповнюй інші ключі.
-</thought_algorithm>
+</thinking_directives>
 
 <output_requirements>
 - ВИКЛЮЧНО валідний JSON. Жодного тексту поза фігурними дужками.
 - Усі значення текстових полів — Українською мовою.
 - НІКОЛИ не використовуй подвійні лапки (") всередині значень рядків. Замінюй їх на одинарні (').
-- Чотири обов'язкових ключі: "reasoning", "narrative_text", "action_prompt", "suggested_actions".
+- Три обов'язкових ключі: "narrative_text", "action_prompt", "suggested_actions".
 </output_requirements>
 
 ВІДПОВІДАЙ СТРОГО У ФОРМАТІ JSON:
 {{
-  "reasoning": "Твоє внутрішнє міркування (Sensory Anchor / Canon Hook / Agency Check / Actions Draft)",
   "narrative_text": "Атмосферний пролог, 3 абзаци, Ukrainian, без чисел у тексті",
   "action_prompt": "Питання або ситуація що вимагає негайного вибору гравця (1-2 речення)",
   "suggested_actions": [
@@ -907,7 +1028,6 @@ TIME_CONTEXT: {GAME_ERA_CONTEXT}
 
 <few_shot_example>
 {{
-  "reasoning": "Локація: Вінтерфелл. Сенсорика: холод, запах мокрої вовни, іржа та кров на снігу. Canon hook: Страта Ґареда. Герой: вигаданий найманець. Інтеграція: свідок у натовпі. Точка зупинки: Нед заносить меч, герой помічає підозрілого з кинджалом. Дії: викликати варту / зупинити самому / відступити / непомітно стежити.",
   "narrative_text": "Ранковий холод Півночі пробирає до самих кісток, проникаючи крізь товстий вовняний плащ. Повітря важке — запах розтопленого снігу, кінського поту і вогкого каміння. Ви стоїте на внутрішньому дворі Вінтерфелла, де зібрався мовчазний натовп. У центрі, на дерев'яній плаxі, лежить змарнілий чоловік у чорному — дезертир з Нічної Варти, що незв'язно бурмоче про білих блукачів.\\n\\nЛорд Еддард Старк височіє над ним, його обличчя вирізьблене з сірого граніту. Він мовчки знімає важкий дворучний меч. Валірійська сталь 'Льоду' поглинає тьмяне світло. Тиша стає абсолютною, перериваючись лише різким карканням ворон.\\n\\nРаптом краєм ока ви помічаєте рух. Поруч хирлявий чоловік у брудному лахмітті непомітно тягнеться до кинджала під курткою, не зводячи погляду зі спини молодого Робба Старка. Сталь Еддарда злітає вгору.",
   "action_prompt": "Невідомий ось-ось вихопить зброю. Що ви зробите?",
   "suggested_actions": [

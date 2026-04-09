@@ -4,7 +4,7 @@ import json
 import asyncio
 from database.sheets import db
 from database.operations import refresh_npc_database, find_best_match
-from core.ai_client import model, ask_gemini, clean_and_parse_json
+from core.ai_client import model, model_gm_logic, ask_gemini, clean_and_parse_json
 from core.prompts import (
     GAME_ERA_CONTEXT, build_famous_characters_prompt,
     build_initial_stats_prompt, build_game_intro_prompt, build_populate_npcs_prompt,
@@ -49,7 +49,16 @@ async def generate_initial_stats(char_name, house_name, house_data):
 
     prompt = build_initial_stats_prompt(char_name, house_name, origin_region, valid_locations_str, scenes_block_str=_scenes_block)
 
-    profile = await ask_gemini(prompt)
+    # Gemma 4 31B — одноразова генерація, якість важливіша за швидкість
+    try:
+        def _sync_gen_profile():
+            return model_gm_logic.generate_content(prompt)
+
+        response = await asyncio.to_thread(_sync_gen_profile)
+        profile = clean_and_parse_json(response.text)
+    except Exception as e:
+        print(f"❌ Помилка генерації профілю (Gemma 4): {e}")
+        profile = None
     if profile:
         profile["Ім'я"] = char_name
         profile["Дім"] = house_name

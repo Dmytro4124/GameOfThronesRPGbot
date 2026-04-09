@@ -11,3 +11,9 @@ credentials.json
 *.log
 .idea/
 .vscode/
+
+# Бенчмарки та QA логи
+benchmark_models.py
+benchmark_turn.py
+run_night_tests.py
+qa_logs/

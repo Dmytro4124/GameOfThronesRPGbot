@@ -1,6 +1,7 @@
 # bot/handlers.py
 import asyncio
 import random
+import time
 import traceback
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery
@@ -18,7 +19,7 @@ from core.world import (
     background_canon_generation, populate_contextual_npcs
 )
 from core.engine import process_game_turn, user_sessions
-from config import ADMIN_TELEGRAM_IDS
+from config import ADMIN_TELEGRAM_IDS, EROTIC_USERS
 
 
 router = Router()
@@ -297,7 +298,7 @@ async def show_debug_stats(message: Message):
     chat_id = message.chat.id
     log_text = user_sessions.get(chat_id, {}).get('last_debug_time',
                                                   "❌ Логи зберігаються лише для поточної активної сесії (до перезапуску сервера). Зробіть хід.")
-    await message.answer(log_text, parse_mode='Markdown')
+    await message.answer(log_text, parse_mode=None)
 
 
 @router.message(F.text == "🔄 Рестарт")
@@ -425,18 +426,69 @@ async def handle_general_messages(message: Message, bot: Bot):
         active_processing.add(chat_id)
 
         try:
-            # КРОК 3: Тематична заглушка (буде замінена на фінальну відповідь)
+            # КРОК 3: Тематична заглушка (буде оновлюватись прогресивно)
             temp_msg = await message.reply(random.choice(PLACEHOLDER_PHRASES))
+
+            # Progress callback — оновлює placeholder зі статусом поточного кроку
+            async def _progress(status_text: str):
+                try:
+                    await temp_msg.edit_text(status_text, parse_mode=None)
+                except Exception:
+                    pass
 
             # КРОК 2: Фоновий typing на весь час обробки
             typing_task = asyncio.create_task(keep_typing(bot, chat_id))
+
+            # Streaming вимикається для еротичного режиму — streamGenerateContent блокує NSFW
+            USE_STREAMING = chat_id not in EROTIC_USERS
+            narrator_queue = asyncio.Queue() if USE_STREAMING else None
+
+            # Streaming consumer — оновлює повідомлення кожні 1.5с новим текстом
+            async def _stream_consumer():
+                accumulated = ""
+                last_edit_time = 0
+                print("🟢 [CONSUMER] Stream consumer started")
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(narrator_queue.get(), timeout=300)
+                    except asyncio.TimeoutError:
+                        print("🔴 [CONSUMER] Timeout waiting for chunk")
+                        break
+                    if chunk is None:  # сигнал завершення
+                        print(f"🟢 [CONSUMER] Done. Total accumulated: {len(accumulated)} chars")
+                        break
+                    accumulated += chunk
+                    print(f"🟢 [CONSUMER] Got chunk, accumulated: {len(accumulated)} chars")
+                    now = time.time()
+                    if now - last_edit_time >= 1.5 and len(accumulated) > 10:
+                        try:
+                            if len(accumulated) > 4000:
+                                display = "✍️ ...\n\n" + accumulated[-3900:]
+                            else:
+                                display = accumulated + " ✍️"
+                            await temp_msg.edit_text(display, parse_mode=None)
+                            last_edit_time = now
+                            print(f"🟢 [CONSUMER] Message edited, {len(display)} chars")
+                        except Exception as e:
+                            print(f"🔴 [CONSUMER] Edit failed: {e}")
+
+            consumer_task = asyncio.create_task(_stream_consumer()) if USE_STREAMING else None
             try:
-                response_text, suggested_actions = await process_game_turn(chat_id, user_text)
+                response_text, suggested_actions = await process_game_turn(
+                    chat_id, user_text,
+                    progress_callback=_progress,
+                    narrator_queue=narrator_queue,
+                )
+                if consumer_task:
+                    await consumer_task
+
                 if display_intent:
                     response_text = f"🗣️ _{display_intent}_\n\n{response_text}"
                 await send_game_response(bot, chat_id, response_text, suggested_actions,
                                          edit_message=temp_msg)
             except Exception as e:
+                if consumer_task:
+                    consumer_task.cancel()
                 error_trace = traceback.format_exc()
                 print(error_trace)
                 try:

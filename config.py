@@ -26,11 +26,11 @@ TAB_KNOWLEDGE = 'KnowledgeBase'
 TAB_USERS = 'Users_DB'
 TAB_NPC = 'NPC_DB'
 
-# Налаштування моделей Gemini
-MODEL_MAIN_NAME = 'gemma-3-27b-it'
-MODEL_WORKER_NAME = 'gemma-3-4b-it'
-MODEL_GM_LOGIC_NAME = 'gemma-3-27b-it'      # Логічний рушій (JSON стану світу)
-MODEL_NARRATOR_NAME = 'gemma-3-27b-it'     # Письменник (художній текст)
+# Налаштування моделей Gemini (всі — Gemma 4)
+MODEL_MAIN_NAME = 'gemma-4-31b-it'           # Gemma 4 31B: утиліта (summarize, validate, NPC gen, intro)
+MODEL_WORKER_NAME = 'gemma-4-31b-it'         # Gemma 4 31B: точна механіка (кубики, DC, JSON)
+MODEL_GM_LOGIC_NAME = 'gemma-4-31b-it'       # Dense flagship (складна NPC логіка, стан світу)
+MODEL_NARRATOR_NAME = 'gemma-4-31b-it'       # Dense flagship (художній текст)
 
 # Налаштування температури моделей
 MODEL_MAIN_TEMP = 0.7   # Для генерації сюжету та креативних описів

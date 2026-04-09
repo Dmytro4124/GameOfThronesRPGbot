@@ -8,16 +8,19 @@ from google import genai
 from google.genai import types
 
 from core.engine import process_game_turn, user_sessions
-from core.ai_client import clean_and_parse_json
+from core.ai_client import clean_and_parse_json, get_thoughts_log
 from database.operations import get_house_stats_data, save_user_data, get_user_data, clear_npc_cache, refresh_npc_database, get_location_npcs
 from database.sheets import db
 from core.world import generate_initial_stats, background_canon_generation, populate_contextual_npcs
-from config import GEMINI_API_KEYS_TEST, MODEL_MAIN_NAME, TAB_USERS
+from config import GEMINI_API_KEYS_TEST, TAB_USERS
 
 # === КОНСТАНТИ ===
-SLEEP_INIT_SEC = 10          # Пауза перед першим викликом рушія (rate-limit)
-SLEEP_AFTER_ENGINE_SEC = 30  # Пауза після виклику рушія
-SLEEP_AFTER_EVALUATOR_SEC = 30  # Пауза після виклику евалюатора
+SLEEP_INIT_SEC = 3           # Коротка пауза перед першим ходом
+SLEEP_AFTER_ENGINE_SEC = 0   # Без пауз — ігровий рушій використовує свій ключ
+SLEEP_AFTER_EVALUATOR_SEC = 0  # Без пауз — евалюатор використовує тестовий ключ
+
+# Модель для Player AI та Evaluator (окрема від ігрового рушія)
+QA_MODEL_NAME = 'gemma-4-31b-it'
 PLAYER_HISTORY_MAX_MESSAGES = 10  # Rolling window за замовчуванням (може бути перевизначено профілем)
 
 # === ЛОГУВАННЯ ===
@@ -71,11 +74,11 @@ PLAYER_ACTION: {player_action_data}
 1. ПОРУШЕННЯ ІМЕРСИВНОСТІ (СИСТЕМНІ ЦИФРИ В UI): Художній текст (UI_TEXT) НЕ ПОВИНЕН містити СИСТЕМНИХ термінів або цифр, що прямо розкривають ігрову механіку. Перевіряй ВИКЛЮЧНО текст UI_TEXT. Текст PLAYER_ACTION — це введення гравця, він МОЖЕ містити будь-які слова і цифри, НЕ перевіряти його за Rule 1. Приклади FAIL: 'ви втратили 5 енергії', 'HP: 80', 'кидок кубика 47', 'навичка +1', 'DC 60'. Приклади ДОПУСТИМОГО: NPC називає ціну ('п'ятдесят золотих', '50 монет'), кількість людей ('три вартових'), відстані ('два дні шляху'). ЯВНІ ВИКЛЮЧЕННЯ (НІКОЛИ не є порушенням Rule 1): імена NPC (Ілліріо Мопатіс, Кассандра Ліра тощо), титули (принц, лорд, магістр), назви фракцій/організацій (найманці, вартові, Ланністери), назви локацій (Пентос, Гавань), будь-які наративні описи персонажів та подій. Ключове питання: чи РОЗКРИВАЄ цифра або термін ВНУТРІШНЮ ЧИСЛОВУ МЕХАНІКУ рушія (стати, кидки, DC, HP, енергію)? Якщо так — FAIL. Якщо це імена, титули, або органічна частина діалогу/опису — PASS.
 2. ГАЛЮЦИНАЦІЇ РУШІЯ (КРИТИЧНО): У INTERNAL_LOGS є теги '[БЛОКУВАННЯ ГАЛЮЦИНАЦІЇ]' або 'ШІ придумав NPC'.
 3. ЗЛАМАНА МАТЕМАТИКА ТА ПРОГРЕСІЯ — ДВА НЕЗАЛЕЖНИХ ПРАВИЛА:
-   3A. МАТЕМАТИКА КИДКА: При ризикованій дії в логах МАЄ бути рядок формату '{Навичка}: Кидок {N} + Навичка {M} = {сума} (Ціль: {DC}) -> УСПІХ/ПРОВАЛ'. ВАЖЛИВО: 'Навичка {M}' тут — це ПОТОЧНИЙ РІВЕНЬ СТАТY, а НЕ підвищення. ВИКЛЮЧЕННЯ: якщо дія гравця є пасивною (чекати, спостерігати, сідати, стояти) і в логах є 'Немає: Кидок -' або взагалі немає рядка кидка — це AUTO_SUCCESS, НЕ порушення. Rule 3A застосовувати ТІЛЬКИ до ризикованих дій (бій, крадіжка, переконання, магія, атлетика).
+   3A. МАТЕМАТИКА КИДКА: При ризикованій дії в логах МАЄ бути рядок формату '{Навичка}: Кидок {N} + Навичка {M} = {сума} (Ціль: {DC}) -> УСПІХ/ПРОВАЛ'. ВАЖЛИВО: 'Навичка {M}' тут — це ПОТОЧНИЙ РІВЕНЬ СТАТY, а НЕ підвищення. ВИКЛЮЧЕННЯ: якщо дія гравця є пасивною (чекати, спостерігати, сідати, стояти) і в логах є 'Немає: Кидок -' або взагалі немає рядка кидка — це AUTO_SUCCESS, НЕ порушення. ТАКОЖ ВИКЛЮЧЕННЯ: якщо в логах є 'GODMODE' або 'PUPPET' — активний режим тестування, кидок нестандартний, Rule 3A не застосовувати. Rule 3A застосовувати ТІЛЬКИ до ризикованих дій (бій, крадіжка, переконання, магія, атлетика).
    3B. НЕЛЕГАЛЬНИЙ АПГРЕЙД СТАТY: Підвищення навички відображається ВИКЛЮЧНО рядком '📈 {назва_навички}: +{N} (Стало {нове_значення})'. Такий рядок 📈 легальний ТІЛЬКИ якщо в тому самому ході: кидок > 95, АБО дія містила слово 'тренування'. Якщо рядок 📈 є, а ці умови не виконані — FAIL. Якщо рядка 📈 немає взагалі — підвищення НЕ відбулось, Rule 3B не застосовувати.
 4. РОЗСИНХРОН НАРАТИВУ (ЗОНОВА ЛОГІКА): Перевіряй лише ті втрати, які зобов'язані бути відображені в наративі. Лог-рядки мають формат '⚡ Енергія: {old} -> {new} ({delta})' та '❤️ Здоров'я: {old} -> {new}'. Зчитуй {new} як залишковий рівень.
    ЕНЕРГІЯ: a) залишок ≥ 60 — наратив НЕ потрібен, тиша Майстра ПРАВИЛЬНА, НЕ карати; b) залишок 30–59 — перевір дельту: ТІЛЬКИ якщо |дельта| ≥ 10 (значна втрата), UI ПОВИНЕН згадати стому. Якщо |дельта| < 10 (незначна втрата, наприклад -7) — наратив НЕ обов'язковий навіть у цій зоні, НЕ карати; c) залишок ≤ 29 — будь-яка втрата → UI ПОВИНЕН описати виснаження. Порушення b (при |дельта| ≥ 10) або c → FAIL. Все інше — PASS.
-   ЗДОРОВ'Я: будь-яка втрата: залишок ≥ 70 → хоча б мимохідна згадка ('wince', 'graze'); залишок 40–69 → явний опис рани ('blood', 'pain'); залишок ≤ 39 → критична небезпека в UI. Відсутність → FAIL.
+   ЗДОРОВ'Я: будь-яка втрата: залишок ≥ 70 → хоча б мимохідна згадка болю (гримаса, синець, стусан); залишок 40–69 → явний опис рани (кров, біль, рана); залишок ≤ 39 → критична небезпека в UI. Відсутність → FAIL.
    ЗОЛОТО/ІНШІ РЕСУРСИ: зміна золота в логах НЕ вимагає згадки в UI. Не перевіряти.
 5. GOD-MODE: Система дозволила дію при нестачі енергії без жорсткої відмови в UI.
 6. ВИТІК ДАНИХ: Traceback, 429, 400 або масиви [STATS] вилізли у UI_TEXT.
@@ -85,14 +88,20 @@ PLAYER_ACTION: {player_action_data}
 - ВИКЛЮЧНО валідний JSON. Жодного тексту поза фігурними дужками { }.
 - НІКОЛИ не використовуй подвійні лапки (") всередині значень. Використовуй одинарні (').
 - Першим ключем ЗАВЖДИ має бути "log_analysis".
+- "ux_score": ціле число 1-10. 10 = бездоганно. 8-9 = добре. 6-7 = прийнятно. 5 = посередньо. 1-4 = тільки при FAIL. PASS отримує 5-10 залежно від якості наративу та різноманіття suggested_actions.
 </output_requirements>
 
 <thought_algorithm>
-У ключі "log_analysis" проведи стислий Adversarial Validation:
-0. СПОЧАТКУ перевір: чи є в INTERNAL_LOGS рядок '🛑 Дію заблоковано Цензором'? Якщо ТАК — застосуй Rule 0 (Censor Override): пропусти Rules 3-5, перевір лише чи UI має художнє пояснення + Rules 1, 6.
-1. Шукай в INTERNAL_LOGS рядки формату '📈 {навичка}: +{N}' — це єдині апгрейди статів. Якщо таких рядків немає — прогресії не було, Rule 3B не застосовувати. Якщо є — перевір, чи в тому самому ході був кидок > 95 або слово 'тренування'. Рядки 'Кидок {N} + Навичка {M}' — це розрахунок шансу, НЕ апгрейд, ігнорувати для Rule 3B.
-2. Перевір UI_TEXT на імерсивність (СИСТЕМНІ цифри — Rule 1) та синхронізацію з логами за зоновою логікою (Rule 4). Для енергії у зоні 30-59: перевір |дельту| — якщо < 10, наратив НЕ обов'язковий.
-3. Винеси фінальний вердикт.
+У ключі "log_analysis" проведи стислий Adversarial Validation КРОКАМИ по порядку:
+0. Цензор: чи є '🛑 Дію заблоковано Цензором' в INTERNAL_LOGS? Якщо ТАК — Rule 0: пропусти Rules 3-5, перевір тільки художнє пояснення в UI + Rules 1, 6. Зупинись.
+1. Галюцинації (Rule 2): чи є в INTERNAL_LOGS '[БЛОКУВАННЯ ГАЛЮЦИНАЦІЇ]' або 'ШІ придумав NPC'? Якщо ТАК — FAIL.
+2. Апгрейди (Rule 3B): шукай '📈' рядки. Якщо є — чи був кидок > 95 або слово 'тренування'? Ні → FAIL. 'Кидок {N} + Навичка {M}' — це розрахунок, НЕ апгрейд.
+3. Математика кидка (Rule 3A): для ризикованих дій (бій, крадіжка, переконання, магія) — чи є рядок 'Кидок {N} + Навичка {M} = {сума}'? Немає → FAIL. Є 'GODMODE'/'PUPPET' або пасивна дія → пропусти.
+4. Імерсивність (Rule 1): UI_TEXT містить системні цифри (HP, DC, енергія, кидок)? → FAIL. Ціни NPC, кількість людей, відстані — PASS.
+5. Наратив-синхрон (Rule 4): зчитай '⚡ Енергія' та '❤️ Здоров'я' з логів. Застосуй зонову логіку. Порушення → FAIL.
+6. God-mode (Rule 5): Енергія = 0 в логах, але дія дозволена без відмови в UI → FAIL.
+7. Витік даних (Rule 6): Traceback, 429, 400, масиви [STATS] в UI_TEXT → FAIL.
+8. Фінальний вердикт: якщо жодне з 1-7 не спрацювало → PASS. Встанови ux_score за якістю наративу (1-4 тільки при FAIL).
 </thought_algorithm>
 
 <few_shot_examples>
@@ -127,11 +136,45 @@ PLAYER_ACTION: {player_action_data}
   "reason": "Енергія 31 — зона 30-59 (31 > 29, НЕ ≤29), дельта мала (-5), наратив не вимагається. Імена NPC та титули не є системними термінами.",
   "ux_score": 7
 }
+
+ПРИКЛАД 5 (FAIL — Rule 1, системна цифра в UI):
+{
+  "log_analysis": "Rule 0: немає '🛑'. Rule 2: галюцинацій немає. Rule 3B: рядків '📈' немає. Rule 3A: 'Інтрига: Кидок 44 + Навичка 30 = 74 (Ціль: 80) -> ПРОВАЛ' — формат коректний. Rule 1: UI_TEXT містить 'Ви втратили 15 енергії після сутички' — пряме розкриття внутрішньої числової механіки (числове значення енергії). FAIL за Rule 1.",
+  "status": "FAIL",
+  "reason": "Rule 1: UI_TEXT розкриває системну механіку — 'втратили 15 енергії'.",
+  "ux_score": 3
+}
+
+ПРИКЛАД 6 (FAIL — Rule 3B, нелегальний апгрейд):
+{
+  "log_analysis": "Rule 0: немає '🛑'. Rule 2: галюцинацій немає. Rule 3B: знайдено '📈 Дипломатія: +1 (Стало 26)'. Перевірка умов: кидок у логах = 'Дипломатія: Кидок 67 + Навичка 25 = 92 (Ціль: 70) -> УСПІХ' — кидок 67, НЕ > 95. Слово 'тренування' відсутнє в PLAYER_ACTION ('Я переконую торговця знизити ціну'). Обидві умови не виконані — апгрейд нелегальний. FAIL за Rule 3B.",
+  "status": "FAIL",
+  "reason": "Rule 3B: нелегальний апгрейд Дипломатії — кидок 67 (не >95), тренування не було.",
+  "ux_score": 2
+}
+
+ПРИКЛАД 7 (FAIL — Rule 4, відсутній опис рани при HP у зоні 40-69):
+{
+  "log_analysis": "Rule 0: немає '🛑'. Rule 3B: рядків '📈' немає. Rule 3A: 'Бойові: Кидок 33 + Навичка 40 = 73 (Ціль: 90) -> ПРОВАЛ' — коректно. Rule 4 Здоров'я: '❤️ Здоров'я: 80 -> 48 (-32)' — залишок 48, зона 40-69. UI ПОВИНЕН містити явний опис рани (кров, біль, рана). UI_TEXT: 'Противник відступив у тінь. Ти переводиш подих.' — жодної згадки рани чи болю. FAIL за Rule 4.",
+  "status": "FAIL",
+  "reason": "Rule 4: HP 48 (зона 40-69) — UI не містить опису рани при втраті 32 HP.",
+  "ux_score": 3
+}
 </few_shot_examples>
 """
 
 
 # === ХЕЛПЕРИ ===
+
+# Поля профілю для трекінгу змін між ходами
+_TRACKED_PROFILE_FIELDS = [
+    "Здоров'я", "Енергія", "Особисте Золото",
+    "Поточне місцезнаходження", "Поточна сцена", "Регіон",
+    "Бойові навички", "Стрільба", "Дипломатія", "Інтрига", "Крадіжка",
+    "Медицина", "Виживання", "Знання", "Інвентар", "Зброя", "Броня",
+    "Вороги", "Друзі", "Ігровий час",
+]
+
 
 def _profile_summary(profile: dict) -> str:
     """Витягує ключові поля профілю для ін'єкції в PLAYER_CURRENT_STATE."""
@@ -143,6 +186,136 @@ def _profile_summary(profile: dict) -> str:
     ]
     parts = [f"{k}: {profile.get(k, '—')}" for k in fields if k in profile]
     return " | ".join(parts)
+
+
+def _snapshot_profile(profile: dict) -> dict:
+    """Знімок ключових полів профілю для diff."""
+    if not profile:
+        return {}
+    return {k: profile.get(k, "") for k in _TRACKED_PROFILE_FIELDS}
+
+
+def _diff_snapshots(before: dict, after: dict, label: str = "") -> list:
+    """Порівнює два знімки, повертає список змін."""
+    changes = []
+    all_keys = set(list(before.keys()) + list(after.keys()))
+    for k in sorted(all_keys):
+        old_val = before.get(k, "")
+        new_val = after.get(k, "")
+        if str(old_val) != str(new_val):
+            changes.append(f"{label}{k}: {old_val!r} -> {new_val!r}")
+    return changes
+
+
+def _validate_suggested_actions(suggested_actions: list) -> list:
+    """Валідує структуру suggested_actions від GM_Logic. Повертає список помилок."""
+    errors = []
+    if not suggested_actions:
+        errors.append("suggested_actions порожній")
+        return errors
+    if len(suggested_actions) < 4:
+        errors.append(f"suggested_actions має {len(suggested_actions)} кнопок (очікується 4)")
+    for i, action in enumerate(suggested_actions):
+        if not action or action == "...":
+            errors.append(f"suggested_actions[{i}] порожній або placeholder '...'")
+    return errors
+
+
+def _validate_gm_logic_output(ai_data: dict, legal_npc_names: list = None) -> list:
+    """Валідує повну структуру JSON від GM_Logic. Повертає список помилок."""
+    errors = []
+    if not ai_data or not isinstance(ai_data, dict):
+        errors.append("ai_data не є dict або порожній")
+        return errors
+
+    # director_notes
+    notes = ai_data.get("director_notes")
+    if notes is None:
+        errors.append("director_notes відсутній")
+    elif not isinstance(notes, list):
+        errors.append(f"director_notes не list, а {type(notes).__name__}")
+    elif len(notes) == 0:
+        errors.append("director_notes порожній масив")
+    else:
+        for i, note in enumerate(notes):
+            if not isinstance(note, str):
+                errors.append(f"director_notes[{i}] не string, а {type(note).__name__}")
+
+    # suggested_actions
+    actions = ai_data.get("suggested_actions")
+    if actions is None:
+        errors.append("suggested_actions відсутній")
+    elif not isinstance(actions, list):
+        errors.append(f"suggested_actions не list, а {type(actions).__name__}")
+    else:
+        for i, item in enumerate(actions):
+            if isinstance(item, dict):
+                if "button" not in item:
+                    errors.append(f"suggested_actions[{i}] без ключа 'button'")
+                if "intent" not in item:
+                    errors.append(f"suggested_actions[{i}] без ключа 'intent'")
+            elif not isinstance(item, str):
+                errors.append(f"suggested_actions[{i}] ні dict ні string, а {type(item).__name__}")
+
+    # npc_updates
+    npc_updates = ai_data.get("npc_updates")
+    if npc_updates is not None:
+        if not isinstance(npc_updates, list):
+            errors.append(f"npc_updates не list, а {type(npc_updates).__name__}")
+        else:
+            for i, npc in enumerate(npc_updates):
+                if not isinstance(npc, dict):
+                    errors.append(f"npc_updates[{i}] не dict, а {type(npc).__name__}")
+                    continue
+                name = npc.get("Name", "")
+                if not name:
+                    errors.append(f"npc_updates[{i}] без 'Name'")
+                elif legal_npc_names and name not in legal_npc_names:
+                    errors.append(f"npc_updates[{i}] NPC '{name}' не в активному ростері {legal_npc_names}")
+
+    # companion_npcs
+    companions = ai_data.get("companion_npcs")
+    if companions is not None and not isinstance(companions, list):
+        errors.append(f"companion_npcs не list, а {type(companions).__name__}")
+
+    return errors
+
+
+def _detect_multi_turn_anomalies(turn_states: list) -> list:
+    """Аналізує статистику по всіх ходах, виявляє аномальні патерни."""
+    anomalies = []
+    if len(turn_states) < 3:
+        return anomalies
+
+    # Трекаємо числові поля
+    for field in ["Здоров'я", "Енергія", "Особисте Золото"]:
+        values = []
+        for s in turn_states:
+            val = s.get(field, "")
+            try:
+                values.append(int(val))
+            except (ValueError, TypeError):
+                continue
+        if len(values) < 3:
+            continue
+
+        # Монотонне падіння без відновлення
+        deltas = [values[i+1] - values[i] for i in range(len(values)-1)]
+        if all(d <= 0 for d in deltas) and any(d < 0 for d in deltas):
+            anomalies.append(f"⚠️ {field} тільки падає і ніколи не відновлюється: {values}")
+
+        # Раптовий стрибок вгору без причини (>50% від поточного)
+        for i, d in enumerate(deltas):
+            if d > 0 and values[i] > 0 and d > values[i] * 0.5:
+                anomalies.append(f"⚠️ {field} раптовий стрибок +{d} на ході {i+2}: {values[i]} -> {values[i+1]}")
+
+    # Локація змінюється кожен хід — підозрілий телепорт
+    locations = [s.get("Поточне місцезнаходження", "") for s in turn_states]
+    loc_changes = sum(1 for i in range(len(locations)-1) if locations[i] != locations[i+1])
+    if loc_changes > len(locations) * 0.7 and len(locations) > 5:
+        anomalies.append(f"⚠️ Локація змінюється занадто часто ({loc_changes}/{len(locations)-1} ходів)")
+
+    return anomalies
 
 
 async def _generate_with_retry(
@@ -164,7 +337,7 @@ async def _generate_with_retry(
             config = types.GenerateContentConfig(**config_kwargs)
             response = await asyncio.to_thread(
                 client.models.generate_content,
-                model=MODEL_MAIN_NAME,
+                model=QA_MODEL_NAME,
                 contents=contents,
                 config=config,
             )
@@ -205,6 +378,7 @@ class RPGTesterAdapter:
         self.char_name = char_name
         self.house_name = house_name
         self._row_number = None  # зберігається для cleanup()
+        self._last_thoughts = ""
 
     async def initialize(self, start_location=None, start_scene=None):
         log.info(f"⚙️ Ініціалізація тестового персонажа ({self.char_name})...")
@@ -287,9 +461,20 @@ class RPGTesterAdapter:
     async def process(self, action: str):
         if action.startswith("/"):
             response = await self.process_cheat(action)
-            return response, f"[CHEAT] {action} → {response}"
+            return response, f"[CHEAT] {action} → {response}", [], None
 
         raw_response, suggested_actions = await process_game_turn(self.chat_id, action)
+
+        # Збираємо роздуми моделей і додаємо до логів
+        thoughts_entries = get_thoughts_log()
+        if thoughts_entries:
+            thoughts_lines = []
+            for e in thoughts_entries:
+                short_model = e["model"].replace("gemma-4-31b-it", "G4").replace("gemma-3-27b-it", "G3")
+                thoughts_lines.append(f"  [{short_model}] {e['thought'][:400].strip()}")
+            self._last_thoughts = "\n".join(thoughts_lines)
+        else:
+            self._last_thoughts = ""
 
         if "📊" in raw_response:
             parts = raw_response.split("📊")
@@ -302,7 +487,16 @@ class RPGTesterAdapter:
         if suggested_actions:
             logs += f"\n💡 Згенеровані дії: {', '.join(suggested_actions)}"
 
-        return ui_text, logs
+        # Витягуємо ai_data з session для валідації GM_Logic
+        session = user_sessions.get(self.chat_id, {})
+        last_ai_data = session.get("last_ai_data")
+
+        return ui_text, logs, suggested_actions, last_ai_data
+
+    def get_timing(self) -> str:
+        """Витягує таймінг останнього ходу з user_sessions."""
+        session = user_sessions.get(self.chat_id, {})
+        return session.get("last_debug_time", "Таймінг недоступний")
 
     async def cleanup(self):
         """Видаляє тестовий рядок з Google Sheets за user_id (безпечно для паралельного запуску)."""
@@ -329,7 +523,8 @@ class RPGTesterAdapter:
 
 # === ЗВІТ ===
 
-def _print_report(results: list, profile_key: str = "test"):
+def _print_report(results: list, profile_key: str = "test",
+                   turn_states: list = None, action_log: list = None):
     if not results:
         log.info("\n📋 Результати: немає даних.")
         return
@@ -349,12 +544,38 @@ def _print_report(results: list, profile_key: str = "test"):
     for r in results:
         marker = "✅" if r["status"] == "PASS" else "❌"
         log.info(f"  Хід {r['turn']:2d}: {marker} [UX {r['ux_score']}/10] {r['reason']}")
+
+    # Multi-turn anomaly detection
+    if turn_states and len(turn_states) >= 3:
+        anomalies = _detect_multi_turn_anomalies(turn_states)
+        if anomalies:
+            log.info("\n🔎 MULTI-TURN АНОМАЛІЇ:")
+            for a in anomalies:
+                log.warning(f"  {a}")
+        else:
+            log.info("\n🔎 Multi-turn аномалій не виявлено.")
+
     log.info("=" * 50)
+
+    # JSON-звіт з replay data
+    report_data = {
+        "summary": {
+            "turns": len(results), "pass": passes, "fail": fails, "avg_ux": avg_score,
+            "anomalies": _detect_multi_turn_anomalies(turn_states) if turn_states else [],
+        },
+        "turns": results,
+    }
+    # Replay: зберігаємо action sequence для відтворення тесту через scripted_actions
+    if action_log:
+        report_data["replay_actions"] = {
+            str(a["turn"]): a["action"] for a in action_log
+        }
+        report_data["action_log"] = action_log
 
     report_path = f"qa_logs/report_{profile_key}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     try:
         with open(report_path, "w", encoding="utf-8") as f:
-            json.dump({"summary": {"turns": len(results), "pass": passes, "fail": fails, "avg_ux": avg_score}, "turns": results}, f, ensure_ascii=False, indent=2)
+            json.dump(report_data, f, ensure_ascii=False, indent=2)
         log.info(f"📄 JSON-звіт збережено: {report_path}")
     except Exception as e:
         log.warning(f"Не вдалося зберегти JSON-звіт: {e}")
@@ -384,12 +605,22 @@ async def run_test(max_turns: int = 5, profile: dict = None, profile_key: str = 
     )
 
     results = []
+    action_log = []        # Replay: всі дії для відтворення тесту
+    turn_states = []       # Multi-turn: знімки профілю після кожного ходу
     scripted_actions: dict = p.get("scripted_actions", {})
     killed_npcs: list = []
 
-    log.info(f"⏳ Пауза {SLEEP_INIT_SEC}с перед першим ходом...")
-    await asyncio.sleep(SLEEP_INIT_SEC)
-    ui_text, _ = await adapter.process("Я оглядаюся навколо")
+    if SLEEP_INIT_SEC > 0:
+        log.info(f"⏳ Пауза {SLEEP_INIT_SEC}с перед першим ходом...")
+        await asyncio.sleep(SLEEP_INIT_SEC)
+    ui_text, _, _, _ = await adapter.process("Я оглядаюся навколо")
+
+    # Початковий знімок профілю
+    _init_profile, _ = await get_user_data(adapter.chat_id)
+    prev_profile_snap = _snapshot_profile(_init_profile)
+    prev_npc_names = list(get_location_npcs(
+        _init_profile.get("Поточне місцезнаходження", ""), "Невідомо"
+    )[1]) if _init_profile else []
 
     # Перший елемент history — системний промпт гравця (pinned, не потрапляє у rolling window).
     # Gemma не підтримує system_instruction у GenerateContentConfig, тому передаємо як user-повідомлення.
@@ -449,13 +680,57 @@ async def run_test(max_turns: int = 5, profile: dict = None, profile_key: str = 
                 if len(player_history_dynamic) > history_window:
                     player_history_dynamic = player_history_dynamic[-history_window:]
 
-            # Для чіт-команд не чекаємо rate-limit рушія
-            if not player_action.startswith("/"):
+            # Пауза перед рушієм (0 за замовчуванням — рушій на своєму ключі)
+            if not player_action.startswith("/") and SLEEP_AFTER_ENGINE_SEC > 0:
                 log.info(f"⏳ Пауза {SLEEP_AFTER_ENGINE_SEC}с перед викликом рушія...")
                 await asyncio.sleep(SLEEP_AFTER_ENGINE_SEC)
 
-            new_ui_text, system_logs = await adapter.process(player_action)
+            new_ui_text, system_logs, new_suggested, last_ai_data = await adapter.process(player_action)
             log.info(f"⚙️  ЛОГИ РУШІЯ:\n{system_logs}\n")
+            if adapter._last_thoughts:
+                log.info(f"💭 РОЗДУМИ МОДЕЛЕЙ:\n{adapter._last_thoughts}\n")
+
+            # === Збір даних після ходу ===
+
+            # Replay: зберігаємо дію
+            action_log.append({"turn": turn, "action": player_action})
+
+            # Таймінг рушія
+            timing = adapter.get_timing()
+            log.info(f"⏱️  {timing}")
+
+            # Profile diff
+            curr_profile, _ = await get_user_data(adapter.chat_id)
+            curr_snap = _snapshot_profile(curr_profile)
+            profile_changes = _diff_snapshots(prev_profile_snap, curr_snap, "📋 ")
+            if profile_changes:
+                log.info("📋 ЗМІНИ ПРОФІЛЮ:")
+                for ch in profile_changes:
+                    log.info(f"  {ch}")
+            turn_states.append(curr_snap)
+            prev_profile_snap = curr_snap
+
+            # NPC roster diff
+            curr_loc = curr_snap.get("Поточне місцезнаходження", "")
+            curr_scene = curr_snap.get("Поточна сцена", "Невідомо")
+            _, curr_npc_names, _ = get_location_npcs(curr_loc, curr_scene)
+            added_npcs = [n for n in curr_npc_names if n not in prev_npc_names]
+            removed_npcs = [n for n in prev_npc_names if n not in curr_npc_names]
+            if added_npcs or removed_npcs:
+                log.info(f"👥 NPC РОСТЕР: +{added_npcs} -{removed_npcs}")
+            prev_npc_names = list(curr_npc_names)
+
+            # GM_Logic structure validation (suggested_actions + full ai_data)
+            action_errors = _validate_suggested_actions(new_suggested)
+            if action_errors:
+                log.warning(f"⚠️ GM_Logic suggested_actions: {', '.join(action_errors)}")
+
+            # Full GM_Logic JSON validation
+            gm_errors = _validate_gm_logic_output(last_ai_data, curr_npc_names)
+            if gm_errors:
+                log.warning(f"⚠️ GM_Logic JSON validation:")
+                for ge in gm_errors:
+                    log.warning(f"  {ge}")
 
             # Відстежуємо вбитих NPC — евалюатор перевірятиме їх воскресіння у наступних ходах
             if player_action.lower().startswith("/killnpc") and "✅" in system_logs:
@@ -469,8 +744,9 @@ async def run_test(max_turns: int = 5, profile: dict = None, profile_key: str = 
                 ui_text = new_ui_text
                 continue
 
-            log.info(f"⏳ Пауза {SLEEP_AFTER_EVALUATOR_SEC}с перед Евалюатором...")
-            await asyncio.sleep(SLEEP_AFTER_EVALUATOR_SEC)
+            if SLEEP_AFTER_EVALUATOR_SEC > 0:
+                log.info(f"⏳ Пауза {SLEEP_AFTER_EVALUATOR_SEC}с перед Евалюатором...")
+                await asyncio.sleep(SLEEP_AFTER_EVALUATOR_SEC)
 
             # === EVALUATOR AI ===
             dead_npc_extra = ""
@@ -503,7 +779,7 @@ async def run_test(max_turns: int = 5, profile: dict = None, profile_key: str = 
                     if eval_data:
                         break
                     log.warning(f"⚠️ Евалюатор: JSON parse fail, спроба {eval_attempt}/2. Raw: {eval_raw[:200]}")
-                    if eval_attempt < 2:
+                    if eval_attempt < 2 and SLEEP_AFTER_EVALUATOR_SEC > 0:
                         await asyncio.sleep(SLEEP_AFTER_EVALUATOR_SEC)
                 if not eval_data:
                     log.warning(f"⚠️ Евалюатор не повернув валідний JSON після 2 спроб. Хід {turn} пропущено (SKIP).")
@@ -533,20 +809,21 @@ async def run_test(max_turns: int = 5, profile: dict = None, profile_key: str = 
 
                 if status == "FAIL":
                     log.warning(f"   Причина: {reason}")
-                    log.warning("🚨 КРИТИЧНА ПОМИЛКА ЗНАЙДЕНА. ЗУПИНКА ТЕСТУ.")
-                    break
+                    log.warning("🚨 КРИТИЧНА ПОМИЛКА ЗНАЙДЕНА. Продовжуємо для збору всіх FAILів.")
+                    # break  # вимкнено для нічного режиму — зранку переглянути всі FAILи
                 else:
                     log.info(f"   Зауваження: {reason}")
 
             except Exception as e:
                 log.error(f"❌ Помилка Agent-Evaluator: {e}")
-                break
+                pass  # skip turn, continue — не зупиняємо тест через падіння евалюатора
 
             ui_text = new_ui_text
 
     finally:
         await adapter.cleanup()
-        _print_report(results, profile_key=profile_key)
+        _print_report(results, profile_key=profile_key,
+                      turn_states=turn_states, action_log=action_log)
 
 
 # === ТОЧКА ВХОДУ ===
@@ -578,6 +855,15 @@ if __name__ == "__main__":
     log.info(f"🔑 Доступних API ключів: {len(GEMINI_API_KEYS_TEST)}")
 
     async def main():
+        # Підміняємо ключ рушія на тестовий — гра НІКОЛИ не використовує продакшн-ключ під час тестів
+        import core.ai_client as _ai
+        if GEMINI_API_KEYS_TEST:
+            _test_key = GEMINI_API_KEYS_TEST[profile_index % len(GEMINI_API_KEYS_TEST)]
+            _ai.client = genai.Client(api_key=_test_key)
+            log.info(f"🔄 Ключ рушія підмінено на тестовий (#{profile_index % len(GEMINI_API_KEYS_TEST) + 1})")
+        else:
+            log.warning("⚠️ Тестових ключів немає — рушій використовує продакшн-ключ!")
+
         await load_lore_data()
         await refresh_npc_database()
         await run_test(max_turns=args.turns, profile=selected, profile_key=args.profile, profile_index=profile_index)
