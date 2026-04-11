@@ -519,7 +519,7 @@ async def cmd_thoughts(message, bot, chat_id, args):
     # Telegram limit 4096
     if len(text) > 4000:
         text = text[:4000] + "\n..."
-    await message.answer(f"💭 Роздуми останнього ходу:\n\n{text}")
+    await message.answer(f"💭 Роздуми останнього ходу:\n\n{text}", parse_mode=None)
 
 
 async def cmd_erotic(message, bot, chat_id, args):
