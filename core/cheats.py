@@ -513,13 +513,12 @@ async def cmd_thoughts(message, bot, chat_id, args):
     lines = []
     for i, e in enumerate(entries, 1):
         short_model = e["model"].replace("gemma-4-31b-it", "G4").replace("gemma-3-27b-it", "G3")
-        thought_preview = e["thought"][:600].strip()
-        lines.append(f"[{i}] {short_model}\n{thought_preview}")
-    text = "\n\n─────\n\n".join(lines)
-    # Telegram limit 4096
-    if len(text) > 4000:
-        text = text[:4000] + "\n..."
-    await message.answer(f"💭 Роздуми останнього ходу:\n\n{text}", parse_mode=None)
+        lines.append(f"[{i}] {short_model}\n{e['thought'].strip()}")
+    text = "💭 Роздуми останнього ходу:\n\n" + "\n\n─────\n\n".join(lines)
+    # Розбиваємо на частини по 4000 символів якщо потрібно
+    chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
+    for chunk in chunks:
+        await message.answer(chunk, parse_mode=None)
 
 
 async def cmd_erotic(message, bot, chat_id, args):
