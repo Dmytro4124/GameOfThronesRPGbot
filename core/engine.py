@@ -7,7 +7,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from core.ai_client import model_worker, model_gm_logic, model_narrator, clean_and_parse_json, clear_thoughts
+from core.ai_client import model_worker, model_gm_logic, model_narrator, clean_and_parse_json, clear_thoughts, record_thought
+from config import MODEL_NARRATOR_NAME
 from core.mechanics import apply_system_impacts, process_training_request, safe_int, resolve_action_mechanics, validate_action
 from core.prompts import (
     GAME_ERA_CONTEXT, build_summarize_turn_prompt, build_summarize_full_turn_prompt,
@@ -559,14 +560,24 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
 
             def _sync_stream_narrator():
                 chunks = []
+                thought_parts = []
                 print("🔵 [STREAM] Narrator streaming started...")
                 try:
                     for chunk in model_narrator.generate_content_stream(narrator_prompt):
-                        text = chunk.text if chunk.text else ""
-                        if text:
-                            chunks.append(text)
-                            _loop.call_soon_threadsafe(narrator_queue.put_nowait, text)
-                            print(f"🔵 [STREAM] Chunk #{len(chunks)}: {len(text)} chars")
+                        try:
+                            for part in chunk.candidates[0].content.parts:
+                                if getattr(part, "thought", False):
+                                    thought_parts.append(part.text or "")
+                                elif part.text:
+                                    chunks.append(part.text)
+                                    _loop.call_soon_threadsafe(narrator_queue.put_nowait, part.text)
+                                    print(f"🔵 [STREAM] Chunk #{len(chunks)}: {len(part.text)} chars")
+                        except (AttributeError, IndexError):
+                            text = chunk.text if chunk.text else ""
+                            if text:
+                                chunks.append(text)
+                                _loop.call_soon_threadsafe(narrator_queue.put_nowait, text)
+                                print(f"🔵 [STREAM] Chunk #{len(chunks)}: {len(text)} chars")
                         try:
                             fr = chunk.candidates[0].finish_reason if chunk.candidates else None
                             if fr and str(fr) not in ("FinishReason.STOP", "STOP", "1", "None"):
@@ -576,6 +587,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 except Exception as e:
                     print(f"🔴 [STREAM] Error during streaming: {e}")
                     return ""  # порожній → retry спрацює
+                record_thought(MODEL_NARRATOR_NAME, "\n".join(thought_parts))
                 print(f"🔵 [STREAM] Done. Total chunks: {len(chunks)}")
                 return "".join(chunks)
 
@@ -599,14 +611,24 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 # Streaming retry: consumer ще живий (None не надсилали), тому пушимо нові чанки
                 def _sync_stream_retry():
                     chunks = []
+                    thought_parts = []
                     try:
                         for chunk in model_narrator.generate_content_stream(narrator_prompt):
-                            text = chunk.text if chunk.text else ""
-                            if text:
-                                chunks.append(text)
-                                _loop.call_soon_threadsafe(narrator_queue.put_nowait, text)
+                            try:
+                                for part in chunk.candidates[0].content.parts:
+                                    if getattr(part, "thought", False):
+                                        thought_parts.append(part.text or "")
+                                    elif part.text:
+                                        chunks.append(part.text)
+                                        _loop.call_soon_threadsafe(narrator_queue.put_nowait, part.text)
+                            except (AttributeError, IndexError):
+                                text = chunk.text if chunk.text else ""
+                                if text:
+                                    chunks.append(text)
+                                    _loop.call_soon_threadsafe(narrator_queue.put_nowait, text)
                     except Exception as e:
                         print(f"🔴 [STREAM RETRY] Error: {e}")
+                    record_thought(MODEL_NARRATOR_NAME, "\n".join(thought_parts))
                     return "".join(chunks)
 
                 story = await asyncio.to_thread(_sync_stream_retry)

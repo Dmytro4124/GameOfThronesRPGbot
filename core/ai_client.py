@@ -134,6 +134,11 @@ def get_thoughts_log() -> list:
     return list(_thoughts_log)
 
 
+def record_thought(model_name: str, thought: str) -> None:
+    if thought:
+        _thoughts_log.append({"model": model_name, "thought": thought})
+
+
 def split_thoughts(response) -> tuple:
     """Розділяє відповідь на (thoughts_str, content_str).
     Якщо include_thoughts не використовувався — повертає ('', response.text).
