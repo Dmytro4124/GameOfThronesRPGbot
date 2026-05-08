@@ -550,7 +550,7 @@ async def handle_cheat_command(message, bot):
         "/clearinv": cmd_clearinv,
         "/addskill": cmd_addskill,
         "/setskill": cmd_setskill,
-        "/tТакоp": cmd_tp,
+        "/tp": cmd_tp,
         "/addtime": cmd_addtime,
         "/tpnpc": cmd_tpnpc,
         "/setrep": cmd_setrep,
