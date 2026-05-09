@@ -19,7 +19,7 @@ from core.world import (
     background_canon_generation, populate_contextual_npcs
 )
 from core.engine import process_game_turn, user_sessions
-from config import ADMIN_TELEGRAM_IDS, EROTIC_USERS
+from config import ADMIN_TELEGRAM_IDS, EROTIC_USERS, BOT_VERSION, MODEL_MAIN_NAME
 
 
 router = Router()
@@ -74,6 +74,16 @@ async def start_handler(message: Message):
 
     user_sessions[chat_id] = {"state": "REGION_SELECT", "history": []}
     await message.answer("📍 *Оберіть регіон:*", reply_markup=builder.as_markup(), parse_mode='Markdown')
+
+
+@router.message(Command("version"))
+async def cmd_version(message: Message, bot: Bot):
+    """Показує версію бота та поточну LLM-модель. Доступна всім."""
+    text = (
+        f"🤖 *Версія бота:* `{BOT_VERSION}`\n"
+        f"🧠 *Модель LLM:* `{MODEL_MAIN_NAME}`"
+    )
+    await send_safe_message(bot, message.chat.id, text)
 
 
 @router.callback_query(F.data == "resume_game")

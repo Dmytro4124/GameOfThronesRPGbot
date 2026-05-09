@@ -10,6 +10,9 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_API_KEY_TEST = os.getenv("GEMINI_API_KEY_TEST")
 
+# Версія бота (оновлюється вручну при релізах)
+BOT_VERSION = "0.1.0"
+
 # Пул тестових ключів для паралельного QA (GEMINI_API_KEY_TEST_1, _2, _3, ...)
 # Fallback: якщо пул порожній, використовуємо основний тестовий ключ
 GEMINI_API_KEYS_TEST = [

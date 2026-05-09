@@ -52,27 +52,28 @@ def test_energy_impact_restore_partial():
 
 
 def test_energy_impact_restore_full():
-    """Перевірка повного відновлення енергії (restore_full або sleep)"""
+    """Перевірка повного відновлення енергії (restore_full або sleep) до 1000"""
     profile = {"Енергія": 15}
     ai_impacts = {"energy_impact": "restore_full"}
 
     updated_profile, logs = apply_system_impacts(profile, ai_impacts)
 
-    assert updated_profile["Енергія"] == 100
-    assert any("⚡ Енергія: 15 -> 100 (+85)" in log for log in logs)
+    assert updated_profile["Енергія"] == 1000
+    assert any("⚡ Енергія: 15 -> 1000 (+985)" in log for log in logs)
 
 
 def test_energy_impact_overheal():
-    """Перевірка, чи не виходить енергія за межі 100 при лікуванні"""
-    profile = {"Енергія": 95}
+    """Перевірка, чи не виходить енергія за межі 1000 при лікуванні (cap на 1000)"""
+    profile = {"Енергія": 990}
     ai_impacts = {"energy_impact": "restore_medium"}
 
-    # Мокаємо randint, щоб він повернув 20 (95 + 20 = 115)
-    with patch('core.mechanics.random.randint', return_value=20):
+    # Мокаємо randint, щоб він повернув 200 — реалістичне значення restore_medium (160-300).
+    # 990 + 200 = 1190, що більше за 1000, тому cap має спрацювати.
+    with patch('core.mechanics.random.randint', return_value=200):
         updated_profile, logs = apply_system_impacts(profile, ai_impacts)
 
-    assert updated_profile["Енергія"] == 100  # Має обрізатися до 100
-    assert any("⚡ Енергія: 95 -> 100 (+20)" in log for log in logs)
+    assert updated_profile["Енергія"] == 1000  # Має обрізатися до 1000
+    assert any("⚡ Енергія: 990 -> 1000 (+200)" in log for log in logs)
 
 
 def test_apply_system_impacts_inventory():

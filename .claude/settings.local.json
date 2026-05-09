@@ -10,7 +10,8 @@
       "WebSearch",
       "Bash(grep:*)",
       "Bash(PYTHONIOENCODING=utf-8 python qa_auto_test.py --profile standard --turns 25)",
-      "Bash(PYTHONIOENCODING=utf-8 python run_night_tests.py --profiles standard movement_tester npc_resurrection combat_stress_tester chaos_engineer diplomat_romantic shadow_mage --turns 25 --duration 10 --cooldown 45)"
+      "Bash(PYTHONIOENCODING=utf-8 python run_night_tests.py --profiles standard movement_tester npc_resurrection combat_stress_tester chaos_engineer diplomat_romantic shadow_mage --turns 25 --duration 10 --cooldown 45)",
+      "Bash(pip show *)"
     ]
   }
 }
