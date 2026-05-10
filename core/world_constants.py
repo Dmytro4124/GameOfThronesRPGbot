@@ -607,3 +607,47 @@ def format_scenes_for_prompt(location: str) -> str:
             line += f"\n  -> ЗАБОРОНЕНО: {forbidden}"
         lines.append(line)
     return "\n".join(lines)
+
+
+# Категорія → (emoji, укр label) у стабільному порядку від публічних до прихованих.
+PLAYER_MAP_CATEGORIES: dict[str, tuple[str, str]] = {
+    "hub":         ("🏛️", "Публічні місця"),
+    "semi_public": ("🍺", "Напівпублічні"),
+    "elite":       ("🏰", "Престижні"),
+    "sacred":      ("⛪", "Священні"),
+    "private":     ("🛌", "Приватні"),
+    "restricted":  ("🚫", "Обмежені"),
+    "labor":       ("🔨", "Робочі зони"),
+    "military":    ("🛡️", "Військові"),
+    "containment": ("⛓️", "Підземелля"),
+    "stealth":     ("🌑", "Приховані"),
+}
+
+
+def format_player_map(location: str, current_scene: str = "") -> str:
+    """Markdown-карта сцен локації для гравця. '←' поряд з поточною сценою."""
+    loc_data = LOCATION_SCENES.get(location)
+    if not loc_data:
+        return (
+            f"🗺️ *{location or 'Невідома локація'}*\n\n"
+            f"_Карта цього місця ще не складена. Орієнтуйся за описом сцени._"
+        )
+
+    scene_norm = (current_scene or "").strip()
+    lines = [f"🗺️ *{location}*"]
+    if scene_norm:
+        lines.append(f"📍 Ви тут: _{scene_norm}_")
+    lines.append("")
+
+    # Ітерація за PLAYER_MAP_CATEGORIES (стабільний порядок), не за loc_data.keys()
+    for cat_key, (emoji, label) in PLAYER_MAP_CATEGORIES.items():
+        scenes = loc_data.get(cat_key, [])
+        if not scenes:
+            continue
+        lines.append(f"{emoji} *{label}:*")
+        for scene in scenes:
+            marker = " ←" if scene == scene_norm else ""
+            lines.append(f"  • {scene}{marker}")
+        lines.append("")
+
+    return "\n".join(lines).rstrip()

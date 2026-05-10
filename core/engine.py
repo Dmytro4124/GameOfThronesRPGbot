@@ -19,7 +19,8 @@ from core.world import populate_contextual_npcs
 from database.operations import (
     get_user_data, save_user_data, get_relevant_context,
     get_location_npcs, update_npcs_in_db,
-    update_npc_reputation, append_memory_anchor, get_dead_npc_names
+    update_npc_reputation, append_memory_anchor, get_dead_npc_names,
+    refresh_npc_database,
 )
 
 user_sessions = {}
@@ -166,7 +167,13 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
     if session.get("state") == "INITIALIZING":
         return "⏳ *Світ відроджується... Зачекайте кілька секунд.*", []
     if chat_id not in user_sessions:
-        user_sessions[chat_id] = {"state": "GAME_ACTIVE", "history": []}
+        user_sessions[chat_id] = {"state": "GAME_ACTIVE", "history": [], "npc_cache": {}, "dead_npc_names": set()}
+    else:
+        # Idempotent guard: підтягуємо ключі, якщо session вже існує але без нових полів
+        if "npc_cache" not in user_sessions[chat_id]:
+            user_sessions[chat_id]["npc_cache"] = {}
+        if "dead_npc_names" not in user_sessions[chat_id]:
+            user_sessions[chat_id]["dead_npc_names"] = set()
     history = session.get('history', [])
 
     history_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in history[-40:]])
@@ -217,11 +224,11 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
     # === ОНОВЛЕНО: 3-рівнева фільтрація NPC (Регіон → Локація → Сцена) ===
     context_knowledge = await get_relevant_context(user_input, curr_loc)
     npc_context_text, legal_npc_names, npc_reputation_context = get_location_npcs(
-        curr_loc, curr_scene, current_region=curr_region
+        chat_id, curr_loc, curr_scene, current_region=curr_region
     )
 
     # === B+C: відстежуємо зникнення NPC між ходами (розділяємо мертвих та просто відсутніх) ===
-    _dead_names_cache = get_dead_npc_names()
+    _dead_names_cache = get_dead_npc_names(chat_id)
     prev_legal_npc_names = user_sessions.get(chat_id, {}).get("prev_legal_npc_names", [])
     absent_npcs_raw = [n for n in prev_legal_npc_names if n not in set(legal_npc_names)]
     dead_npcs = [n for n in absent_npcs_raw if n in _dead_names_cache]
@@ -340,13 +347,13 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         curr_scene  = _post_scene
         curr_region = _post_region
         npc_context_text, legal_npc_names, npc_reputation_context = get_location_npcs(
-            curr_loc, curr_scene, current_region=curr_region
+            chat_id, curr_loc, curr_scene, current_region=curr_region
         )
         # "Ростер прибуття" = NPC нової локації/сцени
         arriving_npc_context = npc_context_text
         arriving_npc_names = list(legal_npc_names)
         # Перераховуємо dead/absent з оновленим Ростером
-        _dnames_post = get_dead_npc_names()
+        _dnames_post = get_dead_npc_names(chat_id)
         _absent_raw_post = [n for n in prev_legal_npc_names if n not in set(legal_npc_names)]
         dead_npcs   = [n for n in _absent_raw_post if n in _dnames_post]
         absent_npcs = [n for n in _absent_raw_post if n not in _dnames_post]
@@ -715,8 +722,8 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                             _atmosphere_cache[new_loc] = situation
                         except Exception:
                             situation = "A tense day in Westeros."
-                    await populate_contextual_npcs(new_loc, situation, excluded_name=char_name,
-                                                   excluded_dead_names=get_dead_npc_names())
+                    await populate_contextual_npcs(chat_id, new_loc, situation, excluded_name=char_name,
+                                                   excluded_dead_names=get_dead_npc_names(chat_id))
                 except Exception as e:
                     logger.error(f"[BG] travel_population_task failed: {e}", exc_info=True)
 
@@ -726,17 +733,18 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                                   npc_changes_arg, legal_names_arg, mech_updates_arg=None,
                                   new_location_arg=None, player_location_changed_arg=False,
                                   player_new_scene_arg=None, player_scene_changed_arg=False,
-                                  companion_npcs_arg=None):
+                                  companion_npcs_arg=None, frozen_fields_reason_arg=""):
             try:
                 await save_user_data(user_id_arg, profile_arg, char_name_arg)
                 if npc_changes_arg:
                     await update_npcs_in_db(
-                        npc_changes_arg, legal_names_arg,
+                        chat_id_arg, npc_changes_arg,
                         player_new_location=new_location_arg,
                         player_location_changed=player_location_changed_arg,
                         player_new_scene=player_new_scene_arg,
                         player_scene_changed=player_scene_changed_arg,
                         companion_npcs=companion_npcs_arg,
+                        frozen_fields_reason=frozen_fields_reason_arg,
                     )
 
                 # Оновлення репутації NPC після соціальних перевірок
@@ -744,12 +752,13 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                     rep_delta = mech_updates_arg.get("reputation_delta", 0)
                     rep_target = mech_updates_arg.get("reputation_target_npc")
                     if rep_delta and rep_target:
-                        await update_npc_reputation(rep_target, rep_delta)
+                        await update_npc_reputation(chat_id_arg, rep_target, rep_delta)
                         outcome = mech_updates_arg.get("outcome", "")
                         skill = mech_updates_arg.get("skill_used", "")
                         game_minutes = safe_int(profile_arg.get("Час_хвилини", 0), 0)
                         game_day = game_minutes // 1440
                         await append_memory_anchor(
+                            chat_id_arg,
                             rep_target,
                             f"{skill} {outcome} (дія гравця)",
                             game_day=game_day,
@@ -797,6 +806,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 player_new_scene_arg=curr_scene,
                 player_scene_changed_arg=_player_scene_changed,
                 companion_npcs_arg=companion_npcs,
+                frozen_fields_reason_arg=ai_data.get("frozen_fields_change_reason", ""),
             ))
 
         duration = time.time() - t_start

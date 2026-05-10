@@ -12,14 +12,17 @@ from bot.menus import get_dynamic_menu, get_main_menu
 from bot.utils import send_safe_message, send_game_response
 from database.operations import (
     get_unique_regions, get_houses_by_region, get_house_stats_data,
-    get_user_data, save_user_data, delete_user_data, clear_npc_cache
+    get_user_data, save_user_data, delete_user_data,
+    clear_npc_cache, delete_user_npc_sheet,
 )
 from core.world import (
     get_canon_characters, generate_initial_stats, get_narrative_intro,
     background_canon_generation, populate_contextual_npcs
 )
+from core.world_constants import format_player_map
 from core.engine import process_game_turn, user_sessions
 from config import ADMIN_TELEGRAM_IDS, EROTIC_USERS, BOT_VERSION, MODEL_MAIN_NAME
+from bot.help_text import HELP_TEXT, ADMIN_HELP_TEXT
 
 
 router = Router()
@@ -86,6 +89,44 @@ async def cmd_version(message: Message, bot: Bot):
     await send_safe_message(bot, message.chat.id, text)
 
 
+@router.message(Command("help"))
+@router.message(F.text == "📖 Інструкція")
+async def cmd_help(message: Message, bot: Bot):
+    await send_safe_message(bot, message.chat.id, HELP_TEXT)
+
+
+@router.message(Command("adminhelp"))
+async def cmd_adminhelp(message: Message, bot: Bot):
+    if message.from_user.id not in ADMIN_TELEGRAM_IDS:
+        await send_safe_message(bot, message.chat.id, "🔒 Команда недоступна.")
+        return
+    await send_safe_message(bot, message.chat.id, ADMIN_HELP_TEXT)
+
+
+@router.message(Command("speed"))
+async def cmd_speed(message: Message):
+    chat_id = message.chat.id
+    log_text = user_sessions.get(chat_id, {}).get(
+        'last_debug_time',
+        "❌ Логи зберігаються лише для поточної активної сесії (до перезапуску сервера). Зробіть хід."
+    )
+    await message.answer(log_text, parse_mode=None)
+
+
+@router.message(Command("map"))
+async def cmd_map(message: Message, bot: Bot):
+    """Показує карту сцен поточної локації гравця."""
+    chat_id = message.chat.id
+    profile, _ = await get_user_data(chat_id)
+    if not profile:
+        await send_safe_message(bot, chat_id, "Спершу почніть гру через /start")
+        return
+    location = profile.get("Поточне місцезнаходження", "")
+    scene = profile.get("Поточна сцена", "")
+    text = format_player_map(location, scene)
+    await send_safe_message(bot, chat_id, text)
+
+
 @router.callback_query(F.data == "resume_game")
 async def resume_game_handler(call: CallbackQuery, bot: Bot):
     """Обробка кнопки 'Продовжити гру' після /start"""
@@ -96,7 +137,9 @@ async def resume_game_handler(call: CallbackQuery, bot: Bot):
         user_sessions[chat_id] = {
             "state": "GAME_ACTIVE",
             "character_name": profile.get("Ім'я", "Герой"),
-            "history": []
+            "history": [],
+            "npc_cache": {},
+            "dead_npc_names": set(),
         }
         await call.message.delete()
         await send_safe_message(bot, chat_id, "🔄 *Зв'язок зі світом відновлено. Що робите далі?*",
@@ -195,8 +238,8 @@ async def start_game_with_character(bot: Bot, chat_id: int, char_name: str):
             hero_name = full_profile.get("Ім'я", char_name)
 
             async def initial_world_setup(loc, p_name):
-                await background_canon_generation(excluded_name=p_name)
-                await populate_contextual_npcs(loc, "Start of the game. Normal daily routine.", excluded_name=p_name)
+                await background_canon_generation(user_id, excluded_name=p_name)
+                await populate_contextual_npcs(user_id, loc, "Start of the game. Normal daily routine.", excluded_name=p_name)
                 # Розблокуємо ПІСЛЯ повної готовності світу
                 if chat_id in user_sessions:
                     user_sessions[chat_id]['state'] = "GAME_ACTIVE"
@@ -303,14 +346,6 @@ async def show_inventory_handler(message: Message):
         await message.answer(text, parse_mode='Markdown')
 
 
-@router.message(F.text == "⚙️ Тех. дані")
-async def show_debug_stats(message: Message):
-    chat_id = message.chat.id
-    log_text = user_sessions.get(chat_id, {}).get('last_debug_time',
-                                                  "❌ Логи зберігаються лише для поточної активної сесії (до перезапуску сервера). Зробіть хід.")
-    await message.answer(log_text, parse_mode=None)
-
-
 @router.message(F.text == "🔄 Рестарт")
 async def restart_request_handler(message: Message):
     builder = InlineKeyboardBuilder()
@@ -339,8 +374,9 @@ async def callback_restart_confirm_handler(call: CallbackQuery):
     # 2. Видаляємо старий профіль з Google Sheets
     await delete_user_data(user_id)
 
-    # 3. Очищуємо NPC-кеш (NPC_DB буде перезаписана при створенні персонажа)
-    clear_npc_cache()
+    # 3. Видаляємо per-player NPC аркуш та очищуємо кеш
+    await delete_user_npc_sheet(user_id)
+    clear_npc_cache(user_id)
 
     # 4. Показуємо вибір регіону
     regions = await get_unique_regions()

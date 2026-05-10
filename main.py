@@ -9,7 +9,7 @@ from aiogram.enums import ParseMode
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 from config import TELEGRAM_TOKEN
-from database.operations import load_lore_data, refresh_npc_database
+from database.operations import load_lore_data
 from bot.handlers import router
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -53,11 +53,10 @@ async def on_startup(bot: Bot):
         logger.warning("⚠️ WEBHOOK_URL не знайдено, переходимо на Polling.")
         await bot.delete_webhook(drop_pending_updates=True)
 
-    # 2. Швидке завантаження бази NPC (займає 1-2 секунди, не блокує сервер)
-    await refresh_npc_database()
-
-    # 3. КРИТИЧНО: Відправляємо векторизацію лору у ФОНОВУ задачу!
+    # 2. КРИТИЧНО: Відправляємо векторизацію лору у ФОНОВУ задачу!
     # Інакше aiohttp сервер зависне на 5 хвилин і Telegram відкине вебхук.
+    # NPC-бази per-player більше не ініціалізуються глобально —
+    # refresh_npc_database(user_id) викликається lazy через world.py для кожного гравця окремо.
     await asyncio.create_task(load_lore_data())
 
     logger.info("✅ Сервер готовий приймати повідомлення! (Векторизація лору триває у фоні)")

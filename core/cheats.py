@@ -10,7 +10,7 @@ from database.sheets import db
 from database.canon_npc import _score_to_relation_text
 from core.mechanics import safe_int
 from core.world_constants import is_valid_location, get_region_for_location
-from config import TAB_NPC, GODMODE_USERS, PUPPET_USERS, EROTIC_USERS
+from config import GODMODE_USERS, PUPPET_USERS, EROTIC_USERS
 
 
 # ─────────────────────────── Helpers ────────────────────────────
@@ -313,11 +313,14 @@ async def cmd_tpnpc(message, bot, chat_id, args):
 
     npc_name = " ".join(args[:npc_end_idx])
     scene_str = " ".join(scene_args) if scene_args else ""
+    admin_user_id = message.from_user.id
 
     def _sync_tpnpc():
-        ws = db.get_sheet(TAB_NPC)
+        from database.operations import _npc_tab_name
+        tab_name = _npc_tab_name(admin_user_id)
+        ws = db.get_sheet(tab_name)
         if not ws:
-            return "❌ Таблицю NPC_DB не знайдено"
+            return f"❌ Таблицю {tab_name} не знайдено"
         row_idx, headers, rows = _find_npc_row(ws, npc_name)
         if row_idx is None:
             return f"❌ NPC '{npc_name}' не знайдено"
@@ -345,11 +348,14 @@ async def cmd_setrep(message, bot, chat_id, args):
     except ValueError:
         await message.answer("❌ Оцінка повинна бути числом від -100 до 100"); return
     npc_name = " ".join(args[:-1])
+    admin_user_id = message.from_user.id
 
     def _sync_setrep():
-        ws = db.get_sheet(TAB_NPC)
+        from database.operations import _npc_tab_name
+        tab_name = _npc_tab_name(admin_user_id)
+        ws = db.get_sheet(tab_name)
         if not ws:
-            return "❌ Таблицю NPC_DB не знайдено"
+            return f"❌ Таблицю {tab_name} не знайдено"
         row_idx, headers, rows = _find_npc_row(ws, npc_name)
         if row_idx is None:
             return f"❌ NPC '{npc_name}' не знайдено"
@@ -372,11 +378,14 @@ async def cmd_killnpc(message, bot, chat_id, args):
     if not args:
         await message.answer("Використання: /killnpc <Ім'я NPC>"); return
     npc_name = " ".join(args)
+    admin_user_id = message.from_user.id
 
     def _sync_killnpc():
-        ws = db.get_sheet(TAB_NPC)
+        from database.operations import _npc_tab_name
+        tab_name = _npc_tab_name(admin_user_id)
+        ws = db.get_sheet(tab_name)
         if not ws:
-            return "❌ Таблицю NPC_DB не знайдено"
+            return f"❌ Таблицю {tab_name} не знайдено"
         row_idx, headers, rows = _find_npc_row(ws, npc_name)
         if row_idx is None:
             return f"❌ NPC '{npc_name}' не знайдено"
@@ -392,8 +401,8 @@ async def cmd_killnpc(message, bot, chat_id, args):
     if result.startswith("✅"):
         from database.operations import evict_npc_from_cache, refresh_npc_database
         npc_name_matched = result.split("'")[1]
-        await refresh_npc_database()          # спочатку resync (може повернути стале)
-        evict_npc_from_cache(npc_name_matched)  # потім гарантоване видалення — завжди останнє
+        await refresh_npc_database(admin_user_id)          # спочатку resync (може повернути стале)
+        evict_npc_from_cache(admin_user_id, npc_name_matched)  # потім гарантоване видалення
     await message.answer(result)
 
 
@@ -401,11 +410,14 @@ async def cmd_delnpc(message, bot, chat_id, args):
     if not args:
         await message.answer("Використання: /delnpc <Ім'я NPC>"); return
     npc_name = " ".join(args)
+    admin_user_id = message.from_user.id
 
     def _sync_delnpc():
-        ws = db.get_sheet(TAB_NPC)
+        from database.operations import _npc_tab_name
+        tab_name = _npc_tab_name(admin_user_id)
+        ws = db.get_sheet(tab_name)
         if not ws:
-            return "❌ Таблицю NPC_DB не знайдено"
+            return f"❌ Таблицю {tab_name} не знайдено"
         row_idx, headers, rows = _find_npc_row(ws, npc_name)
         if row_idx is None:
             return f"❌ NPC '{npc_name}' не знайдено"
@@ -424,11 +436,14 @@ async def cmd_cleanscene(message, bot, chat_id, args):
     curr_scene = profile.get("Поточна сцена", "")
     if not curr_scene:
         await message.answer("❌ Поточна сцена не визначена в профілі"); return
+    admin_user_id = message.from_user.id
 
     def _sync_cleanscene():
-        ws = db.get_sheet(TAB_NPC)
+        from database.operations import _npc_tab_name
+        tab_name = _npc_tab_name(admin_user_id)
+        ws = db.get_sheet(tab_name)
         if not ws:
-            return "❌ Таблицю NPC_DB не знайдено"
+            return f"❌ Таблицю {tab_name} не знайдено"
         rows = ws.get_all_values()
         if not rows:
             return "❌ Таблиця порожня"

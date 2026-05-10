@@ -24,6 +24,23 @@ DEFAULT_ENERGY = 1000
 DAYS_IN_MONTH = 30
 MONTHS_IN_YEAR = 12
 
+# === КОНСТАНТИ НОВОЇ МОДЕЛІ РОЗВ'ЯЗКИ СКІЛ-ЧЕКІВ ===
+# DC < NO_SKILL_DC_THRESHOLD → AUTO_SUCCESS без 2d50
+NO_SKILL_DC_THRESHOLD = 80
+# DC ≥ 80 → детермінований базовий circumstance (Worker не вибирає)
+DC_TO_CIRCUMSTANCE = {
+    80: "ADVANTAGE",
+    100: "NORMAL",
+    120: "DISADVANTAGE",
+    140: "DISADVANTAGE",
+}
+# Соціальні скіли, на які впливає reputation override
+SOCIAL_SKILLS_FOR_REP_OVERRIDE = ("Інтрига", "Управління")
+# Порогові значення для overrides
+LOW_ENERGY_DIS_THRESHOLD = 200
+HIGH_REP_ADV_THRESHOLD = 80
+LOW_REP_DIS_THRESHOLD = -80
+
 
 def safe_int(value, default=0):
     """Допоміжна функція: перетворює будь-що на ціле число або повертає default"""
@@ -652,10 +669,6 @@ async def resolve_action_mechanics(user_input, profile, npc_reputation_context=N
     # МАТЕМАТИКА 2d50 ТА КРИТІВ ВІДБУВАЄТЬСЯ ТУТ
     # -------------------------------------------------
 
-    if current_energy <= 200:
-        circumstance = "DISADVANTAGE"
-        data["verdict_text"] = "[СИСТЕМНА ВТОМА: Гравець ледве тримається на ногах]. " + data.get('verdict_text', '')
-
     if skill_used in ["None", "Немає", "none", ""] or skill_used not in skills:
         updates["skill_used"] = "Немає"
         updates["outcome"] = "SUCCESS"
@@ -691,14 +704,48 @@ async def resolve_action_mechanics(user_input, profile, npc_reputation_context=N
                 updates["reputation_block"] = True
                 updates["reputation_target_npc"] = rep_target_npc
                 return f"MECHANICAL VERDICT: BLOCKED! NPC '{rep_target_npc}' (reputation {best_rep_score}) — соціальна дія заблокована кровною ворожнечею. GM INFO: Describe the NPC's absolute refusal, hatred, or hostility. The player CANNOT persuade this NPC through social means — only force, fear, or third-party intervention.", updates
-            # Застосовуємо circumstance override від репутації (якщо ще не DISADVANTAGE від енергії)
-            if rep_circ == "ADVANTAGE" and circumstance != "DISADVANTAGE":
-                circumstance = "ADVANTAGE"
-            elif rep_circ == "DISADVANTAGE":
-                circumstance = "DISADVANTAGE"
 
     # Застосовуємо DC-модифікатор від репутації
-    difficulty = max(40, difficulty + rep_dc_mod)
+    final_difficulty = max(40, difficulty + rep_dc_mod)
+
+    # -------------------------------------------------
+    # НОВА МОДЕЛЬ: AUTO_SUCCESS або детермінований circumstance
+    # -------------------------------------------------
+
+    # 1. AUTO_SUCCESS shortcut: DC < порогу → без 2d50, без skill_impact, без штрафу енергії
+    if final_difficulty < NO_SKILL_DC_THRESHOLD:
+        updates["skill_used"] = "Немає"
+        updates["difficulty"] = 0
+        updates["circumstance"] = "NORMAL"
+        updates["outcome"] = "SUCCESS"
+        updates["dice_roll"] = "-"
+        updates["skill_val"] = 0
+        updates["total_score"] = 0
+        verdict_str = f"MECHANICAL VERDICT: AUTO_SUCCESS (DC {final_difficulty} < {NO_SKILL_DC_THRESHOLD} threshold). GM INFO: {data.get('verdict_text')}"
+        return verdict_str, updates
+
+    # 2. Базовий circumstance детермінований з DC (без LLM-вибору)
+    base_circumstance = DC_TO_CIRCUMSTANCE.get(final_difficulty, "NORMAL")
+    circumstance = base_circumstance
+
+    # 3. Overrides поверх DC-базису
+    if current_energy < LOW_ENERGY_DIS_THRESHOLD:
+        # Фізіологічний override — завжди фінальний
+        circumstance = "DISADVANTAGE"
+        data["verdict_text"] = "[СИСТЕМНА ВТОМА: Гравець ледве тримається на ногах]. " + data.get("verdict_text", "")
+    else:
+        # Репутаційний override — тільки для соціальних скілів
+        if skill_used in SOCIAL_SKILLS_FOR_REP_OVERRIDE and rep_target_npc is not None:
+            rep_score_for_circ = npc_reputation_context.get(rep_target_npc)
+            if rep_score_for_circ is not None:
+                rep_score_int = safe_int(rep_score_for_circ, 0)
+                if rep_score_int >= HIGH_REP_ADV_THRESHOLD and circumstance != "DISADVANTAGE":
+                    circumstance = "ADVANTAGE"
+                elif rep_score_int <= LOW_REP_DIS_THRESHOLD:
+                    circumstance = "DISADVANTAGE"
+
+    # Зберігаємо фінальну складність у локальну змінну для звіту
+    difficulty = final_difficulty
 
     from config import GODMODE_USERS
     if user_id and user_id in GODMODE_USERS:

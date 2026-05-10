@@ -22,7 +22,7 @@ def get_dynamic_menu(actions: list = None) -> ReplyKeyboardMarkup:
 
     builder.button(text="📜 Профіль")
     builder.button(text="🎒 Інвентар")
-    builder.button(text="⚙️ Тех. дані")
+    builder.button(text="📖 Інструкція")
     builder.button(text="🔄 Рестарт")
 
     # Форматуємо сітку

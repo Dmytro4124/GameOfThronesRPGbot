@@ -403,13 +403,13 @@ class RPGTesterAdapter:
         # Заселяємо світ канонічними + фоновими NPC (як у bot/handlers.py:170-175)
         start_loc = full_profile.get("Поточне місцезнаходження", "Вестерос")
         log.info(f"🌍 Заселяю світ канонічними NPC (локація: {start_loc})...")
-        clear_npc_cache()  # Очищуємо стейл-кеш перед перезаписом NPC_DB
-        await background_canon_generation(excluded_name=self.char_name)
-        await populate_contextual_npcs(start_loc, "Start of the game. Normal daily routine.", excluded_name=self.char_name)
-        await refresh_npc_database()  # Гарантуємо свіжий кеш після перезапису
+        clear_npc_cache(self.chat_id)  # Очищуємо стейл-кеш перед перезаписом NPC_DB
+        await background_canon_generation(self.chat_id, excluded_name=self.char_name)
+        await populate_contextual_npcs(self.chat_id, start_loc, "Start of the game. Normal daily routine.", excluded_name=self.char_name)
+        await refresh_npc_database(self.chat_id)  # Гарантуємо свіжий кеш після перезапису
 
         # Anti-Doppelganger верифікація: перевіряємо що гравець НЕ в ростері NPC
-        _, legal_names, _ = get_location_npcs(start_loc, "Невідомо")
+        _, legal_names, _ = get_location_npcs(self.chat_id, start_loc, "Невідомо")
         if self.char_name in legal_names:
             log.warning(f"⚠️ DOPPELGANGER DETECTED: '{self.char_name}' знайдено в NPC ростері після world setup!")
         else:
@@ -619,7 +619,7 @@ async def run_test(max_turns: int = 5, profile: dict = None, profile_key: str = 
     _init_profile, _ = await get_user_data(adapter.chat_id)
     prev_profile_snap = _snapshot_profile(_init_profile)
     prev_npc_names = list(get_location_npcs(
-        _init_profile.get("Поточне місцезнаходження", ""), "Невідомо"
+        adapter.chat_id, _init_profile.get("Поточне місцезнаходження", ""), "Невідомо"
     )[1]) if _init_profile else []
 
     # Перший елемент history — системний промпт гравця (pinned, не потрапляє у rolling window).
@@ -713,7 +713,7 @@ async def run_test(max_turns: int = 5, profile: dict = None, profile_key: str = 
             # NPC roster diff
             curr_loc = curr_snap.get("Поточне місцезнаходження", "")
             curr_scene = curr_snap.get("Поточна сцена", "Невідомо")
-            _, curr_npc_names, _ = get_location_npcs(curr_loc, curr_scene)
+            _, curr_npc_names, _ = get_location_npcs(adapter.chat_id, curr_loc, curr_scene)
             added_npcs = [n for n in curr_npc_names if n not in prev_npc_names]
             removed_npcs = [n for n in prev_npc_names if n not in curr_npc_names]
             if added_npcs or removed_npcs:
@@ -865,7 +865,7 @@ if __name__ == "__main__":
             log.warning("⚠️ Тестових ключів немає — рушій використовує продакшн-ключ!")
 
         await load_lore_data()
-        await refresh_npc_database()
+        await refresh_npc_database(selected["user_id"])
         await run_test(max_turns=args.turns, profile=selected, profile_key=args.profile, profile_index=profile_index)
 
     asyncio.run(main())

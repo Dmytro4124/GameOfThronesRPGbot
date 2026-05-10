@@ -377,9 +377,12 @@ def build_gm_logic_prompt(
     </reputation_behavior_rules>
 
     <field_mutation_rules>
-    ЗАМОРОЖЕНІ ПОЛЯ (Description, Character, Goal, Secrets):
-    Ці поля ВІДСУТНІ в стандартному шаблоні npc_updates нижче — навмисно.
-    За замовчуванням:НІКОЛИ не включай їх у вивід.
+    STRICT FROZEN ENUM — ці 4 поля NPC ЗАМОРОЖЕНІ за замовчуванням:
+    Description | Character | Goal | Secrets
+
+    ПРАВИЛО ЗА ЗАМОВЧУВАННЯМ (99% ходів):
+    Ці поля ВІДСУТНІ в npc_updates — навмисно. НІКОЛИ не включай їх у вивід.
+    При цьому: "frozen_fields_change_reason": "" (порожній рядок — обов'язково присутній у JSON).
 
     ЄДИНИЙ ВИНЯТОК — якщо в ЦЬОМУ ході відбулась ЕПІЧНА та НЕЗВОРОТНА подія:
     - Description: NPC отримав каліцтво в бою, навмисно змінив зовнішність, сильно постарів
@@ -387,12 +390,38 @@ def build_gm_logic_prompt(
     - Goal: NPC зазнав зради, досяг або назавжди втратив свою ключову мету
     - Secrets: таємниця публічно розкрита або повністю змінилась фундаментально
 
-    Якщо така подія сталась — ти МОЖЕШ вручну додати відповідне поле до об'єкта NPC.
-    Якщо ні — цих полів у виводі не існує. Взагалі. Ні порожніх, ні заповнених.
+    ЖОРСТКЕ ПРАВИЛО ДЛЯ ВИНЯТКУ:
+    Якщо хочеш оновити хоч одне frozen-поле — ОБОВ'ЯЗКОВО заповни ключ
+    "frozen_fields_change_reason" мінімум одним повним реченням (≥20 символів) з конкретним
+    обґрунтуванням: ім'я NPC + конкретна подія цього ходу + чому ця зміна незворотна.
+    Якщо reason порожній або менше 20 символів — Python-движок ВІДКИНЕ це поле з update.
+    Інші поля того ж об'єкта NPC (Status, Location, Scene тощо) залишаються і зберігаються.
 
-    УВАГА: Поле "Attitude to Player" є READ-ONLY. НЕ включай його в npc_updates —
-    воно розраховується системою автоматично.
+    RELATION_PLAYER — SYSTEM-MANAGED:
+    Поле "Relation_Player" є похідним від Reputation_Score і повністю ігнорується Python-движком
+    при отриманні в npc_updates. НІКОЛИ не включай його в npc_updates.
+    Якщо хочеш змінити ставлення NPC до гравця — використовуй "reputation_delta" у Worker output
+    (фаза Worker, не GM_Logic). GM_Logic не керує Relation_Player напряму.
     </field_mutation_rules>
+
+    <antiexamples>
+    WRONG: оновлення frozen-поля без виправдання
+    {{"frozen_fields_change_reason": "", "npc_updates": [{{"Name": "Тиріон", "Description": "Виглядає сумним після розмови"}}]}}
+    → Description буде ВІДКИНУТО Python-движком. Empty reason при frozen-update.
+    CORRECT: не включати Description взагалі (це не епічна незворотна подія).
+
+    WRONG: слабке виправдання (менше 20 символів)
+    {{"frozen_fields_change_reason": "втрата ока", "npc_updates": [{{"Name": "Тиріон", "Description": "..."}}]}}
+    → Reason занадто короткий. Пиши повне речення з ім'ям NPC і обставинами.
+    CORRECT:
+    {{"frozen_fields_change_reason": "Тиріон отримав глибокий шрам через ліве око від меча Сера Григора у цьому бою — постійне видиме каліцтво.", "npc_updates": [{{"Name": "Тиріон", "Description": "Шрам через ліве око, весела брова рухається інакше"}}]}}
+
+    WRONG: пряма зміна Relation_Player через npc_updates
+    {{"npc_updates": [{{"Name": "Тиріон", "Relation_Player": "Прихильний"}}]}}
+    → Поле тихо ігнорується системою. Це system-managed derivative від Reputation_Score.
+    CORRECT: змінювати репутацію через "reputation_delta" у Worker output (НЕ у GM_Logic).
+    GM_Logic тільки описує наслідки — текстовий ярлик Relation_Player оновить система автоматично.
+    </antiexamples>
 
     <golden_laws_of_agency>
     1. НЕ ЧІПАЙ ГРАВЦЯ: Ти керуєш NPC та фізикою. Гравець керує ТІЛЬКИ своїм Героєм.
@@ -493,6 +522,7 @@ def build_gm_logic_prompt(
     {{
         "reasoning": "Коротке внутрішнє міркування: що сталося за механікою, як реагує світ і кожен NPC зі сцени?",
         "npc_reasoning": "Для КОЖНОГО NPC з активного ростеру: що змінилось (ставлення, локація, інвентар, стан, мета)? Якщо нічого — чому?",
+        "frozen_fields_change_reason": "<порожній рядок якщо frozen-поля не оновлюються цього ходу; інакше — одне повне речення з ім'ям NPC + конкретна епічна подія + чому незворотна>",
         "director_notes": [
             "Факт 1: результат дії (що саме сталося)",
             "Факт 2: реакція NPC (тон, емоція, дія)",
@@ -627,16 +657,22 @@ def build_resolve_mechanics_prompt(user_input, skills, clocks_info,
         → NO  → continue to GATE 2.
 
         [GATE 2 — SKILL NEEDED?]
-        Is an NPC actively attacking or physically blocking the player RIGHT NOW in this turn?
-        → NO  → skill_used="None", difficulty=0.
-                 Exception: hostile NPC (rep < -20) AND player is explicitly requesting their cooperation.
-        → YES → assign skill: Бойові / Інтрига / Управління / Військові. Continue to GATE 3.
+        Skill check applies ONLY when the action would have difficulty ≥ 80 (i.e., faces real opposition or risk).
+        - Is an NPC actively attacking/blocking the player AND the action requires real effort against trained opposition?
+          → YES → assign skill: Бойові / Інтрига / Управління / Військові. Continue to GATE 3.
+        - Otherwise (trivial / very easy / easy actions, no real opposition):
+          → skill_used="None", difficulty=0 (AUTO_SUCCESS — system grants automatic success without rolling).
+          Exception: hostile NPC (rep < -20) AND player explicitly requests cooperation → still assign social skill.
 
         [GATE 3 — DC SELECTION — ENUM ONLY]
         Choose EXACTLY ONE value from: 50 | 60 | 70 | 80 | 100 | 120 | 140
         Values outside this list (90, 110, 130, 160, etc.) DO NOT EXIST — map to nearest allowed.
-        Base DC on the NATURE OF THE ACTION, not the target's rank:
-        · Polite / formal request to ANY NPC (including lords and royalty) → 80
+
+        IMPORTANT: DC 50/60/70 are "no-roll" tiers — they trigger AUTO_SUCCESS in the engine.
+        If you assign difficulty=50/60/70, you MUST also set skill_used="None" (skill is irrelevant for trivial actions).
+
+        Use 80+ ONLY when there is genuine resistance or risk:
+        · Polite request to ANY NPC (including lords/royalty) → 80
         · Bold demand or veiled threat → 100
         · Outright lie, false accusation, outrageous claim → 120
         · Direct assault on king in public / near-impossible feat → 140
@@ -681,6 +717,17 @@ def build_resolve_mechanics_prompt(user_input, skills, clocks_info,
         "gold_impact": "-10"    ← WRONG. NPC rejected the offer. No exchange occurred.
         ✅ CORRECT:
         "gold_impact": "none"    ← Refused offer: gold never left the player's hand.
+
+        ❌ WRONG (skill assigned for low-DC action — engine will AUTO_SUCCESS anyway):
+        Action: "Я вітаюся з селянином"
+        "skill_used": "Інтрига", "difficulty": 50    ← WRONG. DC 50 = AUTO_SUCCESS tier. Skill is irrelevant.
+        ✅ CORRECT:
+        "skill_used": "None", "difficulty": 0    ← AUTO_SUCCESS, no skill needed.
+
+        ❌ WRONG (Worker chooses circumstance):
+        "circumstance": "ADVANTAGE"    ← WRONG. Python decides circumstance from DC. Always set "NORMAL".
+        ✅ CORRECT:
+        "circumstance": "NORMAL"
         </antiexamples>
 
         <data>
@@ -696,12 +743,13 @@ def build_resolve_mechanics_prompt(user_input, skills, clocks_info,
 
         <npc_reputation_guide>
         If the player's action targets a specific NPC, consider their reputation score when setting DC:
-        - Score >= 80 (Devoted): Lower DC by 20, consider ADVANTAGE for social skills.
+        - Score >= 80 (Devoted): Lower DC by 20.
         - Score 40-79 (Friendly): Lower DC by 10.
         - Score -39 to 39 (Neutral): No modifier.
-        - Score -79 to -40 (Hostile): Raise DC by 20, consider DISADVANTAGE for social skills.
+        - Score -79 to -40 (Hostile): Raise DC by 20.
         - Score <= -80 (Blood Enemy): Social actions should use maximum DC (140+).
         NOTE: This guide applies ONLY to social skills (Інтрига, Управління). Combat/Military skills are unaffected by reputation.
+        Reputation circumstance modifiers (ADV/DIS for social) are applied automatically by the Python engine based on rep score thresholds — do not include them yourself.
         - HOSTILE NPC RULE: If the action is directed at or involves a specific NPC with reputation score < -20,
           you MUST assign a skill (Управління or Інтрига). NEVER use skill_used="None" for requests,
           demands, or any interaction that requires NPC cooperation with a hostile NPC.
@@ -718,23 +766,25 @@ def build_resolve_mechanics_prompt(user_input, skills, clocks_info,
            - "Управління": Using noble status, bribery, trade, official orders.
            - "None": Mundane tasks (walking, looking, casual chat). 🚨 THE "NO ROLL" RULE: If no NPC is actively attacking/stopping the player, use "None".
 
-        2. DETERMINE CIRCUMSTANCE:
-           - "ADVANTAGE": Surprise, high ground, great leverage.
-           - "NORMAL": Fair conditions, standard risk.
-           - "DISADVANTAGE": ONLY when physically injured, outnumbered in active combat, or acting while severely debilitated. Social pressure alone is NOT disadvantage.
+        2. CIRCUMSTANCE FIELD:
+           Always set circumstance="NORMAL". The Python engine determines the final circumstance
+           from final_difficulty after all modifiers. Do not attempt to choose ADVANTAGE/DISADVANTAGE yourself.
 
         3. ASSESS DIFFICULTY (Target DC):
-           - 50 (Trivial): No real resistance. Unarmed peasant, open unlocked door, asking a commoner for directions.
-           - 60 (Very Easy): Basic task without real opposition. Threatening a coward, simple physical chore.
+           ZERO-SKILL TIER (system grants AUTO_SUCCESS, no roll):
+           - 50 (Trivial): No real resistance. Unarmed peasant, open unlocked door, asking commoner for directions.
+           - 60 (Very Easy): Basic task, no real opposition. Threatening a coward, simple physical chore.
            - 70 (Easy): Familiar situation, mild resistance. Convincing a sympathetic ally, sneaking past one distracted guard.
-           - 80 (Normal): Standard challenge requiring skill. Negotiating at a market, asking a lord for a small favor,
-             fighting a trained city guard, scouting a lightly guarded area, bluffing a common soldier.
-           - 100 (Hard): Experienced opposition or complex social context. Convincing a skeptical lord, lying to an
-             educated noble, fighting a skilled knight, sneaking into a guarded manor.
-           - 120 (Extreme): Elite opposition or outrageous social demand. Deceiving the Hand of the King, fighting
-             multiple trained knights simultaneously, sneaking into a heavily fortified keep.
-           - 140 (Legendary): Nearly impossible. Assassinating a king in a throne room full of guards, fighting a
-             master swordsman alone, facing dragons or overwhelming forces.
+
+           SKILL TIER (skill check, 2d50 roll, system applies circumstance from DC):
+           - 80 (Normal): Standard challenge. Negotiating at a market, asking lord for small favor, fighting trained guard.
+             → System will apply ADVANTAGE.
+           - 100 (Hard): Experienced opposition. Convincing skeptical lord, fighting skilled knight, sneaking guarded manor.
+             → System will apply NORMAL.
+           - 120 (Extreme): Elite opposition or outrageous demand. Deceiving Hand of King, fighting multiple knights.
+             → System will apply DISADVANTAGE.
+           - 140 (Legendary): Nearly impossible. Assassinating king in throne room, fighting master swordsman alone.
+             → System will apply DISADVANTAGE.
 
            SOCIAL ACTION EXAMPLES (for calibration):
            - Greeting / small talk with anyone → FREE ACTION (skill_used=None, difficulty=0)
@@ -959,7 +1009,7 @@ HOUSE: {house_name} (Origin: {origin_region})
     """
 
 
-def build_game_intro_prompt(profile_json, current_location) -> str:
+def build_game_intro_prompt(profile_json, current_location, current_scene) -> str:
     return f"""
 <role>
 Ти — Джордж Р. Р. Мартін, майстер похмурого фентезі (grimdark) та суворий Game Master RPG "Game of Thrones". Твоя мета — написати ідеальний, атмосферний пролог для гравця, суворо дотримуючись канону.
@@ -1007,15 +1057,40 @@ TIME_CONTEXT: {GAME_ERA_CONTEXT}
 4. Actions Draft: 4 принципово різні реакції гравця на цей момент (агресивна / соціальна / обережна / дика).
 </thinking_directives>
 
+<scene_constraint>
+START_SCENE: {current_scene}
+
+КРИТИЧНО: Твій narrative_text ПОВИНЕН описувати саме мікролокацію START_SCENE, а не іншу частину {current_location}.
+
+Приклад: якщо START_SCENE = "Терасний сад вілли Ілліріо", ти описуєш ТЕРАСНИЙ САД (квіти жасмину, мармурові плити, вид на бухту), а НЕ ринок чи порт Пентоса.
+
+Canon plot hook повинен органічно увійти ЧЕРЕЗ цю мікросцену: персонаж чує розмову слуг про подію, бачить кур'єра, що несе листа, помічає прапор далеко на горизонті. ЗАБОРОНЕНО переносити героя в іншу мікролокацію заради "більш видовищного" hook.
+</scene_constraint>
+
+<antiexamples>
+WRONG: scene_check не збігається з START_SCENE або narrative описує іншу мікросцену:
+START_SCENE: "Тронний Зал"
+{{"scene_check": "Двір замку",
+  "narrative_text": "Ви стоїте у дворі замку..."}}
+Розсинхрон з профілем гравця. Engine фільтрує NPC за "Тронний Зал", а наратив описує двір.
+
+CORRECT:
+START_SCENE: "Тронний Зал"
+{{"scene_check": "Тронний Зал",
+  "narrative_text": "Ви ступаєте під арку Тронного Залу. Залізний Трон височіє над вами, його шипи..."}}
+</antiexamples>
+
 <output_requirements>
 - ВИКЛЮЧНО валідний JSON. Жодного тексту поза фігурними дужками.
 - Усі значення текстових полів — Українською мовою.
 - НІКОЛИ не використовуй подвійні лапки (") всередині значень рядків. Замінюй їх на одинарні (').
-- Три обов'язкових ключі: "narrative_text", "action_prompt", "suggested_actions".
+- Чотири обов'язкових ключі: "scene_check", "narrative_text", "action_prompt", "suggested_actions".
+- "scene_check" — дослівний повтор START_SCENE. Це CoT-якір: заповни його ПЕРЕД написанням narrative_text.
 </output_requirements>
 
 ВІДПОВІДАЙ СТРОГО У ФОРМАТІ JSON:
 {{
+  "scene_check": "<дослівний повтор START_SCENE — CoT-якір, що ти прив'язав narrative до цієї сцени>",
   "narrative_text": "Атмосферний пролог, 3 абзаци, Ukrainian, без чисел у тексті",
   "action_prompt": "Питання або ситуація що вимагає негайного вибору гравця (1-2 речення)",
   "suggested_actions": [
@@ -1028,6 +1103,7 @@ TIME_CONTEXT: {GAME_ERA_CONTEXT}
 
 <few_shot_example>
 {{
+  "scene_check": "Внутрішній двір Вінтерфелла",
   "narrative_text": "Ранковий холод Півночі пробирає до самих кісток, проникаючи крізь товстий вовняний плащ. Повітря важке — запах розтопленого снігу, кінського поту і вогкого каміння. Ви стоїте на внутрішньому дворі Вінтерфелла, де зібрався мовчазний натовп. У центрі, на дерев'яній плаxі, лежить змарнілий чоловік у чорному — дезертир з Нічної Варти, що незв'язно бурмоче про білих блукачів.\\n\\nЛорд Еддард Старк височіє над ним, його обличчя вирізьблене з сірого граніту. Він мовчки знімає важкий дворучний меч. Валірійська сталь 'Льоду' поглинає тьмяне світло. Тиша стає абсолютною, перериваючись лише різким карканням ворон.\\n\\nРаптом краєм ока ви помічаєте рух. Поруч хирлявий чоловік у брудному лахмітті непомітно тягнеться до кинджала під курткою, не зводячи погляду зі спини молодого Робба Старка. Сталь Еддарда злітає вгору.",
   "action_prompt": "Невідомий ось-ось вихопить зброю. Що ви зробите?",
   "suggested_actions": [

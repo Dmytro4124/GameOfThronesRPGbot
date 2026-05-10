@@ -3,14 +3,13 @@ import difflib
 import json
 import asyncio
 from database.sheets import db
-from database.operations import refresh_npc_database, find_best_match
+from database.operations import refresh_npc_database, find_best_match, ensure_user_npc_sheet, _npc_tab_name
 from core.ai_client import model, model_gm_logic, ask_gemini, clean_and_parse_json
 from core.prompts import (
     GAME_ERA_CONTEXT, build_famous_characters_prompt,
     build_initial_stats_prompt, build_game_intro_prompt, build_populate_npcs_prompt,
 )
 from core.world_constants import get_region_for_location, get_locations_for_region, is_valid_location, VALID_LOCATIONS_ORDERED, format_scenes_for_prompt, LOCATION_SCENES
-from config import TAB_NPC
 from database.canon_npc import get_canon_npcs_copy
 
 
@@ -74,7 +73,13 @@ async def generate_initial_stats(char_name, house_name, house_data):
         # Гарантуємо наявність сцени — блокуємо "Невідомо"/GLOBAL/порожні значення
         curr_scene = profile.get("Поточна сцена", "")
         if not curr_scene or curr_scene.strip().lower() in ("невідомо", "global", "unknown", ""):
-            profile["Поточна сцена"] = loc
+            loc_scenes = LOCATION_SCENES.get(loc, {})
+            hub_scenes = loc_scenes.get("hub", [])
+            if hub_scenes:
+                profile["Поточна сцена"] = hub_scenes[0]
+                print(f"⚠️ [SCENE FALLBACK] LLM did not provide scene for '{loc}'; using hub[0]='{hub_scenes[0]}'.")
+            else:
+                profile["Поточна сцена"] = loc  # legacy для локацій поза LOCATION_SCENES
         return profile
     return None
 
@@ -85,8 +90,9 @@ async def get_narrative_intro(profile):
     print(f"📜 Пишу вступ для {profile.get('Ім' + chr(39) + 'я')}...")
     profile_json = json.dumps(profile, ensure_ascii=False, indent=2)
     current_location = profile.get("Поточне місцезнаходження", "Вестерос")
+    current_scene = profile.get("Поточна сцена", "") or current_location
 
-    prompt = build_game_intro_prompt(profile_json, current_location)  # noqa: uses narrative, no scenes needed
+    prompt = build_game_intro_prompt(profile_json, current_location, current_scene)
     try:
         def _sync_gen():
             return model.generate_content(prompt)
@@ -95,6 +101,12 @@ async def get_narrative_intro(profile):
         raw_text = response.text.strip()
         parsed = clean_and_parse_json(raw_text)
         if parsed and parsed.get("narrative_text"):
+            # Soft-warn: чи модель дотрималась scene_constraint
+            scene_check = (parsed.get("scene_check", "") or "").strip()
+            expected = current_scene.strip()
+            if scene_check and scene_check != expected:
+                print(f"⚠️ [SCENE MISMATCH] LLM scene_check='{scene_check}' "
+                      f"≠ profile['Поточна сцена']='{expected}'. Narrative may not match profile.")
             return parsed
         else:
             return {
@@ -111,13 +123,16 @@ async def get_narrative_intro(profile):
         }
 
 
-async def background_canon_generation(excluded_name=None):
+async def background_canon_generation(user_id, excluded_name=None):
     """Асинхронний ФОНОВИЙ ПРОЦЕС: Створення кістяка світу. Завантажує ЖОРСТКИЙ КАНОН."""
     print("🌍 [CANON GEN] Завантажую канонічну базу даних...")
 
+    await ensure_user_npc_sheet(user_id)
+
     def _sync_db_ops():
         import time as _time
-        worksheet = db.get_sheet(TAB_NPC)
+        tab_name = _npc_tab_name(user_id)
+        worksheet = db.get_sheet(tab_name)
         if not worksheet: return False
 
         try:
@@ -201,18 +216,18 @@ async def background_canon_generation(excluded_name=None):
     added_count = await asyncio.to_thread(_sync_db_ops)
     if added_count:
         print(f"✅ [CANON GEN] Світ заселено! Додано {added_count} канонічних легенд.")
-        from database.operations import refresh_npc_database
-        await refresh_npc_database()
+        await refresh_npc_database(user_id)
     else:
         print("❌ [CANON GEN] Не вдалося записати жодного канонічного NPC!")
 
 
-async def populate_contextual_npcs(location, situation_context="Normal day, calm atmosphere", excluded_name=None, excluded_dead_names: set = None):
+async def populate_contextual_npcs(user_id, location, situation_context="Normal day, calm atmosphere", excluded_name=None, excluded_dead_names: set = None):
     """Асинхронно генерує NPC, які відповідають ПОТОЧНІЙ СИТУАЦІЇ в локації. Блокує канонічні імена."""
     print(f"🏘️ [LOCAL POP] Аналізую локацію: {location}...")
 
     def _sync_db_read():
-        worksheet = db.get_sheet(TAB_NPC)
+        tab_name = _npc_tab_name(user_id)
+        worksheet = db.get_sheet(tab_name)
         if not worksheet: return None, None, []
         canon_names_local = []
         try:
@@ -341,8 +356,7 @@ async def populate_contextual_npcs(location, situation_context="Normal day, calm
             await asyncio.to_thread(_sync_db_write)
 
             print(f"✅ [LOCAL POP] Локацію {location} заселено ({len(new_rows)} нових NPC).")
-            from database.operations import refresh_npc_database
-            await refresh_npc_database()
+            await refresh_npc_database(user_id)
         else:
             print(f"⚠️ [LOCAL POP] ШІ не згенерував жодного валідного NPC для {location}.")
 

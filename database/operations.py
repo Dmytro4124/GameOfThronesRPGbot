@@ -16,14 +16,11 @@ from config import (
     TAB_HOUSES,
     TAB_CHARACTER,
     TAB_KNOWLEDGE,
-    TAB_NPC,
     GEMINI_API_KEY
 )
 
 # ================= ГЛОБАЛЬНІ КЕШІ ТА КОНСТАНТИ =================
 LORE_CACHE = []
-NPC_CACHE = {}
-DEAD_NPC_NAMES: set = set()  # Імена NPC зі Status=Dead; оновлюється разом з NPC_CACHE
 LORE_VECTORS = None
 
 EMBEDDINGS_FILE = "lore_embeddings.npy"
@@ -105,11 +102,19 @@ async def delete_user_data(user_id):
     return await asyncio.to_thread(_sync_delete)
 
 
-def clear_npc_cache():
-    """Очищує глобальний NPC-кеш. Викликати при рестарті гри."""
-    global NPC_CACHE
-    NPC_CACHE = {}
-    print("🗑️ [NPC CACHE] Кеш очищено.")
+def clear_npc_cache(user_id=None):
+    """Очищує per-user NPC-кеш у user_sessions. Викликати при рестарті гри.
+    Якщо user_id=None — no-op (сесій поза user_id не існує у новій архітектурі).
+    """
+    from core.engine import user_sessions
+    if user_id is None:
+        print("[NPC CACHE] clear_npc_cache викликано без user_id — no-op.")
+        return
+    session = user_sessions.get(user_id)
+    if session is not None:
+        session["npc_cache"] = {}
+        session["dead_npc_names"] = set()
+    print(f"[NPC CACHE] Кеш очищено для user {user_id}.")
 
 
 async def reset_and_fill_character_sheet(data_dict):
@@ -321,14 +326,78 @@ async def get_relevant_context(user_text, current_location):
 
 # ================= РОБОТА З NPC =================
 
-async def refresh_npc_database():
-    """Асинхронно завантажує NPC з Google Sheets у пам'ять бота (З урахуванням Сцени)"""
-    global NPC_CACHE, DEAD_NPC_NAMES
+FROZEN_NPC_FIELDS = ("description", "character", "goal", "secrets")
+FROZEN_REASON_MIN_LENGTH = 20  # символів — захист від "ok" / "так" / "epic event"
+
+
+def _npc_tab_name(user_id) -> str:
+    """Повертає ім'я аркуша Google Sheets для NPC конкретного гравця."""
+    return f"NPC_{user_id}"
+
+
+async def ensure_user_npc_sheet(user_id) -> bool:
+    """Idempotent: створює аркуш NPC_<user_id> якщо його не існує.
+    Додає рядок заголовків відповідно до структури NPC_DB.
+    Повертає True при успіху (або якщо аркуш вже існував).
+    """
+    tab_name = _npc_tab_name(user_id)
+    headers = [
+        "Location", "Scene", "Name", "Description", "Character", "Goal", "Secrets",
+        "Relation_Player", "Memory_Anchor", "Relation_NPCs", "Status", "Is_Canon",
+        "Inventory", "Reputation_Score", "Region"
+    ]
+
+    def _sync_ensure():
+        try:
+            db.spreadsheet.worksheet(tab_name)
+            # Аркуш вже існує — нічого не робимо
+            return True
+        except gspread.exceptions.WorksheetNotFound:
+            pass
+        try:
+            worksheet = db.spreadsheet.add_worksheet(title=tab_name, rows=200, cols=15)
+            worksheet.append_row(headers)
+            print(f"[NPC SHEET] Створено аркуш '{tab_name}' для user {user_id}.")
+            return True
+        except Exception as e:
+            print(f"[NPC SHEET ERROR] Не вдалося створити аркуш '{tab_name}': {e}")
+            return False
+
+    return await asyncio.to_thread(_sync_ensure)
+
+
+async def delete_user_npc_sheet(user_id):
+    """Видаляє аркуш NPC_<user_id>. No-op якщо аркуш не існує.
+    Викликати при /restart для повного скидання стану гравця.
+    """
+    tab_name = _npc_tab_name(user_id)
+
+    def _sync_delete():
+        try:
+            worksheet = db.spreadsheet.worksheet(tab_name)
+            db.spreadsheet.del_worksheet(worksheet)
+            print(f"[NPC SHEET] Аркуш '{tab_name}' видалено для user {user_id}.")
+        except gspread.exceptions.WorksheetNotFound:
+            pass  # вже немає — no-op
+        except Exception as e:
+            print(f"[NPC SHEET ERROR] Не вдалося видалити аркуш '{tab_name}': {e}")
+
+    await asyncio.to_thread(_sync_delete)
+
+
+async def refresh_npc_database(user_id):
+    """Асинхронно завантажує NPC гравця з аркуша NPC_<user_id> у user_sessions.
+    Якщо аркуш не існує — повертає False (не кидає виняток).
+    """
+    from core.engine import user_sessions
+
+    tab_name = _npc_tab_name(user_id)
 
     def _sync_refresh():
         try:
-            worksheet = db.get_sheet(TAB_NPC)
-            if not worksheet: return False
+            worksheet = db.get_sheet(tab_name)
+            if not worksheet:
+                return None, set(), 0
 
             raw_data = worksheet.get_all_records()
             new_cache = {}
@@ -345,7 +414,7 @@ async def refresh_npc_database():
                     continue
 
                 loc = str(row.get("Location", "GLOBAL")).strip()
-                scene = str(row.get("Scene", "Невідомо")).strip()  # ДОДАНО СЦЕНУ
+                scene = str(row.get("Scene", "Невідомо")).strip()
                 name = str(row.get("Name", "Unknown")).strip()
                 is_canon = str(row.get("Is_Canon", "FALSE")).upper() == "TRUE"
 
@@ -387,7 +456,6 @@ async def refresh_npc_database():
                 if loc not in new_cache:
                     new_cache[loc] = []
 
-                # Зберігаємо структуру, щоб мати змогу фільтрувати за сценою пізніше
                 new_cache[loc].append({
                     "name": name,
                     "scene": scene,
@@ -399,35 +467,61 @@ async def refresh_npc_database():
 
             return new_cache, dead_names, count
         except Exception as e:
-            print(f"❌ [NPC DB ERROR] {e}")
+            print(f"[NPC DB ERROR] {e}")
             return None, set(), 0
 
     result, dead_result, count = await asyncio.to_thread(_sync_refresh)
+
+    # Оборонне програмування: якщо session не існує — ініціалізуємо
+    if user_id not in user_sessions:
+        user_sessions[user_id] = {"npc_cache": {}, "dead_npc_names": set()}
+
     if result is not None:
-        NPC_CACHE = result
-        DEAD_NPC_NAMES = dead_result
-        print(f"✅ [NPC DB] Завантажено {count} активних, {len(dead_result)} мертвих персонажів.", flush=True)
+        user_sessions[user_id]["npc_cache"] = result
+        user_sessions[user_id]["dead_npc_names"] = dead_result
+        print(f"[NPC DB] user {user_id}: завантажено {count} активних, {len(dead_result)} мертвих.", flush=True)
         return True
+
     return False
 
 
-def get_dead_npc_names() -> set:
-    """Повертає копію множини імен мертвих NPC (Status=Dead)."""
-    return set(DEAD_NPC_NAMES)
+def get_dead_npc_names(user_id) -> set:
+    """Повертає копію множини імен мертвих NPC для гравця (або порожній set)."""
+    from core.engine import user_sessions
+    session = user_sessions.get(user_id)
+    if session is None:
+        return set()
+    return set(session.get("dead_npc_names", set()))
 
 
-def evict_npc_from_cache(matched_name: str):
-    """Миттєво видаляє NPC з NPC_CACHE без звернення до Google Sheets."""
-    global NPC_CACHE
-    for loc in list(NPC_CACHE.keys()):
-        NPC_CACHE[loc] = [n for n in NPC_CACHE[loc] if n.get("name") != matched_name]
+def evict_npc_from_cache(user_id, matched_name: str):
+    """Миттєво видаляє NPC з per-user кешу без звернення до Google Sheets."""
+    from core.engine import user_sessions
+    session = user_sessions.get(user_id)
+    if session is None:
+        return
+    npc_cache = session.get("npc_cache", {})
+    for loc in list(npc_cache.keys()):
+        npc_cache[loc] = [n for n in npc_cache[loc] if n.get("name") != matched_name]
 
 
-def get_location_npcs(current_location, current_scene, current_region=None):
+def get_location_npcs(user_id, current_location, current_scene, current_region=None):
     """Синхронна функція. Повертає опис NPC, список легальних імен та dict репутації.
+    Читає з user_sessions[user_id]["npc_cache"].
+    Якщо session немає або кеш порожній — повертає ("", [], {}).
     Підтримує 3-рівневу фільтрацію: Регіон → Локація → Сцена.
     Якщо current_location == TRAVEL_LOCATION — показує регіональних мандрівників.
     """
+    from core.engine import user_sessions
+
+    session = user_sessions.get(user_id)
+    if session is None:
+        return "", [], {}
+
+    npc_cache = session.get("npc_cache", {})
+    if not npc_cache:
+        return "", [], {}
+
     found_npcs = []
     legal_names = []
     reputation_context = {}
@@ -438,7 +532,7 @@ def get_location_npcs(current_location, current_scene, current_region=None):
     if not target_scene:
         target_scene = "невідомо"
 
-    for loc_key, npcs_list in NPC_CACHE.items():
+    for loc_key, npcs_list in npc_cache.items():
         if loc_key == "GLOBAL":
             continue  # обробляємо окремо нижче
 
@@ -471,8 +565,8 @@ def get_location_npcs(current_location, current_scene, current_region=None):
                         reputation_context[npc_data["name"]] = npc_data.get("reputation_score", 0)
 
     # Завжди додаємо абсолютно глобальних NPC
-    if "GLOBAL" in NPC_CACHE:
-        for npc_data in NPC_CACHE["GLOBAL"]:
+    if "GLOBAL" in npc_cache:
+        for npc_data in npc_cache["GLOBAL"]:
             found_npcs.append(npc_data["card"])
             legal_names.append(npc_data["name"])
             reputation_context[npc_data["name"]] = npc_data.get("reputation_score", 0)
@@ -480,7 +574,7 @@ def get_location_npcs(current_location, current_scene, current_region=None):
     if not found_npcs:
         return "", [], {}
 
-    npc_block = "=== 👥 VISIBLE NPC ROSTER (STRICTLY IN THIS SCENE) ===\n"
+    npc_block = "=== VISIBLE NPC ROSTER (STRICTLY IN THIS SCENE) ===\n"
     npc_block += "GM INSTRUCTION: Only these characters are physically present here.\n"
     npc_block += "DO NOT HALLUCINATE NEW CHARACTERS IF A SUITABLE ONE IS HERE.\n\n"
     npc_block += "\n".join(found_npcs)
@@ -527,28 +621,35 @@ def find_best_match(query_name, distinct_names, threshold=0.75):
     return None
 
 
-async def update_npcs_in_db(updates, legal_names_list_deprecated=None,
+async def update_npcs_in_db(user_id, updates, legal_names_list_deprecated=None,
                             player_new_location: str = None, player_location_changed: bool = False,
                             player_new_scene: str = None, player_scene_changed: bool = False,
-                            companion_npcs: list = None):
+                            companion_npcs: list = None,
+                            frozen_fields_reason: str = ""):
     """
-    Асинхронно оновлює існуючих NPC.
+    Асинхронно оновлює існуючих NPC в аркуші NPC_<user_id>.
     Вбудовано жорстку нормалізацію регістру та апострофів для difflib.
     """
     if not updates:
         return
 
-    print(f"📝 [NPC UPDATE] Обробка змін: {json.dumps(updates, ensure_ascii=False)}")
+    print(f"[NPC UPDATE] user {user_id}: обробка змін: {json.dumps(updates, ensure_ascii=False)}")
+
+    tab_name = _npc_tab_name(user_id)
 
     def _sync_update():
-        worksheet = db.get_sheet(TAB_NPC)
+        worksheet = db.get_sheet(tab_name)
+        if not worksheet:
+            print(f"[NPC UPDATE] Аркуш '{tab_name}' не знайдено.")
+            return False, []
         all_values = worksheet.get_all_values()
 
-        if not all_values: return False
+        if not all_values:
+            return False, []
 
         headers = [h.strip().lower() for h in all_values[0]]
         col_map = {}
-        target_cols = ["status", "location", "scene", "relation_player", "memory_anchor", "goal", "secrets",
+        target_cols = ["status", "location", "scene", "memory_anchor", "goal", "secrets",
                        "description", "character",
                        "relation_npcs", "inventory", "reputation_score", "region"]
 
@@ -603,6 +704,12 @@ async def update_npcs_in_db(updates, legal_names_list_deprecated=None,
                 for field, new_val in update.items():
                     field_key = field.lower()
                     if field_key == "name": continue
+
+                    if field_key == "relation_player":
+                        print(f"🚫 [RELATION_PLAYER GUARD] '{real_original_name}': "
+                              f"Relation_Player ігнорується (system-managed derivative). "
+                              f"Use reputation_delta from Worker → update_npc_reputation flow.")
+                        continue
 
                     val_str = str(new_val).strip()
 
@@ -674,6 +781,18 @@ async def update_npcs_in_db(updates, legal_names_list_deprecated=None,
                         memory_anchor_updates.append((real_original_name, val_str))
                         continue
 
+                    # Frozen-fields vetting: відкидаємо ТІЛЬКИ це поле, не весь update.
+                    # Інші поля того самого NPC-об'єкта (Status, Location тощо) зберігаються.
+                    if field_key in FROZEN_NPC_FIELDS:
+                        reason_clean = (frozen_fields_reason or "").strip()
+                        if len(reason_clean) < FROZEN_REASON_MIN_LENGTH:
+                            print(f"🚫 [FROZEN GUARD] '{real_original_name}': field '{field_key}' rejected — "
+                                  f"reason missing or too short ({len(reason_clean)} chars). "
+                                  f"Need >= {FROZEN_REASON_MIN_LENGTH} chars in frozen_fields_change_reason.")
+                            continue
+                        print(f"✅ [FROZEN APPROVED] '{real_original_name}': field '{field_key}' updated "
+                              f"(reason: {reason_clean[:60]}...)")
+
                     if field_key in col_map:
                         col_idx = col_map[field_key]
                         cells_to_update.append(gspread.Cell(row_idx, col_idx, val_str))
@@ -689,27 +808,32 @@ async def update_npcs_in_db(updates, legal_names_list_deprecated=None,
     try:
         has_updated, anchor_updates = await asyncio.to_thread(_sync_update)
         if has_updated:
-            await refresh_npc_database()
+            await refresh_npc_database(user_id)
         for npc_name, event_text in anchor_updates:
-            await append_memory_anchor(npc_name, event_text, game_day=0, rep_change=0)
+            await append_memory_anchor(user_id, npc_name, event_text, game_day=0, rep_change=0)
     except Exception as e:
         print(f"❌ [UPDATE ERROR] {e}")
 
 
-async def update_npc_reputation(npc_name, delta):
-    """Атомарне оновлення Reputation_Score NPC у Google Sheets. Clamp до [-100, 100]."""
+async def update_npc_reputation(user_id, npc_name, delta):
+    """Атомарне оновлення Reputation_Score NPC в аркуші NPC_<user_id>. Clamp до [-100, 100]."""
     if not npc_name or not delta:
         return
 
+    tab_name = _npc_tab_name(user_id)
+
     def _sync_rep_update():
-        worksheet = db.get_sheet(TAB_NPC)
+        worksheet = db.get_sheet(tab_name)
+        if not worksheet:
+            print(f"[REP] Аркуш '{tab_name}' не знайдено.")
+            return False
         all_values = worksheet.get_all_values()
         if not all_values:
             return False
 
         headers = [h.strip().lower() for h in all_values[0]]
         if "reputation_score" not in headers:
-            print(f"⚠️ [REP] Колонка 'Reputation_Score' відсутня в NPC_DB. Пропускаємо.")
+            print(f"[REP] Колонка 'Reputation_Score' відсутня в '{tab_name}'. Пропускаємо.")
             return False
 
         rep_col = headers.index("reputation_score") + 1
@@ -728,34 +852,39 @@ async def update_npc_reputation(npc_name, delta):
                     old_val = 0
                 new_val = max(-100, min(100, old_val + delta))
                 worksheet.update_cell(i, rep_col, new_val)
-                print(f"📊 [REP] {raw_name}: {old_val} -> {new_val} (delta {delta:+d})")
+                print(f"[REP] {raw_name}: {old_val} -> {new_val} (delta {delta:+d})")
                 # Автоматично синхронізуємо текстовий ярлик із новим Score
                 from database.canon_npc import _score_to_relation_text
                 if "relation_player" in headers:
                     rel_col = headers.index("relation_player") + 1
                     new_relation = _score_to_relation_text(new_val)
                     worksheet.update_cell(i, rel_col, new_relation)
-                    print(f"🔄 [SYNC] {raw_name}: Relation_Player → '{new_relation}'")
+                    print(f"[SYNC] {raw_name}: Relation_Player -> '{new_relation}'")
                 return True
 
-        print(f"⚠️ [REP] NPC '{npc_name}' не знайдено в NPC_DB.")
+        print(f"[REP] NPC '{npc_name}' не знайдено в '{tab_name}'.")
         return False
 
     try:
         updated = await asyncio.to_thread(_sync_rep_update)
         if updated:
-            await refresh_npc_database()
+            await refresh_npc_database(user_id)
     except Exception as e:
-        print(f"❌ [REP UPDATE ERROR] {e}")
+        print(f"[REP UPDATE ERROR] {e}")
 
 
-async def append_memory_anchor(npc_name, event_text, game_day=0, rep_change=0):
-    """Додає подію до Memory_Anchor як JSON-масив (FIFO 5 записів)."""
+async def append_memory_anchor(user_id, npc_name, event_text, game_day=0, rep_change=0):
+    """Додає подію до Memory_Anchor NPC в аркуші NPC_<user_id> як JSON-масив (FIFO 5 записів)."""
     if not npc_name or not event_text:
         return
 
+    tab_name = _npc_tab_name(user_id)
+
     def _sync_memory_update():
-        worksheet = db.get_sheet(TAB_NPC)
+        worksheet = db.get_sheet(tab_name)
+        if not worksheet:
+            print(f"[MEMORY] Аркуш '{tab_name}' не знайдено.")
+            return False
         all_values = worksheet.get_all_values()
         if not all_values:
             return False
@@ -790,7 +919,7 @@ async def append_memory_anchor(npc_name, event_text, game_day=0, rep_change=0):
                 memory_list = memory_list[-5:]
 
                 worksheet.update_cell(i, mem_col, json.dumps(memory_list, ensure_ascii=False))
-                print(f"📝 [MEMORY] {raw_name}: додано '{event_text}' (всього {len(memory_list)} записів)")
+                print(f"[MEMORY] {raw_name}: додано '{event_text}' (всього {len(memory_list)} записів)")
                 return True
 
         return False
@@ -798,4 +927,4 @@ async def append_memory_anchor(npc_name, event_text, game_day=0, rep_change=0):
     try:
         await asyncio.to_thread(_sync_memory_update)
     except Exception as e:
-        print(f"❌ [MEMORY UPDATE ERROR] {e}")
+        print(f"[MEMORY UPDATE ERROR] {e}")
