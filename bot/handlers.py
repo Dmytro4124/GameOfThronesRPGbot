@@ -1,5 +1,6 @@
 # bot/handlers.py
 import asyncio
+import logging
 import random
 import time
 import traceback
@@ -24,6 +25,8 @@ from core.engine import process_game_turn, user_sessions
 from config import ADMIN_TELEGRAM_IDS, EROTIC_USERS, BOT_VERSION, MODEL_MAIN_NAME
 from bot.help_text import HELP_TEXT, ADMIN_HELP_TEXT
 
+
+logger = logging.getLogger(__name__)
 
 router = Router()
 PROCESSED_MESSAGES = set()
@@ -114,6 +117,7 @@ async def cmd_speed(message: Message):
 
 
 @router.message(Command("map"))
+@router.message(F.text == "🗺 Карта")
 async def cmd_map(message: Message, bot: Bot):
     """Показує карту сцен поточної локації гравця."""
     chat_id = message.chat.id
@@ -294,10 +298,9 @@ async def start_game_with_character(bot: Bot, chat_id: int, char_name: str):
 
 
 @router.message(F.text == "📜 Профіль")
-async def show_profile_handler(message: Message):
+async def show_profile_handler(message: Message, bot: Bot):
     chat_id = message.chat.id
 
-    # Видалено жорстку перевірку user_sessions, тепер профіль можна подивитися навіть якщо сесія скинулась
     profile, _ = await get_user_data(chat_id)
     if profile:
         char_name = profile.get("Ім'я", "Невідомий")
@@ -312,6 +315,10 @@ async def show_profile_handler(message: Message):
         house = profile.get("Дім", "Невідомий")
         loc = profile.get("Поточне місцезнаходження", "Невідомо")
         time_val = profile.get("Ігровий час", "Невідомий час")
+        gold = profile.get("Особисте Золото", 0)
+        weapon = profile.get("Зброя", "-")
+        armor = profile.get("Броня", "-")
+        inv = profile.get("Інвентар", "Пусто")
 
         text = (
             f"👤 *{char_name}*\n"
@@ -321,29 +328,16 @@ async def show_profile_handler(message: Message):
             f"⚔️ Бойові: {combat} | 🛡️ Військові: {military}\n"
             f"🍷 Інтрига: {intrigue} | ⚖️ Управління: {manage}\n"
             f"━━━━━━━━━━━━━━━━━━\n🗣 Репутація: {rep}\n"
-            f"💀 Вороги: {enemies}"
+            f"💀 Вороги: {enemies}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"💰 *Золото:* {gold} драконів\n"
+            f"⚔️ *Зброя:* {weapon}\n"
+            f"🛡 *Броня:* {armor}\n"
+            f"📦 *Речі:* {inv}"
         )
-        await message.answer(text, parse_mode='Markdown')
+        await send_safe_message(bot, chat_id, text)
     else:
-        await message.answer("Спершу почніть гру через /start")
-
-
-@router.message(F.text == "🎒 Інвентар")
-async def show_inventory_handler(message: Message):
-    chat_id = message.chat.id
-    profile, _ = await get_user_data(chat_id)
-    if profile:
-        gold = profile.get("Особисте Золото", 0)
-        weapon = profile.get("Зброя", "-")
-        armor = profile.get("Броня", "-")
-        inv = profile.get("Інвентар", "Пусто")
-
-        text = (
-            f"🎒 *Ваш мішок:*\n\n💰 *Золото:* {gold} драконів\n"
-            f"⚔️ *Зброя:* {weapon}\n🛡 *Броня:* {armor}\n"
-            f"━━━━━━━━━━━━━━━━━━\n📦 *Речі:* {inv}"
-        )
-        await message.answer(text, parse_mode='Markdown')
+        await send_safe_message(bot, chat_id, "Спершу почніть гру через /start")
 
 
 @router.message(F.text == "🔄 Рестарт")
@@ -516,7 +510,7 @@ async def handle_general_messages(message: Message, bot: Bot):
                             last_edit_time = now
                             print(f"🟢 [CONSUMER] Message edited, {len(display)} chars")
                         except Exception as e:
-                            print(f"🔴 [CONSUMER] Edit failed: {e}")
+                            logger.warning(f"[CONSUMER_EDIT] edit_text failed: {type(e).__name__}: {e}")
 
             consumer_task = asyncio.create_task(_stream_consumer()) if USE_STREAMING else None
             try:

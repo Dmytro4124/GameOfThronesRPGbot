@@ -271,8 +271,8 @@ if __name__ == "__main__":
 | Callback `char_*` | `handle_character_selection` | Старт кастомного імені або генерація профілю + інтро. |
 | Callback `back_to_regions` / `back_to_houses` | відповідні хендлери | Навігація назад у меню вибору. |
 | Callback `restart_confirm` / `restart_cancel` | `callback_restart_*` | Видалення профілю та запуск нового світу. |
-| Reply-кнопка `📜 Профіль` | `show_profile_handler` | Відображає основні стати з Google Sheets. |
-| Reply-кнопка `🎒 Інвентар` | `show_inventory_handler` | Золото, зброя, броня, речі. |
+| Reply-кнопка `📜 Профіль` | `show_profile_handler` | Відображає основні стати з Google Sheets + інвентар (золото, зброя, броня, речі). |
+| Reply-кнопка `🗺 Карта` / `/map` | `cmd_map` | Карта сцен поточної локації гравця. |
 | Reply-кнопка `⚙️ Тех. дані` | `show_debug_stats` | Тайминги останнього ходу. |
 | Reply-кнопка `🔄 Рестарт` | `restart_request_handler` | Підтвердження видалення персонажа. |
 | Будь-який текст | `handle_general_messages` | Головний хід гри: censor → mechanics → GM_Logic → Narrator → save. |

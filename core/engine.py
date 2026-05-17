@@ -26,6 +26,41 @@ from database.operations import (
 user_sessions = {}
 _atmosphere_cache = {}  # P11: кеш атмосфери локацій {location: atmosphere_str}
 
+# WARN #5: хвилин на добу — замість magic number 1440
+_MINUTES_PER_DAY = 24 * 60  # 1440
+
+# WARN #1: маркери placeholder-відповідей Narrator (case-insensitive)
+_PLACEHOLDER_MARKERS = (
+    "тут напиши",
+    "тут напишіть",
+    "вставте текст",
+    "insert story",
+    "insert text",
+    "placeholder",
+    "todo:",
+    "[опис",
+    "<опис",
+    "[текст",
+    "<текст",
+    "write here",
+    "напишіть тут",
+)
+
+
+# §5.2 scene_continuity — структурні блоки для Narrator.
+# NEW_SCENE: гравець щойно змінив сцену або локацію → описати атмосферу.
+# CONTINUING: сцена та локація незмінні → фокус на дії, без повтору обстановки.
+SCENE_CONTINUITY_NEW = (
+    "<scene_continuity>NEW_SCENE: гравець уперше в цій сцені цього ходу. "
+    "Опиши атмосферу одним коротким абзацом (1–3 речення): "
+    "запахи/звуки/освітлення/ключова деталь.</scene_continuity>"
+)
+SCENE_CONTINUITY_CONTINUING = (
+    "<scene_continuity>CONTINUING: гравець залишається в тій самій сцені. "
+    "НЕ повторюй опис залу/інтер'єру/повітря. "
+    "Фокус на дії, реакціях NPC і діалогах.</scene_continuity>"
+)
+
 
 def _sanitize_story(text: str) -> str:
     """Видаляє технічні рядки кидків, що випадково потрапили в наратив."""
@@ -93,6 +128,109 @@ def _build_impact_hints(impact_logs: list) -> str:
     return "\n".join(hints)
 
 
+def _build_deterministic_narrative(updates: dict, profile: dict,
+                                    old_location: str = "", old_scene: str = "") -> str:
+    """
+    Шар 3 (last-resort): детерміністично будує короткий художній абзац із
+    даних updates та поточного профілю. Викликається лише якщо всі три LLM-спроби
+    Narrator'а провалились. Повертає рядок ≥ 100 символів без слів "помилка"
+    або "Майстер", без префіксу помилки.
+    """
+    parts = []
+
+    # Локація (зміна або поточна)
+    new_location = profile.get("Поточне місцезнаходження", "")
+    loc_impact = updates.get("location_impact", "")
+
+    if old_location and new_location and old_location != new_location:
+        parts.append(
+            f"Ви залишили *{old_location}* і вирушили до *{new_location}*."
+        )
+    elif new_location and new_location not in ("Невідомо", ""):
+        parts.append(f"Ви перебуваєте у *{new_location}*.")
+    elif loc_impact and loc_impact not in ("none", "None", ""):
+        parts.append(f"Місце подій змінилось.")
+
+    # Сцена
+    new_scene = profile.get("Поточна сцена", "")
+    scene_impact = updates.get("scene_impact", "")
+    if old_scene and new_scene and old_scene != new_scene and new_scene not in ("none", "None", ""):
+        parts.append(f"Обстановка навколо вас змінилась.")
+    elif scene_impact and scene_impact not in ("none", "None", ""):
+        parts.append(f"Обставини набули нового обертання.")
+
+    # Час
+    minutes_passed = int(updates.get("minutes_passed", 0))
+    if minutes_passed >= _MINUTES_PER_DAY:
+        days = minutes_passed // _MINUTES_PER_DAY
+        parts.append(f"Минуло {'кілька днів' if days > 1 else 'цілий день'}.")
+    elif minutes_passed >= 60:
+        hours = minutes_passed // 60
+        h_word = "годину" if hours == 1 else ("дві години" if hours == 2 else f"близько {hours} годин")
+        parts.append(f"Минуло {h_word}.")
+    elif minutes_passed > 0:
+        parts.append(f"Минуло кілька хвилин.")
+
+    # Здоров'я
+    health_impact = updates.get("health_impact", "none")
+    if health_impact not in ("none", "None", "", None):
+        if health_impact == "heal_small" or health_impact == "heal_full":
+            parts.append("Рани потроху загоюються.")
+        elif health_impact in ("dmg_light",):
+            parts.append("Невелика подряпина нагадує про недавню небезпеку.")
+        elif health_impact in ("dmg_medium", "dmg_heavy", "dmg_fatal"):
+            parts.append("Біль від поранення дається взнаки.")
+
+    # Енергія
+    energy_impact = updates.get("energy_impact", "none")
+    if energy_impact in ("spend_large", "spend_medium"):
+        parts.append("Втома легко далася взнаки — сили зменшились.")
+    elif energy_impact in ("restore_full", "sleep"):
+        parts.append("Відпочинок повернув сили.")
+    elif energy_impact in ("restore_small", "restore_medium"):
+        parts.append("Коротка перепочинка освіжила думки.")
+
+    # Золото
+    gold_impact = str(updates.get("gold_impact", "none")).strip()
+    if gold_impact not in ("none", "None", "0", ""):
+        if gold_impact.startswith("-") or gold_impact in ("spend_small", "spend_medium", "spend_large"):
+            parts.append("Золото змінило власника.")
+        elif gold_impact.startswith("+") or gold_impact in ("earn_small", "earn_medium", "earn_large"):
+            parts.append("Кілька монет осіло у кишені.")
+
+    # Інвентар
+    inv_new = updates.get("inventory_new") or []
+    inv_lost = updates.get("inventory_lost") or []
+    if isinstance(inv_new, str):
+        inv_new = [inv_new] if inv_new else []
+    if isinstance(inv_lost, str):
+        inv_lost = [inv_lost] if inv_lost else []
+    if inv_lost:
+        item_str = ", ".join(f"*{i}*" for i in inv_lost[:2])
+        parts.append(f"Ви розстались з {item_str}.")
+    if inv_new:
+        item_str = ", ".join(f"*{i}*" for i in inv_new[:2])
+        parts.append(f"До ваших речей додалось: {item_str}.")
+
+    # Якщо нічого немає — загальна фраза
+    if not parts:
+        current_loc = new_location or "невідомому місці"
+        parts.append(
+            f"Час спливав непомітно у *{current_loc}*. "
+            f"Вестерос продовжував своє повільне обертання, байдужий до людських справ."
+        )
+
+    narrative = " ".join(parts)
+
+    # Гарантуємо мінімум 100 символів
+    if len(narrative) < 100:
+        narrative += (
+            " Вестерос продовжував своє повільне обертання, байдужий до людських справ."
+        )
+
+    return narrative
+
+
 async def summarize_turn(gm_response):
     clean_story = gm_response.split("📊")[0][:800]
     prompt = build_summarize_turn_prompt(clean_story)
@@ -124,7 +262,8 @@ def _build_narrator_prompt(user_input, director_notes, npc_context_text,
                            current_location, impact_narrative_hints,
                            puppet_mode=False, recent_history_text=None,
                            erotic_mode=False, active_roster=None, dead_npcs=None,
-                           departing_roster_text="", arriving_roster_text=""):
+                           departing_roster_text="", arriving_roster_text="",
+                           scene_continuity_block: str = ""):
     return build_narrator_prompt(
         user_input=user_input,
         director_notes=director_notes,
@@ -141,6 +280,7 @@ def _build_narrator_prompt(user_input, director_notes, npc_context_text,
         dead_npcs=dead_npcs,
         departing_roster_text=departing_roster_text,
         arriving_roster_text=arriving_roster_text,
+        scene_continuity_block=scene_continuity_block,
     )
 
 
@@ -295,7 +435,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                     current_debuffs[skill] = debuff_val
                     profile["temp_debuffs"] = current_debuffs
 
-                mechanical_updates["minutes_passed"] = days_spent * 1440
+                mechanical_updates["minutes_passed"] = days_spent * _MINUTES_PER_DAY
                 current_energy = safe_int(profile.get("Енергія", 1000))
                 profile["Енергія"] = max(0, current_energy - energy_cost)
 
@@ -543,6 +683,11 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 f"\n\n[СИСТЕМНА НОТАТКА ДЛЯ КОНТЕКСТУ: Такі NPC МЕРТВІ і НЕ існують у поточній реальності: "
                 f"{_dead_list_str}. Все що ти читаєш про них в попередніх ходах — минуле.]"
             )
+        # Формуємо scene_continuity_block на основі вже обчисленого location_or_scene_changed
+        scene_continuity_block = (
+            SCENE_CONTINUITY_NEW if location_or_scene_changed else SCENE_CONTINUITY_CONTINUING
+        )
+
         narrator_prompt = _build_narrator_prompt(
             user_input=user_input,
             director_notes=director_notes,
@@ -559,6 +704,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             dead_npcs=dead_npcs,
             departing_roster_text=departing_npc_context if location_or_scene_changed else "",
             arriving_roster_text=arriving_npc_context if location_or_scene_changed else "",
+            scene_continuity_block=scene_continuity_block,
         )
 
         if narrator_queue is not None:
@@ -609,16 +755,49 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             narrator_response = await asyncio.to_thread(_sync_gen_narrator)
             story = narrator_response.text.strip() if narrator_response and narrator_response.text else ""
 
-        # Retry якщо Narrator видав сміття, обрізаний текст або None
+        # === Шар 1: обрізаний, але змістовний текст — приймаємо без retry ===
+        # Визначаємо "справжній" failure: порожньо, placeholder або надто короткий.
+        # Трункований текст (≥100 символів, не placeholder) — НЕ є failure: додаємо "…" і рухаємось далі.
         _story_truncated = story and len(story) > 20 and not story.rstrip().endswith(('.', '!', '?', '…', '"', '*'))
-        if _story_truncated:
-            print(f"⚠️ [NARRATOR] Текст обрізаний (не закінчується розділовим знаком): ...{story[-50:]!r}")
-        if not story or "Тут напиши" in story or len(story) < 20 or _story_truncated:
+        _is_placeholder = story and any(marker in story.lower() for marker in _PLACEHOLDER_MARKERS)
+        _is_hard_fail = not story or _is_placeholder or len(story) < 20
+
+        if _story_truncated and not _is_hard_fail:
+            if len(story) >= 100:
+                # Змістовний текст, просто обрізаний — використовуємо як є
+                logger.info(
+                    f"[NARRATOR_FAIL] Attempt 1 truncated but substantial "
+                    f"({len(story)} chars) — accepted with ellipsis. tail={story[-50:]!r}"
+                )
+                story = story.rstrip() + "…"
+                _story_truncated = False  # більше не вважаємо проблемою
+            else:
+                # Коротший обрізаний текст — все одно retry
+                _is_hard_fail = True
+
+        _narrator_failed = False  # прапор: всі три спроби провалились
+
+        if _is_hard_fail:
+            # --- Логування Attempt 1 failure ---
+            _fail_reason = (
+                "empty" if not story
+                else "placeholder" if _is_placeholder
+                else f"too_short({len(story)})" if len(story) < 20
+                else f"truncated_short({len(story)})"
+            )
+            logger.info(
+                f"[NARRATOR_FAIL] Attempt 1 failed. reason={_fail_reason} "
+                f"prompt_len={len(narrator_prompt)} "
+                f"story_preview={story[:200]!r}"
+            )
+
+            # === Шар 2 (Attempt 2): retry через streaming або blocking ===
             if narrator_queue is not None:
                 # Streaming retry: consumer ще живий (None не надсилали), тому пушимо нові чанки
                 def _sync_stream_retry():
                     chunks = []
                     thought_parts = []
+                    _t0 = time.time()
                     try:
                         for chunk in model_narrator.generate_content_stream(narrator_prompt):
                             try:
@@ -633,20 +812,147 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                                 if text:
                                     chunks.append(text)
                                     _loop.call_soon_threadsafe(narrator_queue.put_nowait, text)
+                            # finish_reason при retry
+                            try:
+                                fr = chunk.candidates[0].finish_reason if chunk.candidates else None
+                                if fr and str(fr) not in ("FinishReason.STOP", "STOP", "1", "None"):
+                                    logger.info(f"[NARRATOR_FAIL] Retry finish_reason={fr}")
+                            except Exception:
+                                pass
                     except Exception as e:
-                        print(f"🔴 [STREAM RETRY] Error: {e}")
+                        logger.info(f"[NARRATOR_FAIL] Retry stream error: {e}")
                     record_thought(MODEL_NARRATOR_NAME, "\n".join(thought_parts))
-                    return "".join(chunks)
+                    _elapsed = time.time() - _t0
+                    _result = "".join(chunks)
+                    logger.info(
+                        f"[NARRATOR_FAIL] Retry done. chunks={len(chunks)} "
+                        f"total_chars={len(_result)} elapsed={_elapsed:.2f}s "
+                        f"preview={_result[:200]!r}"
+                    )
+                    return _result
 
                 story = await asyncio.to_thread(_sync_stream_retry)
-                story = story.strip() if story else "..."
+                story = story.strip() if story else ""
+
+                if not story or len(story) < 20:
+                    logger.info(
+                        f"[NARRATOR_FAIL] Attempts 1+2 failed (streaming). "
+                        f"prompt_len={len(narrator_prompt)} story={story!r} "
+                        f"— proceeding to Attempt 3 (blocking fallback)"
+                    )
+                    # === Шар 2→3: third attempt blocking з нижчою температурою ===
+                    def _sync_gen_narrator_third():
+                        _t0 = time.time()
+                        try:
+                            from google.genai import types as _gtypes
+                            _cfg = _gtypes.GenerateContentConfig(temperature=0.5)
+                            resp = model_narrator.generate_content(narrator_prompt, config=_cfg)
+                        except Exception:
+                            # Якщо google.genai.types недоступний — без config
+                            resp = model_narrator.generate_content(narrator_prompt)
+                        _elapsed = time.time() - _t0
+                        _text = (resp.text or "") if resp else ""
+                        logger.info(
+                            f"[NARRATOR_FAIL] Attempt 3 (blocking low-temp) done. "
+                            f"elapsed={_elapsed:.2f}s text_len={len(_text)} "
+                            f"preview={_text[:200]!r}"
+                        )
+                        return resp
+
+                    third_resp = await asyncio.to_thread(_sync_gen_narrator_third)
+                    third_text = third_resp.text.strip() if third_resp and third_resp.text else ""
+                    if third_text and len(third_text) >= 50:
+                        story = third_text
+                        # WARN #2: Шар 3 blocking — чанки не стрімились, пушимо повний текст
+                        try:
+                            narrator_queue.put_nowait(story)
+                        except asyncio.QueueFull:
+                            pass
+                    else:
+                        logger.warning(
+                            f"[NARRATOR_LAST_RESORT] All 3 attempts failed (streaming path). "
+                            f"updates_keys={list(mechanical_updates.keys())} "
+                            f"— building deterministic narrative."
+                        )
+                        story = _build_deterministic_narrative(
+                            mechanical_updates, profile, old_location, old_scene
+                        )
+                        _narrator_failed = True
+                        # WARN #2: last-resort — пушимо детерміністичний текст
+                        try:
+                            narrator_queue.put_nowait(story)
+                        except asyncio.QueueFull:
+                            pass
+
                 narrator_queue.put_nowait(None)  # сигнал завершення після retry
             else:
                 def _sync_gen_narrator_retry():
-                    return model_narrator.generate_content(narrator_prompt)
+                    _t0 = time.time()
+                    resp = model_narrator.generate_content(narrator_prompt)
+                    _elapsed = time.time() - _t0
+                    # Логування діагностики blocking retry
+                    try:
+                        fr = resp.candidates[0].finish_reason if resp and resp.candidates else None
+                    except Exception:
+                        fr = None
+                    try:
+                        safety = resp.candidates[0].safety_ratings if resp and resp.candidates else None
+                    except Exception:
+                        safety = None
+                    try:
+                        block_reason = resp.prompt_feedback.block_reason if resp and resp.prompt_feedback else None
+                    except Exception:
+                        block_reason = None
+                    _text = (resp.text or "") if resp else ""
+                    logger.info(
+                        f"[NARRATOR_FAIL] Attempt 2 (blocking) done. elapsed={_elapsed:.2f}s "
+                        f"finish_reason={fr} block_reason={block_reason} "
+                        f"safety={safety} "
+                        f"text_len={len(_text)} preview={_text[:200]!r}"
+                    )
+                    return resp
 
                 retry_resp = await asyncio.to_thread(_sync_gen_narrator_retry)
-                story = retry_resp.text.strip() if retry_resp and retry_resp.text else "..."
+                story = retry_resp.text.strip() if retry_resp and retry_resp.text else ""
+
+                if not story or len(story) < 20:
+                    logger.info(
+                        f"[NARRATOR_FAIL] Attempts 1+2 failed (blocking). "
+                        f"prompt_len={len(narrator_prompt)} story={story!r} "
+                        f"— proceeding to Attempt 3 (blocking low-temp)"
+                    )
+                    # === Шар 3: третя блокуюча спроба з нижчою температурою ===
+                    def _sync_gen_narrator_third_blocking():
+                        _t0 = time.time()
+                        try:
+                            from google.genai import types as _gtypes
+                            _cfg = _gtypes.GenerateContentConfig(temperature=0.5)
+                            resp = model_narrator.generate_content(narrator_prompt, config=_cfg)
+                        except Exception:
+                            resp = model_narrator.generate_content(narrator_prompt)
+                        _elapsed = time.time() - _t0
+                        _text = (resp.text or "") if resp else ""
+                        logger.info(
+                            f"[NARRATOR_FAIL] Attempt 3 (blocking low-temp) done. "
+                            f"elapsed={_elapsed:.2f}s text_len={len(_text)} "
+                            f"preview={_text[:200]!r}"
+                        )
+                        return resp
+
+                    third_resp = await asyncio.to_thread(_sync_gen_narrator_third_blocking)
+                    third_text = third_resp.text.strip() if third_resp and third_resp.text else ""
+                    if third_text and len(third_text) >= 50:
+                        story = third_text
+                    else:
+                        logger.warning(
+                            f"[NARRATOR_LAST_RESORT] All 3 attempts failed (blocking path). "
+                            f"updates_keys={list(mechanical_updates.keys())} "
+                            f"— building deterministic narrative."
+                        )
+                        story = _build_deterministic_narrative(
+                            mechanical_updates, profile, old_location, old_scene
+                        )
+                        _narrator_failed = True
         elif narrator_queue is not None:
             # Перший стрім вдався — надсилаємо сигнал завершення
             narrator_queue.put_nowait(None)
@@ -756,7 +1062,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                         outcome = mech_updates_arg.get("outcome", "")
                         skill = mech_updates_arg.get("skill_used", "")
                         game_minutes = safe_int(profile_arg.get("Час_хвилини", 0), 0)
-                        game_day = game_minutes // 1440
+                        game_day = game_minutes // _MINUTES_PER_DAY
                         await append_memory_anchor(
                             chat_id_arg,
                             rep_target,
@@ -818,6 +1124,9 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         debug_msg += "\n━━━━━━━━━━━━━━━━"
         debug_msg += f"\n🏁 ВСЬОГО: {total_time:.2f}s"
         user_sessions[chat_id]['last_debug_time'] = debug_msg
+
+        # _narrator_failed=True означає, що story містить детерміністичний last-resort абзац
+        # від _build_deterministic_narrative. Це художній текст — повертаємо з impact-summary як завжди.
 
         story = _sanitize_story(story)
         change_log = "\n\n📊 " + " | ".join(logs) if logs else ""

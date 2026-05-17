@@ -99,6 +99,7 @@ def test_apply_system_impacts_skills():
 
 
 def test_process_training_request_insufficient_gold():
+    import asyncio
     profile = {"Бойові навички": 50, "Особисте Золото": 10, "Енергія": 100}
     user_input = "Я хочу потренуватися битися мечем у майстра"
 
@@ -110,7 +111,7 @@ def test_process_training_request_insufficient_gold():
         mock_response.text = '{"is_training": true, "is_possible": true, "method": "mentor", "skill": "Бойові"}'
         mock_gen.return_value = mock_response
 
-        result = process_training_request(user_input, profile)
+        result = asyncio.run(process_training_request(user_input, profile))
 
         assert result is not None
         assert "error" in result
@@ -173,8 +174,9 @@ def test_resolve_action_mechanics_success(mock_randint, mock_generate):
     mock_generate.return_value = mock_response
 
     # 3. Викликаємо функцію
+    import asyncio
     user_input = "Я відбиваю удар мечем"
-    verdict_str, updates = resolve_action_mechanics(user_input, sample_profile)
+    verdict_str, updates = asyncio.run(resolve_action_mechanics(user_input, sample_profile))
 
     # 4. Перевіряємо, чи правильно сформувався текстовий вердикт
     assert "MECHANICAL VERDICT: SUCCESS!" in verdict_str
@@ -189,8 +191,9 @@ def test_resolve_action_mechanics_fallback(mock_generate, sample_profile):
     mock_generate.side_effect = Exception("Google API Error Timeout")
 
     # 2. Викликаємо функцію
+    import asyncio
     user_input = "Я намагаюся вижити при падінні сервера"
-    verdict_str, updates = resolve_action_mechanics(user_input, sample_profile)
+    verdict_str, updates = asyncio.run(resolve_action_mechanics(user_input, sample_profile))
 
     # 3. Перевіряємо спрацювання Fallback-логіки (щоб гравець не чекав вічно)
     assert "MECHANICAL VERDICT: AUTO_SUCCESS" in verdict_str

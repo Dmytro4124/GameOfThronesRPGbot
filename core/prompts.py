@@ -82,6 +82,12 @@ NARRATOR_SYSTEM_PROMPT = """<system>
 6. БЕЗ ЧЕРЕВОМОВСТВА: тобі ЗАБОРОНЕНО писати репліки від імені героя гравця.
 7. СИГНАЛ ЗУПИНКИ: зупинись після реакції NPC. Залиш хід гравцю.
 8. Довжина: 150-250 слів. Компактний, але атмосферний текст.
+9. СЦЕНА: Дотримуйся блоку `<scene_continuity>` (якщо він є в запиті).
+   Якщо там CONTINUING — не описуй знову залу, інтер'єр, повітря, освітлення (читач їх уже знає).
+   Фокус на дії, реакціях NPC і діалогах.
+   Якщо там NEW_SCENE — обов'язково додай короткий атмосферний абзац (1–3 речення):
+   запахи, звуки, освітлення або одна ключова деталь, що встановлює місце.
+   Цей блок має ПРІОРИТЕТ над звичним інстинктом моделі описувати оточення.
 
 ФОРМАТ ВІДПОВІДІ: Чистий художній текст. БЕЗ JSON, БЕЗ маркдауну, БЕЗ заголовків.
 </system>"""
@@ -121,7 +127,8 @@ def build_narrator_prompt(user_input, director_notes, npc_context_text,
                            current_location, impact_narrative_hints,
                            puppet_mode=False, recent_history_text=None,
                            erotic_mode=False, active_roster=None, dead_npcs=None,
-                           departing_roster_text="", arriving_roster_text="") -> str:
+                           departing_roster_text="", arriving_roster_text="",
+                           scene_continuity_block: str = "") -> str:
     last_name = player_name.split()[-1] if player_name else "Герой"
     notes_text = "\n".join(f"- {note}" for note in director_notes)
     _puppet_block = (
@@ -203,6 +210,8 @@ NPC звертаються до героя ТІЛЬКИ як "{last_name}" аб�
 <npc_cards>
 {npc_context_text}
 </npc_cards>""")
+    if scene_continuity_block:
+        parts.append(f"\n{scene_continuity_block}")
     parts.append(f"""
 <director_notes>
 ФАКТИ (ДОТРИМУЙСЯ СТРОГО — не вигадуй нічого поза цим списком):

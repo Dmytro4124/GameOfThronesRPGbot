@@ -21,7 +21,7 @@ def get_dynamic_menu(actions: list = None) -> ReplyKeyboardMarkup:
                 actions_count += 1
 
     builder.button(text="📜 Профіль")
-    builder.button(text="🎒 Інвентар")
+    builder.button(text="🗺 Карта")
     builder.button(text="📖 Інструкція")
     builder.button(text="🔄 Рестарт")
 
