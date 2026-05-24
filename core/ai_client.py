@@ -77,7 +77,7 @@ class AIWrapper:
             config_args["system_instruction"] = self.system_instruction
         return types.GenerateContentConfig(**config_args)
 
-    def generate_content(self, prompt, max_retries=DEFAULT_MAX_RETRIES):
+    def generate_content(self, prompt, max_retries=DEFAULT_MAX_RETRIES, config=None):
         # ── 1. Circuit breaker check ──────────────────────────────────────────
         cb = _CIRCUIT_STATE.setdefault(
             self.model_name,
@@ -89,7 +89,9 @@ class AIWrapper:
             print(f"[CIRCUIT BREAKER] {self.model_name} in cooldown for {wait:.1f}s more — fast fail")
             raise RuntimeError(f"AIWrapper circuit breaker open for {self.model_name}")
 
-        config = self._build_config()
+        # Override config from caller wins (e.g. for low-temp fallback narrator).
+        # Otherwise build default config from self.
+        effective_config = config if config is not None else self._build_config()
         last_error = None
 
         for attempt in range(1, max_retries + 1):
@@ -97,7 +99,7 @@ class AIWrapper:
                 raw = client.models.generate_content(
                     model=self.model_name,
                     contents=prompt,
-                    config=config
+                    config=effective_config
                 )
                 # SUCCESS — reset circuit breaker
                 cb["consecutive_failures"] = 0

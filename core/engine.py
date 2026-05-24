@@ -856,6 +856,10 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                             fr = chunk.candidates[0].finish_reason if chunk.candidates else None
                             if fr and str(fr) not in ("FinishReason.STOP", "STOP", "1", "None"):
                                 print(f"🔵 [STREAM] finish_reason={fr}")
+                                # Fail fast: MALFORMED_RESPONSE/SAFETY/OTHER → no point waiting for more chunks
+                                if "MALFORMED" in str(fr) or "SAFETY" in str(fr) or "OTHER" in str(fr):
+                                    print(f"🔴 [STREAM] aborted early: finish_reason={fr}, chunks={len(chunks)}")
+                                    break
                         except Exception:
                             pass
                 except Exception as e:
@@ -933,11 +937,15 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                                 if text:
                                     chunks.append(text)
                                     _loop.call_soon_threadsafe(narrator_queue.put_nowait, text)
-                            # finish_reason при retry
+                            # finish_reason при retry — abort early on MALFORMED_RESPONSE
                             try:
                                 fr = chunk.candidates[0].finish_reason if chunk.candidates else None
                                 if fr and str(fr) not in ("FinishReason.STOP", "STOP", "1", "None"):
                                     logger.info(f"[NARRATOR_FAIL] Retry finish_reason={fr}")
+                                    # Fail fast: MALFORMED_RESPONSE/SAFETY/OTHER → no point waiting for more chunks
+                                    if "MALFORMED" in str(fr) or "SAFETY" in str(fr) or "OTHER" in str(fr):
+                                        logger.info(f"[NARRATOR_FAIL] Retry aborted early: finish_reason={fr}, chunks={len(chunks)}")
+                                        break
                             except Exception:
                                 pass
                     except Exception as e:
@@ -964,13 +972,14 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                     # === Шар 2→3: third attempt blocking з нижчою температурою ===
                     def _sync_gen_narrator_third():
                         _t0 = time.time()
+                        # Fail fast in degraded path: max_retries=2 instead of default 6
+                        # (avoid 140s+ user-wait when whole pipeline is degraded).
                         try:
                             from google.genai import types as _gtypes
                             _cfg = _gtypes.GenerateContentConfig(temperature=0.5)
-                            resp = model_narrator.generate_content(narrator_prompt, config=_cfg)
+                            resp = model_narrator.generate_content(narrator_prompt, max_retries=2, config=_cfg)
                         except Exception:
-                            # Якщо google.genai.types недоступний — без config
-                            resp = model_narrator.generate_content(narrator_prompt)
+                            resp = model_narrator.generate_content(narrator_prompt, max_retries=2)
                         _elapsed = time.time() - _t0
                         _text = (resp.text or "") if resp else ""
                         logger.info(
@@ -980,7 +989,18 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                         )
                         return resp
 
-                    third_resp = await asyncio.to_thread(_sync_gen_narrator_third)
+                    # Hard timeout 90s — якщо blocking fallback не встиг → deterministic fallback
+                    try:
+                        third_resp = await asyncio.wait_for(
+                            asyncio.to_thread(_sync_gen_narrator_third),
+                            timeout=90.0,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning("[NARRATOR_FAIL] Attempt 3 timed out after 90s — falling through to deterministic fallback")
+                        third_resp = None
+                    except Exception as _e3:
+                        logger.warning(f"[NARRATOR_FAIL] Attempt 3 exception: {_e3} — falling through to deterministic fallback")
+                        third_resp = None
                     third_text = third_resp.text.strip() if third_resp and third_resp.text else ""
                     if third_text and len(third_text) >= 50:
                         story = third_text
