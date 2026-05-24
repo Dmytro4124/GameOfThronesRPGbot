@@ -617,3 +617,88 @@ def test_e2e_player_wins_against_two_goblins_100_xp():
     result = cleanup_combat(state)
     assert result["player_xp_gained"] == 100
     assert result["combat_summary"] is not None
+
+
+# ---------------------------------------------------------------------------
+# 11. Issue 2 regression: player attack must damage NPC, never player themselves
+# ---------------------------------------------------------------------------
+
+def test_player_attack_damages_npc_not_self():
+    """When player attacks an NPC by name, NPC hp_current drops and player
+    hp_current stays unchanged.  This is the core combat target-routing invariant.
+
+    Arrangement:
+    - Player: Arya, HP=20, AC=18, STR=16 (mod+3), L1 (prof+2), weapon 1d8+3
+    - NPC: Тіріон, HP=20, AC=10
+    - Mock d20=15 (attack roll), d8=5 (damage die)
+    - Expected hit: 15+3+2=20 >= AC 10 → HIT, damage=5+3=8
+    - Тіріон hp drops from 20 to 12; Arya hp stays at 20.
+    """
+    player = _player(name="Arya", str_score=16, level=1, hp=20, ac=18)
+    npc = {
+        "Name": "Тіріон",
+        "hp_current": 20,
+        "hp_max": 20,
+        "ac": 10,
+        "Status": "Active",
+        "cr": "1",
+        "conditions": [],
+        "ability_scores": {"STR": 8, "DEX": 10, "CON": 10, "INT": 14, "WIS": 10, "CHA": 14},
+        "attacks": [{"name": "Dagger", "to_hit": 2, "dmg": "1d4 piercing", "range": 5}],
+        "features": [],
+        "heritage": "",
+    }
+    state = _make_combat_state(player, [npc])
+    player_initial_hp = state.player_snapshot["hp_current"]
+
+    with patch("random.randint", side_effect=[15, 5]):
+        result = player_attack(state, "Тіріон", "Longsword")
+
+    assert result.hit is True, "Attack should have hit (15+3+2=20 >= AC 10)"
+    assert result.damage_total == 8, f"Damage must be 5+3=8, got {result.damage_total}"
+
+    # NPC took damage
+    assert state.npcs["Тіріон"]["hp_current"] == 12, (
+        f"Тіріон must have 20-8=12 HP, got {state.npcs['Тіріон']['hp_current']}"
+    )
+
+    # Player HP unchanged — the critical invariant for Issue 2
+    assert state.player_snapshot["hp_current"] == player_initial_hp, (
+        f"Player HP must be unchanged ({player_initial_hp}), "
+        f"got {state.player_snapshot['hp_current']}. "
+        f"REGRESSION: player_attack routed damage to player instead of NPC!"
+    )
+
+
+def test_player_attack_self_targeting_blocked():
+    """player_attack must return a blocked miss (not deal damage) when target_name
+    resolves to the player's own name — the self-targeting safety guard (Issue 2 fix)."""
+    player = _player(name="Arya", hp=20)
+    npc = _goblin()
+    state = _make_combat_state(player, [npc])
+    player_initial_hp = state.player_snapshot["hp_current"]
+
+    # Attempt to attack the player themselves by name
+    result = player_attack(state, "Arya", "Longsword")
+
+    assert result.hit is False, "Self-targeting must result in a miss (blocked)"
+    assert result.damage_total == 0, "Self-targeting must deal 0 damage"
+    assert state.player_snapshot["hp_current"] == player_initial_hp, (
+        "Player HP must be unchanged after blocked self-target"
+    )
+    assert "ЗАБЛОКОВАНО" in result.log_line or "BLOCKED" in result.log_line, (
+        f"log_line must mention the block. Got: {result.log_line!r}"
+    )
+
+
+def test_player_attack_string_player_target_blocked():
+    """Literal string 'player' as target_name must also be blocked."""
+    player = _player(name="Jon Snow", hp=15)
+    npc = _goblin()
+    state = _make_combat_state(player, [npc])
+
+    result = player_attack(state, "player", "Longsword")
+
+    assert result.hit is False
+    assert result.damage_total == 0
+    assert state.player_snapshot["hp_current"] == 15

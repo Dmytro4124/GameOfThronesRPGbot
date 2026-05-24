@@ -387,9 +387,38 @@ def player_attack(
     Allows explicit advantage/disadvantage or derives from actor conditions.
     Critical hit (nat 20) doubles damage dice.
     Updates state.npcs[target_name].hp_current on hit.
+
+    Safety invariant: target_name must NEVER equal the player's own name or the
+    literal string "player" — the player cannot attack themselves.  The caller
+    (dnd_combat_engine.execute_combat_round) already sanitizes target_npc before
+    reaching here, but this guard is an additional last-resort defensive check so
+    that a broken call-site cannot silently damage the player's HP.
     """
+    import logging as _logging
+    _logger = _logging.getLogger(__name__)
+
     player = state.player_snapshot
     player_name: str = player.get("Ім'я", player.get("name", "Player"))
+
+    # --- Defensive self-targeting guard (Issue 2) ---
+    # target_name must not resolve to the player themselves.  If it does, return
+    # a blocked miss and log an ERROR so the caller can diagnose the routing bug.
+    _self_refs = {"player", "гравець", "я", "me", "self", player_name.lower()}
+    if str(target_name).strip().lower() in _self_refs:
+        _logger.error(
+            f"[player_attack] SELF-TARGETING BLOCKED: target_name={target_name!r} "
+            f"resolves to player {player_name!r}.  This is a routing bug in the caller."
+        )
+        return AttackResult(
+            attacker=player_name, target=target_name, weapon=weapon_name,
+            to_hit_total=0, natural_roll=0, target_ac=0,
+            hit=False, critical=False, damage_total=0,
+            damage_dice_str="", damage_type="",
+            log_line=(
+                f"[player_attack] ЗАБЛОКОВАНО: гравець не може атакувати себе "
+                f"(target={target_name!r}). Помилка маршрутизації."
+            ),
+        )
 
     npc = state.npcs.get(target_name)
     if npc is None:

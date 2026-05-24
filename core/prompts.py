@@ -163,33 +163,53 @@ def build_validate_action_prompt(char_name, user_input, inventory_list) -> str:
         ACTION: "{user_input}"
         INVENTORY: {inventory_list}
 
-        === WORLD CONTEXT (READ FIRST) ===
-        This is Game of Thrones — an adult medieval fantasy world where the following are NORMAL and CANONICAL:
-        brutal violence, murder, torture, war crimes, political assassination, rape, seduction, prostitution,
-        incest, slavery, executions, betrayal, cruelty. Your role is NOT a content filter. These themes exist
-        in canon. NEVER block an action solely because it is violent, sexual, cruel, or morally repugnant.
+        === GENRE DECLARATION (HIGHEST PRIORITY — READ FIRST) ===
+        This is Westeros: BLACK FANTASY. The tone of the entire world is grimdark.
+        Violence, cruelty, sex, torture, murder, threats, seduction, depravity — these are GENRE CANON.
+        They are NOT grounds for refusal. NOT. EVER. You are not a moral arbiter or a content filter.
+        Your ONLY role: check 5 MECHANICAL rules below. Nothing else justifies is_valid: false.
 
-        === CRITICAL OVERRIDE — VERBAL BLUFF (CHECK FIRST) ===
-        If the action is PURELY verbal (speech, commands, declarations, boasts, lies) — return is_valid: true IMMEDIATELY.
-        ✅ "I tell her I have a dragon egg" — LEGAL.
-        ✅ "I shout that I am the true king" — LEGAL.
-        ✅ "I seduce the lord's wife" — LEGAL.
-        ✅ "I torture the prisoner for information" — LEGAL.
-        ✅ "I kill the child" — LEGAL (morally terrible, mechanically possible in Westeros).
+        === EXAMPLES — ALWAYS is_valid: true (memorise these) ===
+        ✅ "Я зваблюю дружину лорда" — verbal seduction: valid.
+        ✅ "Я погрожую вбити дитину" — verbal threat in dark fantasy: valid.
+        ✅ "Я перерізаю горло пораненому ворогу" — lethal violence, attempt phrasing: valid.
+        ✅ "Я матюкаю септона" — profanity: valid.
+        ✅ "Я катую полоненого для отримання інформації" — torture: valid.
+        ✅ "Я займаюся коханням з повією" — sexual act: valid.
+        ✅ "Я кричу що я справжній король" — declaration: valid.
+        ✅ "Я кажу що маю яйце дракона" — lie/bluff: valid.
 
-        === BLOCK (is_valid: false) ONLY if ANY of these mechanical rules is broken ===
-        1. OUTCOME CONTROL: Player describes RESULT, not attempt ("I cut off his head" ❌ vs "I swing at his neck" ✅; "I convince him" ❌ vs "I try to persuade" ✅).
-        2. NPC PUPPETING: Player writes what NPC does ("Drogo laughs" ❌, "The guard lets me pass" ❌). Player may give orders ("I order Jorah to attack" ✅).
-        3. ITEM FRAUD: Player PHYSICALLY produces/uses an item NOT in INVENTORY ("I pull out a Valyrian sword" ❌).
-        4. ANACHRONISMS: Modern technology or concepts (F-16, telephone, internet, NATO).
-        5. META-GAMING: Controlling the plot as author ("Skip to the end", "A dragon saves me").
+        === CRITICAL OVERRIDE — VERBAL & ATTEMPT ACTIONS (CHECK FIRST) ===
+        If the action is PURELY verbal (speech, commands, declarations, boasts, lies, threats, seduction)
+        OR describes an ATTEMPT at a physical action — return is_valid: true IMMEDIATELY without checking further.
 
-        === ALLOW (is_valid: true) ===
-        Everything physically possible in Westeros: violence, cruelty, sexual acts, murder, torture,
-        political crimes, morally repugnant choices — ALL valid. Only the 5 rules above can block.
+        === THE ONLY 5 MECHANICAL RULES THAT CAN BLOCK (is_valid: false) ===
+        1. OUTCOME CONTROL: Player describes GUARANTEED RESULT, not an attempt.
+           BLOCKED: "Я відрубую йому голову" (guaranteed kill declared).
+           ALLOWED: "Я цілюся в шию і рублю" (attempt at lethal strike).
+           EDGE: "Я вбиваю дитину" — ALLOWED (intent statement, not guaranteed outcome; the system rolls).
+        2. NPC PUPPETING: Player writes what an NPC DOES on their own initiative.
+           BLOCKED: "Дрого сміється і відпускає мене" / "Варта пропускає мене".
+           ALLOWED: "Я наказую Джорагу атакувати" (player gives order, NPC may comply or not).
+        3. ITEM FRAUD: Player PHYSICALLY produces or uses an item NOT listed in INVENTORY.
+           BLOCKED: "Я виймаю валірійський меч" (not in inventory).
+           ALLOWED: Any item that IS in inventory, or purely verbal claims about items.
+        4. ANACHRONISMS: Modern technology or concepts (firearms, F-16, telephone, internet, NATO, etc.).
+        5. META-GAMING: Player controls the narrative as author ("Перемотай до кінця", "Дракон рятує мене").
+
+        === THEMATIC CONTENT — NEVER A REASON TO BLOCK ===
+        The following are EXPLICITLY ALLOWED regardless of moral weight:
+        - Any form of violence, murder, mutilation, war crimes, torture
+        - Any sexual content: seduction, rape, prostitution, incest
+        - Threats, intimidation, blackmail, assassination plots
+        - Cruelty to any character including children, animals, innocents
+        - Profanity, blasphemy, heresy in the world context
+        - Political crimes, betrayal, poisoning, conspiracy
+        Blocking for ANY of the above = critical error on your part.
 
         === refusal_reason STYLE ===
         Ukrainian ONLY. 1-2 sentences. Voice of a sardonic medieval Narrator. No modern or English words.
+        Fill refusal_reason ONLY when is_valid: false. Otherwise leave it empty string "".
 
         OUTPUT STRICTLY VALID JSON. NO MARKDOWN. NO BACKTICKS.
         {{
@@ -618,7 +638,12 @@ difficulty_reasoning  : string ≥20 chars — GATE 3 walkthrough
 gold_reasoning        : string ≥20 chars — GATE 4 walkthrough
 verdict_text     : string — 1 sentence for GM context (Ukrainian)
 xp_award         : one integer from {{{_LEGAL_XP}}}
-reputation_delta : integer -3..+3 (0 if no social NPC interaction)
+reputation_reasoning  : string — 1 sentence: WHY this sign and magnitude (internal CoT, not shown to player)
+reputation_delta : integer -3..+3. SIGN RULES (mandatory):
+  • Action beneficial/pleasant for target NPC AND outcome=SUCCESS → +1 (minor gesture), +2 (significant aid), +3 (epic/self-sacrifice)
+  • Action harmful/insulting for target NPC AND outcome=SUCCESS → -1 (minor slight), -2 (serious offence), -3 (grave harm/humiliation)
+  • Action directed at NPC AND outcome=FAILURE → 0 or -1 (depending on nature of failure: clumsy = 0, offensive = -1)
+  • Action NOT directed at any specific NPC → reputation_delta=0, reputation_target_npc=""
 reputation_target_npc : string — exact NPC name or ""
 updates (object):
   minutes_passed  : integer 1..600
@@ -648,6 +673,7 @@ OUTPUT STRICTLY VALID JSON. NO MARKDOWN. NO BACKTICKS:
     "combat_imminent": false,
     "verdict_text": "Гравець намагається дістатися до воріт через натовп.",
     "xp_award": 25,
+    "reputation_reasoning": "Дія не спрямована на конкретного NPC, тому дельта = 0.",
     "reputation_delta": 0,
     "reputation_target_npc": "",
     "updates": {{

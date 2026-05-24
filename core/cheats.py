@@ -104,43 +104,87 @@ def _find_valid_location_split(args):
 # ─────────────────────────── Команди ────────────────────────────
 
 async def cmd_heal(message, bot, chat_id, args):
+    """Full heal: D&D hp_current = hp_max.  Legacy 'Здоров'я' synced to 100."""
     profile, _ = await _get_profile(chat_id)
     if not profile:
         await message.answer("❌ Профіль не знайдено"); return
-    profile["Здоров'я"] = 100
-    profile["Енергія"] = 100
-    await _save_profile(chat_id, profile)
-    await message.answer("✅ HP та Енергія відновлені до 100")
+
+    if "hp_current" in profile:
+        # D&D profile: restore to hp_max
+        hp_max = safe_int(profile.get("hp_max", 0), 0)
+        if hp_max <= 0:
+            # hp_max missing or zero — use fallback and warn
+            hp_max = 10
+            profile["hp_max"] = hp_max
+            await message.answer(
+                "⚠️ hp_max відсутній або дорівнює 0 — встановлено fallback hp_max=10. "
+                "Виконай /start або /debug щоб перевірити профіль."
+            )
+        profile["hp_current"] = hp_max
+        # Sync legacy UI field (CLAUDE.md §5.2)
+        profile["Здоров'я"] = 100
+        await _save_profile(chat_id, profile)
+        await message.answer(f"✅ HP відновлено до {hp_max}/{hp_max} (повне зцілення)")
+    else:
+        # Legacy profile: restore to 100
+        profile["Здоров'я"] = 100
+        await _save_profile(chat_id, profile)
+        await message.answer("✅ HP відновлено до 100")
 
 
 async def cmd_sethp(message, bot, chat_id, args):
+    """Set HP.  For D&D profiles: writes hp_current clamped to [0, hp_max] and
+    syncs the legacy 'Здоров'я' UI field.  Does NOT write to 'Здоров'я' directly.
+    For legacy profiles (no hp_current): writes 'Здоров'я' clamped to [0, 100]."""
     if not args:
-        await message.answer("Використання: /sethp <1-100>"); return
+        await message.answer("Використання: /sethp <число>"); return
     profile, _ = await _get_profile(chat_id)
     if not profile:
         await message.answer("❌ Профіль не знайдено"); return
     try:
-        val = _clamp(int(args[0]), 1, 100)
+        raw_val = int(args[0])
     except ValueError:
-        await message.answer("❌ Значення повинно бути числом"); return
-    profile["Здоров'я"] = val
-    await _save_profile(chat_id, profile)
-    await message.answer(f"✅ HP → {val}")
+        await message.answer("❌ Значення повинно бути цілим числом"); return
+
+    if "hp_current" in profile:
+        # D&D profile: clamp to [0, hp_max] (CLAUDE.md §5.2 — HP variable)
+        hp_max = safe_int(profile.get("hp_max", 0), 0)
+        if hp_max <= 0:
+            hp_max = 10
+            profile["hp_max"] = hp_max
+            await message.answer(
+                "⚠️ hp_max відсутній або дорівнює 0 — встановлено fallback hp_max=10."
+            )
+        val = _clamp(raw_val, 0, hp_max)
+        profile["hp_current"] = val
+        # Sync legacy UI field (CLAUDE.md §5.2: handlers.py reads "Здоров'я")
+        _hp_key = "Здоров'я"
+        ui_pct = round(100 * val / hp_max) if hp_max > 0 else 0
+        profile[_hp_key] = ui_pct
+        await _save_profile(chat_id, profile)
+        await message.answer(f"✅ hp_current → {val}/{hp_max} (UI Здоровя → {ui_pct}%)")
+    else:
+        # Legacy profile: write to 'Здоров'я' (0-100 scale)
+        val = _clamp(raw_val, 0, 100)
+        profile["Здоров'я"] = val
+        await _save_profile(chat_id, profile)
+        await message.answer(f"✅ Здоров'я → {val}")
 
 
 async def cmd_setenergy(message, bot, chat_id, args):
+    """Set energy.  Energy scale is 0–1000 (CLAUDE.md §5.2 legacy scale)."""
     if not args:
-        await message.answer("Використання: /setenergy <1-100>"); return
+        await message.answer("Використання: /setenergy <0-1000>"); return
     profile, _ = await _get_profile(chat_id)
     if not profile:
         await message.answer("❌ Профіль не знайдено"); return
     try:
-        val = _clamp(int(args[0]), 1, 100)
+        val = _clamp(int(args[0]), 0, 1000)
     except ValueError:
         await message.answer("❌ Значення повинно бути числом"); return
     profile["Енергія"] = val
     await _save_profile(chat_id, profile)
-    await message.answer(f"✅ Енергія → {val}")
+    await message.answer(f"✅ Енергія → {val}/1000")
 
 
 async def cmd_setgold(message, bot, chat_id, args):
@@ -220,9 +264,39 @@ async def cmd_clearinv(message, bot, chat_id, args):
     await message.answer("✅ Інвентар очищено")
 
 
+def _resolve_dnd_skill(raw_name: str) -> tuple[str | None, list[str]]:
+    """Case-insensitive lookup of a D&D 5e skill name.
+
+    Returns (canonical_name, top5_suggestions).
+    canonical_name is None if no exact match found.
+    top5_suggestions is a list of up to 5 closest skill names for error messages.
+    """
+    from core.dnd_skills import SKILLS
+    # Exact case-insensitive match
+    raw_lower = raw_name.strip().lower()
+    for skill in SKILLS:
+        if skill.lower() == raw_lower:
+            return skill, []
+    # Prefix match
+    prefix_matches = [s for s in SKILLS if s.lower().startswith(raw_lower)]
+    if len(prefix_matches) == 1:
+        return prefix_matches[0], []
+    # Fallback: top-5 by difflib similarity
+    import difflib
+    suggestions = difflib.get_close_matches(raw_name, SKILLS.keys(), n=5, cutoff=0.3)
+    if not suggestions:
+        suggestions = list(SKILLS.keys())[:5]
+    return None, suggestions
+
+
 async def cmd_addskill(message, bot, chat_id, args):
+    """Add delta to a D&D 5e skill proficiency in profile['skill_profs'] context.
+
+    Validates skill name against core.dnd_skills.SKILLS (18 D&D 5e skills).
+    Stores result in profile['skills'][<SkillName>] clamped to [0, 100].
+    """
     if len(args) < 2:
-        await message.answer("Використання: /addskill <Назва навички> <Очки>"); return
+        await message.answer("Використання: /addskill <D&D Skill Name> <Очки>"); return
     profile, _ = await _get_profile(chat_id)
     if not profile:
         await message.answer("❌ Профіль не знайдено"); return
@@ -230,27 +304,105 @@ async def cmd_addskill(message, bot, chat_id, args):
         delta = int(args[-1])
     except ValueError:
         await message.answer("❌ Очки повинні бути числом"); return
-    skill_key = " ".join(args[:-1])
-    current = safe_int(profile.get(skill_key, 0), 0)
-    profile[skill_key] = _clamp(current + delta, 0, 100)
+    raw_skill = " ".join(args[:-1])
+    canonical, suggestions = _resolve_dnd_skill(raw_skill)
+    if canonical is None:
+        suggestion_str = ", ".join(suggestions) if suggestions else "(немає близьких)"
+        await message.answer(
+            f"❌ Невідома D&D навичка: '{raw_skill}'\n"
+            f"Схожі: {suggestion_str}\n"
+            f"Повний список: Athletics, Acrobatics, Sleight of Hand, Stealth, "
+            f"Arcana, History, Investigation, Nature, Religion, "
+            f"Animal Handling, Insight, Medicine, Perception, Survival, "
+            f"Deception, Intimidation, Performance, Persuasion"
+        )
+        return
+    skills_dict = profile.setdefault("skills", {})
+    current = safe_int(skills_dict.get(canonical, 0), 0)
+    new_val = _clamp(current + delta, 0, 100)
+    skills_dict[canonical] = new_val
+    profile["skills"] = skills_dict
     await _save_profile(chat_id, profile)
-    await message.answer(f"✅ {skill_key}: {current} → {profile[skill_key]}")
+    await message.answer(f"✅ {canonical}: {current} → {new_val}")
 
 
 async def cmd_setskill(message, bot, chat_id, args):
+    """Set a D&D 5e skill to an absolute value in profile['skills'][<SkillName>].
+
+    Validates skill name against core.dnd_skills.SKILLS (18 D&D 5e skills).
+    Value clamped to [0, 100].
+    """
     if len(args) < 2:
-        await message.answer("Використання: /setskill <Назва навички> <Очки>"); return
+        await message.answer("Використання: /setskill <D&D Skill Name> <0-100>"); return
     profile, _ = await _get_profile(chat_id)
     if not profile:
         await message.answer("❌ Профіль не знайдено"); return
     try:
         val = _clamp(int(args[-1]), 0, 100)
     except ValueError:
-        await message.answer("❌ Очки повинні бути числом"); return
-    skill_key = " ".join(args[:-1])
-    profile[skill_key] = val
+        await message.answer("❌ Очки повинні бути числом від 0 до 100"); return
+    raw_skill = " ".join(args[:-1])
+    canonical, suggestions = _resolve_dnd_skill(raw_skill)
+    if canonical is None:
+        suggestion_str = ", ".join(suggestions) if suggestions else "(немає близьких)"
+        await message.answer(
+            f"❌ Невідома D&D навичка: '{raw_skill}'\n"
+            f"Схожі: {suggestion_str}\n"
+            f"Повний список: Athletics, Acrobatics, Sleight of Hand, Stealth, "
+            f"Arcana, History, Investigation, Nature, Religion, "
+            f"Animal Handling, Insight, Medicine, Perception, Survival, "
+            f"Deception, Intimidation, Performance, Persuasion"
+        )
+        return
+    skills_dict = profile.setdefault("skills", {})
+    skills_dict[canonical] = val
+    profile["skills"] = skills_dict
     await _save_profile(chat_id, profile)
-    await message.answer(f"✅ {skill_key} → {val}")
+    await message.answer(f"✅ {canonical} → {val}")
+
+
+_VALID_ABILITIES = frozenset({"STR", "DEX", "CON", "INT", "WIS", "CHA"})
+
+
+async def cmd_setability(message, bot, chat_id, args):
+    """Set a D&D ability score.  Usage: /setability <STR|DEX|CON|INT|WIS|CHA> <1-20>
+
+    Validates:
+    - ability ∈ {STR, DEX, CON, INT, WIS, CHA} (case-insensitive)
+    - value ∈ [1, 20] (CLAUDE.md §5.2 ability score range)
+    Writes to profile['ability_scores'][<ABILITY>].
+    """
+    if len(args) < 2:
+        await message.answer(
+            "Використання: /setability <STR|DEX|CON|INT|WIS|CHA> <1-20>"
+        ); return
+    profile, _ = await _get_profile(chat_id)
+    if not profile:
+        await message.answer("❌ Профіль не знайдено"); return
+
+    ability = args[0].upper().strip()
+    if ability not in _VALID_ABILITIES:
+        await message.answer(
+            f"❌ Невідома характеристика: '{args[0]}'\n"
+            f"Допустимі: STR, DEX, CON, INT, WIS, CHA"
+        ); return
+
+    try:
+        raw_val = int(args[1])
+    except ValueError:
+        await message.answer("❌ Значення повинно бути числом від 1 до 20"); return
+
+    if raw_val < 1 or raw_val > 20:
+        await message.answer(
+            f"❌ Значення {raw_val} поза межами [1, 20] (CLAUDE.md §5.2)"
+        ); return
+
+    ability_scores = profile.setdefault("ability_scores", {})
+    old_val = ability_scores.get(ability, "?")
+    ability_scores[ability] = raw_val
+    profile["ability_scores"] = ability_scores
+    await _save_profile(chat_id, profile)
+    await message.answer(f"✅ {ability}: {old_val} → {raw_val}")
 
 
 async def cmd_tp(message, bot, chat_id, args):
@@ -565,6 +717,7 @@ async def handle_cheat_command(message, bot):
         "/clearinv": cmd_clearinv,
         "/addskill": cmd_addskill,
         "/setskill": cmd_setskill,
+        "/setability": cmd_setability,
         "/tp": cmd_tp,
         "/addtime": cmd_addtime,
         "/tpnpc": cmd_tpnpc,

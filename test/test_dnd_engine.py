@@ -1262,3 +1262,135 @@ class TestValidateActionPassesSchema:
         assert len(call_count) == 2, (
             f"Must call twice (schema attempt + fallback). Got {len(call_count)}"
         )
+
+
+# ===========================================================================
+# Tests: Issue 3 — CRITICAL SUCCESS must apply gold and XP in NORMAL mode
+# ===========================================================================
+
+class TestCriticalSuccessAppliesUpdates:
+    """Verify that CRITICAL SUCCESS in NORMAL mode applies gold_impact, xp_award,
+    inventory, and HP impacts.  Regression suite for Issue 3.
+
+    Strategy: call apply_dnd_impacts directly with pre-built updates dicts that
+    have outcome='CRITICAL SUCCESS', then assert mechanical changes on the profile.
+    """
+
+    def _make_crit_updates(self, **overrides) -> dict:
+        """Return a CRITICAL SUCCESS updates dict (as produced by _build_updates)."""
+        base = {
+            "action_type": "standard",
+            "outcome": "CRITICAL SUCCESS",
+            "skill_used": "Intimidation",
+            "ability_used": "CHA",
+            "natural_roll": 20,
+            "total_score": 22,
+            "difficulty": 15,
+            "advantage_reason": "",
+            "disadvantage_reason": "",
+            "combat_imminent": False,
+            "xp_award": 200,
+            "reputation_delta": 2,
+            "reputation_target_npc": "Cersei",
+            # Updates sub-dict fields (already merged by _build_updates)
+            "hp_damage_dice": "none",
+            "hp_heal_dice": "none",
+            "gold_impact": "earn_small",   # should add gold
+            "inventory_new": ["Dragon Egg"],
+            "inventory_lost": [],
+            "minutes_passed": 10,
+            "location_impact": "none",
+            "scene_impact": "none",
+            "health_impact": "none",
+            "energy_impact": "none",
+            "clocks_impact": {},
+            "condition_apply": [],
+            "condition_remove": [],
+        }
+        base.update(overrides)
+        return base
+
+    def test_critical_success_applies_xp_in_normal(self):
+        """CRITICAL SUCCESS with xp_award=200 → profile['xp'] increases by 200."""
+        profile = _dnd_profile(xp=0, level=1)
+        updates = self._make_crit_updates(xp_award=200)
+
+        from core.dnd_engine import apply_dnd_impacts
+        result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        assert result_profile["xp"] == 200, (
+            f"CRITICAL SUCCESS must apply xp_award=200. Got xp={result_profile['xp']}"
+        )
+        assert any("XP" in log and "200" in log for log in logs), (
+            f"Logs must mention XP=200. Got: {logs}"
+        )
+
+    def test_critical_success_applies_gold_in_normal(self):
+        """CRITICAL SUCCESS with gold_impact='earn_small' → profile gold increases."""
+        profile = _dnd_profile()
+        initial_gold = profile.get("Особисте Золото", 200)
+        updates = self._make_crit_updates(gold_impact="earn_small")
+
+        from core.dnd_engine import apply_dnd_impacts
+        # Mock random for deterministic gold: earn_small = randint(10, 30)
+        with patch("core.mechanics.random.randint", return_value=20):
+            result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        assert result_profile["Особисте Золото"] > initial_gold, (
+            f"Gold must increase after earn_small on CRITICAL SUCCESS. "
+            f"Before={initial_gold}, After={result_profile['Особисте Золото']}"
+        )
+
+    def test_critical_success_applies_hp_damage_in_normal(self):
+        """CRITICAL SUCCESS with hp_damage_dice='1d6' → hp_current decreases.
+        HP impact in NORMAL mode is NOT blocked (only blocked in COMBAT mode).
+        """
+        profile = _dnd_profile_with_hp(hp_current=50, hp_max=50)
+        updates = self._make_crit_updates(hp_damage_dice="1d6", gold_impact="none")
+
+        from core.dnd_engine import apply_dnd_impacts
+        with patch("core.dnd_engine.random.randint", return_value=4):
+            result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        assert result_profile["hp_current"] == 46, (
+            f"hp_current must drop by 4 (1d6 roll=4). Got {result_profile['hp_current']}"
+        )
+
+    def test_combat_mode_hp_impact_blocked_normal_hp_not_applied(self):
+        """COMBAT mode updates (action_type='combat') must NOT apply hp_damage_dice.
+        This guards FSM isolation: combat HP is managed exclusively by the combat FSM.
+        """
+        profile = _dnd_profile_with_hp(hp_current=50, hp_max=50)
+        updates = self._make_crit_updates(
+            action_type="combat",      # simulate a combat-mode update
+            hp_damage_dice="1d6",
+            gold_impact="none",
+        )
+
+        from core.dnd_engine import apply_dnd_impacts
+        with patch("core.dnd_engine.random.randint", return_value=4):
+            result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        # HP must NOT change — combat guard blocks hp_damage_dice in COMBAT mode
+        assert result_profile["hp_current"] == 50, (
+            f"hp_current must be unchanged in COMBAT mode update (guard active). "
+            f"Got {result_profile['hp_current']}"
+        )
+
+    def test_critical_success_gold_and_xp_both_applied_together(self):
+        """Both gold and XP must be applied on a single CRITICAL SUCCESS — they
+        are independent and neither blocks the other."""
+        profile = _dnd_profile(xp=0, level=1)
+        initial_gold = profile.get("Особисте Золото", 200)
+        updates = self._make_crit_updates(xp_award=200, gold_impact="earn_small")
+
+        from core.dnd_engine import apply_dnd_impacts
+        with patch("core.mechanics.random.randint", return_value=15):
+            result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        assert result_profile["xp"] == 200, (
+            f"XP must be 200. Got {result_profile['xp']}"
+        )
+        assert result_profile["Особисте Золото"] > initial_gold, (
+            f"Gold must increase. Before={initial_gold}, After={result_profile['Особисте Золото']}"
+        )

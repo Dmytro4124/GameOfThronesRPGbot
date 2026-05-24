@@ -15,9 +15,14 @@ def _sanitize_markdown(text: str) -> str:
 
 
 async def send_safe_message(bot: Bot, chat_id: int, text: str, reply_to_message_id: int = None,
-                            reply_markup=None, edit_message=None):
-    """Асинхронна універсальна функція для відправки повідомлень."""
-    safe_text = _sanitize_markdown(text)
+                            reply_markup=None, edit_message=None, parse_mode: str | None = 'Markdown'):
+    """Асинхронна універсальна функція для відправки повідомлень.
+
+    parse_mode: 'Markdown' (default) або None для plain text (напр. інтро без LLM-розмітки).
+    Коли parse_mode=None, _sanitize_markdown не застосовується — текст передається як є.
+    """
+    # Санітайзер потрібен лише якщо Telegram парситиме маркдаун
+    safe_text = _sanitize_markdown(text) if parse_mode else text
     max_len = 4000
 
     # edit_text приймає тільки InlineKeyboardMarkup, але ми використовуємо ReplyKeyboardMarkup.
@@ -34,11 +39,11 @@ async def send_safe_message(bot: Bot, chat_id: int, text: str, reply_to_message_
             await bot.send_message(
                 chat_id, safe_text,
                 reply_to_message_id=reply_to_message_id,
-                parse_mode='Markdown',
+                parse_mode=parse_mode,
                 reply_markup=reply_markup
             )
         except Exception as e:
-            print(f"⚠️ Safe Message Error (Markdown): {e}")
+            print(f"⚠️ Safe Message Error (parse_mode={parse_mode}): {e}")
             await bot.send_message(chat_id, safe_text, reply_to_message_id=reply_to_message_id,
                                    reply_markup=reply_markup)
     else:
@@ -46,7 +51,7 @@ async def send_safe_message(bot: Bot, chat_id: int, text: str, reply_to_message_
         for i, part in enumerate(parts):
             markup = reply_markup if i == len(parts) - 1 else None
             try:
-                await bot.send_message(chat_id, part, parse_mode='Markdown', reply_markup=markup)
+                await bot.send_message(chat_id, part, parse_mode=parse_mode, reply_markup=markup)
             except Exception as e:
                 print(f"⚠️ Safe Message Part Error: {e}")
                 await bot.send_message(chat_id, part, reply_markup=markup)

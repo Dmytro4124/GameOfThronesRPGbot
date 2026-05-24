@@ -504,3 +504,87 @@ def test_cache_idempotent():
 
     mock_create.assert_called_once()
     assert name1 == name2 == name3 == "cachedContents/abc123"
+
+
+# ─── Issue 5: model_worker та model_gm_logic мають block_none=True ──────────
+
+def test_worker_model_has_block_none():
+    """
+    Issue 5: model_worker та model_gm_logic повинні мати block_none=True.
+
+    Без цього Gemini може блокувати grimdark-контент (насильство, сексуальний
+    підтекст, жорстокість) і повертати порожні відповіді замість JSON.
+    Це зламає парсер і весь pipeline.
+
+    Перевіряємо атрибут block_none на module-level instances.
+    """
+    from core.ai_client import model_worker, model_gm_logic
+
+    assert model_worker.block_none is True, (
+        "model_worker must have block_none=True. "
+        "Without BLOCK_NONE safety settings, Gemini blocks grimdark RPG content "
+        "and returns empty responses instead of JSON (Issue 5)."
+    )
+    assert model_gm_logic.block_none is True, (
+        "model_gm_logic must have block_none=True. "
+        "Without BLOCK_NONE safety settings, GM_Logic stage fails on violent content (Issue 5)."
+    )
+
+
+def test_worker_model_block_none_produces_four_safety_settings():
+    """
+    Коли block_none=True, _build_config повинен включати safety_settings
+    рівно для 4 категорій: SEXUALLY_EXPLICIT, DANGEROUS_CONTENT,
+    HATE_SPEECH, HARASSMENT — всі зі значенням BLOCK_NONE.
+    """
+    from core.ai_client import AIWrapper
+    from google.genai import types
+
+    wrapper = AIWrapper(
+        model_name="test-model",
+        temperature=0.7,
+        block_none=True,
+    )
+
+    with patch("core.ai_client.client.caches.create", side_effect=Exception("no cache")):
+        config = wrapper._build_config()
+
+    assert config.safety_settings is not None, (
+        "_build_config with block_none=True must produce safety_settings"
+    )
+    assert len(config.safety_settings) == 4, (
+        f"Expected 4 safety settings (one per harm category), "
+        f"got {len(config.safety_settings)}"
+    )
+
+    # Перевіряємо, що всі налаштування мають threshold BLOCK_NONE
+    for setting in config.safety_settings:
+        threshold_str = str(setting.threshold)
+        assert "BLOCK_NONE" in threshold_str, (
+            f"All safety settings must have BLOCK_NONE threshold. "
+            f"Got: {threshold_str!r} for category {setting.category}"
+        )
+
+
+def test_model_without_block_none_has_no_safety_settings():
+    """
+    Контрольний тест: AIWrapper без block_none=True
+    НЕ додає safety_settings до config.
+    """
+    from core.ai_client import AIWrapper
+
+    wrapper = AIWrapper(
+        model_name="test-model",
+        temperature=0.7,
+        block_none=False,
+    )
+
+    with patch("core.ai_client.client.caches.create", side_effect=Exception("no cache")):
+        config = wrapper._build_config()
+
+    # safety_settings має бути None або не встановлено
+    # (default у GenerateContentConfig)
+    assert not config.safety_settings, (
+        f"AIWrapper without block_none must NOT add safety_settings. "
+        f"Got: {config.safety_settings!r}"
+    )

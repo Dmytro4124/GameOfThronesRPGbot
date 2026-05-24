@@ -151,8 +151,11 @@ async def resolve_normal_action(
                     )
                 raise
 
-        resp = await asyncio.to_thread(_sync_gen)
+        resp = await asyncio.wait_for(asyncio.to_thread(_sync_gen), timeout=45.0)
         data = clean_and_parse_json(resp.text)
+    except asyncio.TimeoutError:
+        logger.warning("[DND_ENGINE] LLM call timed out after 45s")
+        raise
     except Exception as e:
         logger.warning(f"[DND_ENGINE] LLM call failed: {e}")
         data = None
@@ -730,6 +733,10 @@ def apply_dnd_impacts(profile: dict, updates: dict) -> tuple[dict, list[str]]:
     # --- 6. Delegate the rest to legacy apply_system_impacts ---
     # Передаємо оригінальний updates без D&D-специфічних ключів,
     # щоб apply_system_impacts обробив: time, energy, gold, location, scene, inventory, clocks.
+    #
+    # INVARIANT (Issue 3): gold_impact, inventory_new, inventory_lost, clocks_impact
+    # are NOT in the exclusion list — they MUST reach apply_system_impacts for every
+    # outcome including CRITICAL SUCCESS.  Never add them to this exclusion list.
     legacy_updates = {k: v for k, v in updates.items() if k not in (
         "hp_damage_dice", "hp_heal_dice",
         "condition_apply", "condition_remove",
@@ -739,6 +746,9 @@ def apply_dnd_impacts(profile: dict, updates: dict) -> tuple[dict, list[str]]:
         "action_type", "skill_val", "dice_roll",
         "skill_impact", "temp_debuff", "permanent_scar",
         "reputation_block",
+        # D&D metadata consumed upstream; apply_system_impacts does not use them:
+        "outcome", "skill_used", "reputation_delta", "reputation_target_npc",
+        "difficulty",
     )}
 
     profile, legacy_logs = apply_system_impacts(profile, legacy_updates)

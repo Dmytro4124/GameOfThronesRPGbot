@@ -274,8 +274,8 @@ async def start_game_with_character(bot: Bot, chat_id: int, char_name: str):
             cached_intro_text = get_cached_intro(profile_class, profile_heritage, profile_region)
 
             if cached_intro_text:
-                # Cache HIT — надсилаємо одразу
-                await send_safe_message(bot, chat_id, cached_intro_text, reply_markup=get_main_menu())
+                # Cache HIT — надсилаємо одразу (plain text: LLM генерує власну розмітку, не Markdown)
+                await send_safe_message(bot, chat_id, cached_intro_text, reply_markup=get_main_menu(), parse_mode=None)
                 user_sessions.setdefault(chat_id, {})["action_intents"] = {}
                 user_sessions[chat_id]['history'].append({"role": "GM", "content": cached_intro_text})
             else:

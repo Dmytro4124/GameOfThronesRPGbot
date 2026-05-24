@@ -247,9 +247,9 @@ class AIWrapper:
 model = AIWrapper(MODEL_MAIN_NAME, temperature=MODEL_MAIN_TEMP, thinking_level="high", include_thoughts=True,
                   response_mime_type="application/json")  # профіль, NPC, intro — якість важлива
 model_worker = AIWrapper(MODEL_WORKER_NAME, temperature=MODEL_WORKER_TEMP, thinking_level="minimal",
-                         include_thoughts=True, response_mime_type="application/json")
+                         include_thoughts=True, response_mime_type="application/json", block_none=True)
 model_gm_logic = AIWrapper(MODEL_GM_LOGIC_NAME, temperature=MODEL_GM_LOGIC_TEMP, thinking_level="minimal",
-                           include_thoughts=True, response_mime_type="application/json")
+                           include_thoughts=True, response_mime_type="application/json", block_none=True)
 model_narrator = AIWrapper(
     MODEL_NARRATOR_NAME,
     temperature=MODEL_NARRATOR_TEMP,
