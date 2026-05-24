@@ -975,12 +975,20 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             # None надсилається ПІСЛЯ перевірки на обрізання — див. нижче
         else:
             # === BLOCKING MODE: hedged call (2 parallel requests, first success wins) ===
-            # Робастність: _safe_to_thread / hedging _safe_call конвертують StopIteration
-            # → RuntimeError (asyncio.to_thread не propagate-ить StopIteration → hang).
-            narrator_response = await hedged_generate_content_async(
-                model_narrator, narrator_prompt, hedge_count=2, max_retries=2
-            )
-            story = narrator_response.text.strip() if narrator_response and narrator_response.text else ""
+            # Робастність: _safe_to_thread / hedging _safe_call конвертують StopIteration.
+            # При hedging exception (TimeoutError / 500 INTERNAL / RuntimeError циркуіт-брейкер)
+            # → story="" → Шар 2 (retry) і Шар 3 (low-temp blocking) фолбек спрацьовують нижче.
+            try:
+                narrator_response = await hedged_generate_content_async(
+                    model_narrator, narrator_prompt, hedge_count=2, max_retries=2
+                )
+                story = narrator_response.text.strip() if narrator_response and narrator_response.text else ""
+            except Exception as _hedge_exc:
+                logger.warning(
+                    f"[NARRATOR_FAIL] Attempt 1 (hedged) raised {type(_hedge_exc).__name__}: "
+                    f"{str(_hedge_exc)[:120]} — fallthrough до Шар 2 retry"
+                )
+                story = ""
 
         # === Шар 1: обрізаний, але змістовний текст — приймаємо без retry ===
         # Визначаємо "справжній" failure: порожньо, placeholder або надто короткий.
