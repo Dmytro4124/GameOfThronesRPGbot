@@ -1054,6 +1054,16 @@ Relation_Player — НІКОЛИ не включати в npc_updates (сист�
 ❌ Description у npc_updates без незворотної події → не включати взагалі.
 ❌ Relation_Player у npc_updates → ніколи.
 ❌ Status:"Unconscious" без hp_current → ✅ додати hp_current:0, conditions:["unconscious"].
+❌ WRONG: suggested_actions з не-українським текстом:
+[
+  {{"button": "억지 a polite request", "intent": "I politely request..."}},
+  {{"button": "Bow & ask", "intent": "Я кланяюся і питаю..."}}
+]
+✅ CORRECT: ВСЕ виключно українською кирилицею:
+[
+  {{"button": "Ввічливо попросити", "intent": "Я ввічливо прошу пропустити мене у тронну залу"}},
+  {{"button": "Поклонитись і спитати", "intent": "Я кланяюся і питаю про новини зі столиці"}}
+]
 </antiexamples>
 
 <golden_laws_of_agency>
@@ -1097,6 +1107,12 @@ Relation_Player — НІКОЛИ не включати в npc_updates (сист�
 2. NPC з пошкодженнями/лікуванням: hp_current (int) + conditions обов'язкові.
 3. '' = поле не змінилось; нове значення = реальна зміна.
 4. suggested_actions — рівно 4: {action_slot_guide}
+LANGUAGE INVARIANT для suggested_actions (АБСОЛЮТНА ВИМОГА):
+  - button: МАКСИМУМ 5 слів, ВИКЛЮЧНО українською (кирилиця).
+    ЗАБОРОНЕНО: англійські слова, корейські/китайські/японські символи, латинські букви.
+    Якщо назва дії англійська (наприклад "polite request") → перекласти ("Ввічливо попросити").
+  - intent: 10-15 слів, ВИКЛЮЧНО українською (від першої особи "Я ...").
+    ЗАБОРОНЕНО будь-які не-кирилиці окрім розділових знаків (.,!?–"') та цифр.
 5. Location: ВИКЛЮЧНО зі списку: {region_locs_str} (Region не включати — система визначає).
 6. Нові NPC: НІКОЛИ без першого імені.
 </json_generation_rules>
@@ -1602,8 +1618,14 @@ def build_gm_logic_schema(mode: str = "NORMAL"):
     action_item = gtypes.Schema(
         type=gtypes.Type.OBJECT,
         properties={
-            "button": _str,
-            "intent": _str,
+            "button": gtypes.Schema(
+                type=gtypes.Type.STRING,
+                description="Up to 5 words in Ukrainian only (Cyrillic). NO English, NO Korean/Chinese/Japanese scripts.",
+            ),
+            "intent": gtypes.Schema(
+                type=gtypes.Type.STRING,
+                description="10-15 words in Ukrainian only, first-person starting with 'Я ...'. NO English or non-Cyrillic words.",
+            ),
         },
         required=["button", "intent"],
     )

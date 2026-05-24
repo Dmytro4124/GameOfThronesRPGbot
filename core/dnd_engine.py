@@ -527,8 +527,21 @@ def apply_dnd_impacts(profile: dict, updates: dict) -> tuple[dict, list[str]]:
 
     logs: list[str] = []
 
+    # --- Guard: skip hp_damage_dice/hp_heal_dice when called from COMBAT pipeline.
+    # COMBAT mode manages player HP exclusively through dnd_combat.apply_damage +
+    # cleanup_and_exit_combat. Any hp_damage_dice value in combat_updates is a
+    # LLM hallucination or a legacy "none" placeholder — applying it here would
+    # double-count damage or heal the player incorrectly.
+    _is_combat_update = str(updates.get("action_type", "")).lower() == "combat"
+
     # --- 1. hp_damage_dice ---
     hp_damage_dice_tag = str(updates.get("hp_damage_dice", "none")).strip()
+    if _is_combat_update and hp_damage_dice_tag not in ("none", "None", ""):
+        logger.warning(
+            f"[DND_ENGINE] apply_dnd_impacts: suppressing hp_damage_dice={hp_damage_dice_tag!r} "
+            f"in COMBAT update — HP already managed by combat FSM."
+        )
+        hp_damage_dice_tag = "none"
     if hp_damage_dice_tag not in ("none", "None", ""):
         if hp_damage_dice_tag == "fatal":
             hp_dmg = 9999  # guaranteed death
@@ -557,6 +570,12 @@ def apply_dnd_impacts(profile: dict, updates: dict) -> tuple[dict, list[str]]:
 
     # --- 2. hp_heal_dice ---
     hp_heal_dice_tag = str(updates.get("hp_heal_dice", "none")).strip()
+    if _is_combat_update and hp_heal_dice_tag not in ("none", "None", ""):
+        logger.warning(
+            f"[DND_ENGINE] apply_dnd_impacts: suppressing hp_heal_dice={hp_heal_dice_tag!r} "
+            f"in COMBAT update — HP already managed by combat FSM."
+        )
+        hp_heal_dice_tag = "none"
     if hp_heal_dice_tag not in ("none", "None", ""):
         hp_heal = _roll_dice_str(hp_heal_dice_tag)
         if hp_heal > 0:

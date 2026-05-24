@@ -332,6 +332,35 @@ async def execute_combat_round(
     advantage = (tactic == "reckless")
     disadvantage = (tactic == "cautious")
 
+    # --- Sanitize target_npc: LLM schema forces a string (not null), so it may return
+    # "player", the player's own name, or an empty string — none of which are valid NPC targets.
+    # Normalize to None so auto-select kicks in below.
+    _player_name_lower = player_name.lower()
+    _invalid_targets = {"player", "гравець", "я", "me", "self", _player_name_lower}
+    if target_npc is not None:
+        _tgt_stripped = str(target_npc).strip()
+        if not _tgt_stripped or _tgt_stripped.lower() in _invalid_targets:
+            logger.warning(
+                f"[COMBAT_ENGINE] target_npc={target_npc!r} is invalid (self-reference or empty) "
+                f"— nullifying for auto-select"
+            )
+            target_npc = None
+        # Also verify the named NPC actually exists in combat state
+        elif _tgt_stripped not in combat_state.npcs:
+            # Try case-insensitive match
+            _match = next(
+                (name for name in combat_state.npcs if name.lower() == _tgt_stripped.lower()),
+                None,
+            )
+            if _match:
+                target_npc = _match
+            else:
+                logger.warning(
+                    f"[COMBAT_ENGINE] target_npc={target_npc!r} not found in combat_state.npcs "
+                    f"{list(combat_state.npcs.keys())} — nullifying for auto-select"
+                )
+                target_npc = None
+
     # --- Step 2: Execute player action ---
     player_log_lines: list[str] = []
 

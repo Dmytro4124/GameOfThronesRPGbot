@@ -39,17 +39,24 @@ def _make_cell(row: int) -> MagicMock:
 
 
 def _sheet_mock_empty() -> MagicMock:
-    """Порожня таблиця: findall завжди повертає []."""
+    """Порожня таблиця: col_values повертає [] (немає header у мок-сетапі)."""
     sheet = MagicMock()
-    sheet.findall.return_value = []
+    sheet.col_values.return_value = []
+    sheet.findall.return_value = []  # back-compat для тестів, що ще не оновлені
     sheet.append_row.return_value = None
     sheet.update.return_value = None
     return sheet
 
 
 def _sheet_mock_with_user(user_id: int, row: int = 2) -> MagicMock:
-    """Таблиця з одним записом: findall для user_id повертає [cell(row)]."""
+    """Таблиця з одним записом у вказаному рядку. col_values повертає список
+    зі str(user_id) у відповідному (row-1) індексі. Інші рядки — порожні."""
     sheet = MagicMock()
+    # Build col_values list with str(user_id) at row-1 index
+    col = [""] * row
+    col[row - 1] = str(user_id)
+    sheet.col_values.return_value = col
+    # Back-compat для тестів що ще використовують findall
     sheet.findall.side_effect = lambda uid, in_column: (
         [_make_cell(row)] if str(uid) == str(user_id) else []
     )
@@ -127,16 +134,21 @@ def test_same_user_twice_updates_not_duplicates():
     # Другий виклик: USER_1 вже в рядку 2 → update
     call_count = {"n": 0}
 
-    def _findall_side_effect(uid, in_column):
-        call_count["n"] += 1
-        # Після першого append_row вважаємо, що гравець вже в рядку 2
-        if call_count["n"] > 1 and str(uid) == str(USER_1):
-            return [_make_cell(2)]
-        return []
+    appended: list[list[str]] = []
+
+    def _append_side_effect(row_data):
+        appended.append(list(row_data))
+        return None
+
+    def _col_values_side_effect(*args, **kwargs):
+        # Симулюємо реальну Google Sheets: row 1 = header, row 2+ = data
+        if not appended:
+            return ["user_id"]  # тільки header
+        return ["user_id"] + [r[0] for r in appended]
 
     sheet = MagicMock()
-    sheet.findall.side_effect = _findall_side_effect
-    sheet.append_row.return_value = None
+    sheet.col_values.side_effect = _col_values_side_effect
+    sheet.append_row.side_effect = _append_side_effect
     sheet.update.return_value = None
 
     with patch("database.operations.db") as mock_db:
@@ -254,7 +266,8 @@ def test_delete_removes_correct_row():
     USER_2 (рядок 3) залишається недоторканим.
     """
     sheet = MagicMock()
-    # USER_1 у рядку 2, USER_2 у рядку 3
+    # USER_1 у рядку 2, USER_2 у рядку 3 — col_values повертає список рядків
+    sheet.col_values.return_value = ["", str(USER_1), str(USER_2)]
     sheet.findall.side_effect = lambda uid, in_column: (
         [_make_cell(2)] if str(uid) == str(USER_1) else
         [_make_cell(3)] if str(uid) == str(USER_2) else []

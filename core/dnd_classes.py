@@ -74,7 +74,7 @@ def _define_knight() -> ClassDef:
     implemented = {
         1: [
             Feature(
-                name="Knightly Code",
+                name="Лицарський кодекс",
                 desc=(
                     "Перевага на рятівні кидки проти Переляку. Якщо мусиш збрехати про "
                     "дотримання клятви — перешкода на Обман."
@@ -82,7 +82,7 @@ def _define_knight() -> ClassDef:
                 source="Knight L1",
             ),
             Feature(
-                name="Vows of Service",
+                name="Обітниця служіння",
                 desc=(
                     "Починаєш гру з оруженосцем-cohort (CR 0). Оруженосець виконує накази, "
                     "носить спорядження, не бʼється. Заміна: 1 тиждень і 10 зм."
@@ -236,11 +236,11 @@ def _define_knight() -> ClassDef:
         skill_pool=["Athletics", "Intimidation", "Persuasion", "Insight", "Animal Handling", "History"],
         level_features=_build_level_features(name, implemented),
         starting_equipment={
-            "weapon_main": "Longsword (1d8 slashing, versatile 1d10)",
+            "weapon_main": "Довгий меч (1d8 рублюча, дворуч 1d10)",
             "weapon_off": None,
-            "armor": "Mail (AC 16)",
+            "armor": "Кольчуга (КЗ 16)",
             "shield": True,
-            "items": ["Heraldic surcoat", "Steed (rouncey)", "Lance"],
+            "items": ["Геральдичний сюрко", "Скакун (rouncey)", "Спис"],
             "gold": 75,
         },
         description=(
@@ -256,7 +256,7 @@ def _define_hedge_knight() -> ClassDef:
     implemented = {
         1: [
             Feature(
-                name="Wandering Eye",
+                name="Око мандрівника",
                 desc=(
                     "+5 до Виживання в незнайомій місцевості (регіон, де ти не провів "
                     "мінімум тиждень поточної сесії)."
@@ -264,7 +264,7 @@ def _define_hedge_knight() -> ClassDef:
                 source="Hedge Knight L1",
             ),
             Feature(
-                name="Sword for Hire",
+                name="Меч за плату",
                 desc=(
                     "+2 до Переконання при торзі за роботу, оплату або турнірний внесок."
                 ),
@@ -414,11 +414,11 @@ def _define_hedge_knight() -> ClassDef:
         skill_pool=["Athletics", "Survival", "Animal Handling", "Insight", "Perception", "Persuasion"],
         level_features=_build_level_features(name, implemented),
         starting_equipment={
-            "weapon_main": "Longsword (1d8 slashing, versatile 1d10)",
+            "weapon_main": "Довгий меч (1d8 рублюча, дворуч 1d10)",
             "weapon_off": None,
-            "armor": "Leather (AC 11 + DEX mod)",
+            "armor": "Шкіра (КЗ 11+DEX)",
             "shield": False,
-            "items": ["Bedroll", "Mended cloak", "Old horse (sway-backed)"],
+            "items": ["Спальник", "Залатаний плащ", "Старий кінь"],
             "gold": 15,
         },
         description=(
@@ -434,7 +434,7 @@ def _define_maester() -> ClassDef:
     implemented = {
         1: [
             Feature(
-                name="Chain of Knowledge",
+                name="Ланцюг знань",
                 desc=(
                     "Обери 2 навички, якими володієш (INT або WIS): отримуєш Expertise "
                     "(подвійний бонус майстерності)."
@@ -442,7 +442,7 @@ def _define_maester() -> ClassDef:
                 source="Maester L1",
             ),
             Feature(
-                name="Citadel Training",
+                name="Тренування Цитаделі",
                 desc=(
                     "Ритуали: Identify (10 хв, 10 зм.) і Detect Poison (1 хв, безкоштовно). "
                     "Потребують інструменти мейстера."
@@ -619,15 +619,15 @@ def _define_maester() -> ClassDef:
         ],
         level_features=_build_level_features(name, implemented),
         starting_equipment={
-            "weapon_main": "Quarterstaff (1d6 bludgeoning)",
+            "weapon_main": "Палиця (1d6 дробильна)",
             "weapon_off": None,
             "armor": None,
             "shield": False,
             "items": [
-                "Maester's chain (foci links, each a different metal)",
-                "Bag of herbs and reagents",
-                "Ravens x2 (trained)",
-                "Books x3 (history, medicine, stargazing)",
+                "Ланцюг мейстра (foci ланки)",
+                "Мішок трав",
+                "Круки x2",
+                "Книги x3 (історія, медицина, зорезнавство)",
             ],
             "gold": 40,
         },
@@ -644,7 +644,7 @@ def _define_septon() -> ClassDef:
     implemented = {
         1: [
             Feature(
-                name="Faith of the Seven",
+                name="Віра в Семеро",
                 desc=(
                     "1/day, 1 хвилина проповіді: союзник в 30 фут. отримує inspiration — "
                     "додає 1d4 до одного кидка до кінця наступного long rest."
@@ -652,7 +652,7 @@ def _define_septon() -> ClassDef:
                 source="Septon L1",
             ),
             Feature(
-                name="Blessing of the Mother",
+                name="Благословіння Матері",
                 desc=(
                     "1/short rest, дія: торкаєшся істоти і відновлюєш 1d8 + WIS_mod HP."
                 ),
@@ -809,14 +809,14 @@ def _define_septon() -> ClassDef:
         skill_pool=["History", "Insight", "Medicine", "Persuasion", "Religion", "Intimidation"],
         level_features=_build_level_features(name, implemented),
         starting_equipment={
-            "weapon_main": "Mace (1d6 bludgeoning)",
+            "weapon_main": "Булава (1d6 дробильна)",
             "weapon_off": None,
-            "armor": "Padded (AC 11 + DEX mod)",
+            "armor": "Стьобана (КЗ 11+DEX)",
             "shield": False,
             "items": [
-                "Seven-pointed star pendant (holy symbol)",
-                "Holy texts (The Seven-Pointed Star)",
-                "Censer with incense",
+                "Семиконечна зірка (святий символ)",
+                "Святі тексти (Семиконечна зірка)",
+                "Кадило",
             ],
             "gold": 30,
         },
@@ -833,7 +833,7 @@ def _define_sellsword() -> ClassDef:
     implemented = {
         1: [
             Feature(
-                name="Veteran's Eye",
+                name="Око ветерана",
                 desc=(
                     "+2 до кидків ініціативи. Роки читання поля бою загострили "
                     "інстинкти."
@@ -841,7 +841,7 @@ def _define_sellsword() -> ClassDef:
                 source="Sellsword L1",
             ),
             Feature(
-                name="Mercenary's Pragmatism",
+                name="Прагматизм найманця",
                 desc=(
                     "1/short rest: перекидаєш провалений кидок атаки і береш новий результат."
                 ),
@@ -990,14 +990,14 @@ def _define_sellsword() -> ClassDef:
         skill_pool=["Athletics", "Acrobatics", "Intimidation", "Perception", "Survival", "Persuasion"],
         level_features=_build_level_features(name, implemented),
         starting_equipment={
-            "weapon_main": "Shortsword (1d6 piercing, finesse)",
-            "weapon_off": "Light crossbow (1d8 piercing, range 80/320)",
-            "armor": "Studded Leather (AC 12 + DEX mod, max +2)",
+            "weapon_main": "Короткий меч (1d6 колота, фінесс)",
+            "weapon_off": "Легкий арбалет (1d8 колота, 80/320)",
+            "armor": "Шкіра з клепками (КЗ 12+DEX, max +2)",
             "shield": False,
             "items": [
-                "Bandolier",
-                "20 crossbow bolts",
-                "Battered tankard",
+                "Перев'язь",
+                "20 болтів",
+                "Кубок",
             ],
             "gold": 50,
         },
@@ -1014,14 +1014,14 @@ def _define_spy() -> ClassDef:
     implemented = {
         1: [
             Feature(
-                name="Cunning Action",
+                name="Хитра дія",
                 desc=(
                     "Щоходу: бонусна дія — Dash, Disengage або Hide."
                 ),
                 source="Spy L1",
             ),
             Feature(
-                name="Little Birds",
+                name="Маленькі пташки",
                 desc=(
                     "В місті: 1d6 годин збору інформації, Investigation DC 15. "
                     "На успіх — 1 секрет, чутка або розвіддані від GM."
@@ -1184,14 +1184,14 @@ def _define_spy() -> ClassDef:
         ],
         level_features=_build_level_features(name, implemented),
         starting_equipment={
-            "weapon_main": "Dagger (1d4 piercing, finesse, thrown 20/60)",
-            "weapon_off": "Dagger (1d4 piercing, finesse, thrown 20/60)",
-            "armor": "Leather (AC 11 + DEX mod)",
+            "weapon_main": "Кинджал (1d4 колота, фінесс, метний 20/60)",
+            "weapon_off": "Кинджал (1d4 колота, фінесс, метний 20/60)",
+            "armor": "Шкіра (КЗ 11+DEX)",
             "shield": False,
             "items": [
-                "Disguise kit",
-                "Thieves' tools",
-                "Lockpicks (set of 10)",
+                "Набір для перевдягання",
+                "Злодійські інструменти",
+                "Відмички",
             ],
             "gold": 35,
         },
@@ -1208,7 +1208,7 @@ def _define_courtier() -> ClassDef:
     implemented = {
         1: [
             Feature(
-                name="Silver Tongue",
+                name="Срібний язик",
                 desc=(
                     "1/day: перекидаєш Переконання або Обман після бачення результату; "
                     "береш новий кидок навіть якщо він нижчий."
@@ -1216,7 +1216,7 @@ def _define_courtier() -> ClassDef:
                 source="Courtier L1",
             ),
             Feature(
-                name="Noble Bearing",
+                name="Шляхетне поводження",
                 desc=(
                     "Перевага на CHA-перевірки (Переконання, Обман, Гра, Залякування) "
                     "проти осіб рівного або нижчого соціального статусу."
@@ -1226,7 +1226,7 @@ def _define_courtier() -> ClassDef:
         ],
         2: [
             Feature(
-                name="Web of Influence",
+                name="Мережа впливу",
                 desc=(
                     "У будь-якому великому місті: кидаєш 1d4 — стільки шляхетних контактів "
                     "в боргу або знайомстві. Надають інформацію, притулок або вступ."
@@ -1247,7 +1247,7 @@ def _define_courtier() -> ClassDef:
         4: [_asi(name, 4)],
         5: [
             Feature(
-                name="Web of Influence (improved)",
+                name="Мережа впливу (покращена)",
                 desc=(
                     "У будь-якому великому місті знаєш 2d4 шляхетних контактів замість 1d4."
                 ),
@@ -1256,7 +1256,7 @@ def _define_courtier() -> ClassDef:
         ],
         6: [
             Feature(
-                name="Court of Lies",
+                name="Двір брехні",
                 desc=(
                     "Перевага на Проникливість для виявлення брехні. 1/сцена: примушуєш "
                     "ціль відповісти на 1 так/ні питання правдиво (CHA save DC 13)."
@@ -1266,7 +1266,7 @@ def _define_courtier() -> ClassDef:
         ],
         7: [
             Feature(
-                name="Silver Tongue (improved)",
+                name="Срібний язик (покращений)",
                 desc=(
                     "Тепер 2/day: перекидаєш Переконання або Обман після бачення результату."
                 ),
@@ -1378,14 +1378,14 @@ def _define_courtier() -> ClassDef:
         skill_pool=["Deception", "History", "Insight", "Performance", "Persuasion", "Investigation"],
         level_features=_build_level_features(name, implemented),
         starting_equipment={
-            "weapon_main": "Rapier (1d8 piercing, finesse)",
+            "weapon_main": "Рапіра (1d8 колота, фінесс)",
             "weapon_off": None,
             "armor": None,
             "shield": False,
             "items": [
-                "Fine noble clothes",
-                "Signet ring of house",
-                "Sealed letters of introduction x3",
+                "Вишукані шати",
+                "Перстень з гербом дому",
+                "Запечатані рекомендаційні листи x3",
             ],
             "gold": 100,
         },
@@ -1402,7 +1402,7 @@ def _define_bastard() -> ClassDef:
     implemented = {
         1: [
             Feature(
-                name="Bastard's Resolve",
+                name="Рішучість байстрюка",
                 desc=(
                     "Перевага на рятівні проти Переляку. Народжений з нічим — страх "
                     "став розкішшю, якої не можеш собі дозволити."
@@ -1410,7 +1410,7 @@ def _define_bastard() -> ClassDef:
                 source="Bastard L1",
             ),
             Feature(
-                name="Underdog's Grit",
+                name="Стійкість недопереможеного",
                 desc=(
                     "Коли HP менше або дорівнює половині максимуму: +1 до кидків атаки "
                     "і пошкоджень."
@@ -1459,10 +1459,10 @@ def _define_bastard() -> ClassDef:
         ],
         7: [
             Feature(
-                name="Underdog's Surge",
+                name="Сплеск стійкості",
                 desc=(
                     "При HP ≤ половині максимуму: +1 атака/пошкодження, +2 AC, "
-                    "перевага на рятівні. Підсилена версія Underdog's Grit."
+                    "перевага на рятівні. Підсилена версія Стійкість недопереможеного."
                 ),
                 source="Bastard L7",
             ),
@@ -1560,13 +1560,13 @@ def _define_bastard() -> ClassDef:
         skill_pool=["Athletics", "Intimidation", "Survival", "Insight", "Stealth", "Persuasion"],
         level_features=_build_level_features(name, implemented),
         starting_equipment={
-            "weapon_main": "Longsword (1d8 slashing, versatile 1d10)",
+            "weapon_main": "Довгий меч (1d8 рублюча, дворуч 1d10)",
             "weapon_off": None,
-            "armor": "Leather (AC 11 + DEX mod)",
+            "armor": "Шкіра (КЗ 11+DEX)",
             "shield": False,
             "items": [
-                "Worn travelling cloak",
-                "Trinket from absent parent (worthless but cherished)",
+                "Зношений плащ",
+                "Дрібничка від відсутнього родителя",
             ],
             "gold": 20,
         },
@@ -1585,7 +1585,7 @@ def _define_wildling() -> ClassDef:
     implemented = {
         1: [
             Feature(
-                name="Free Folk Resilience",
+                name="Витривалість вільного народу",
                 desc=(
                     "Перевага на рятівні проти Переляку і Виснаження від природних факторів "
                     "(холод, голод, форсований марш). Не стаєш на коліна."
@@ -1593,7 +1593,7 @@ def _define_wildling() -> ClassDef:
                 source="Wildling L1",
             ),
             Feature(
-                name="Beyond the Wall",
+                name="За Стіною",
                 desc=(
                     "Імунітет до пошкоджень від екстремального холоду. Рух по снігу/льоду "
                     "коштує половину замість подвійного."
@@ -1749,14 +1749,14 @@ def _define_wildling() -> ClassDef:
         skill_pool=["Athletics", "Survival", "Intimidation", "Perception", "Animal Handling", "Nature"],
         level_features=_build_level_features(name, implemented),
         starting_equipment={
-            "weapon_main": "Greataxe (1d12 slashing, two-handed)",
+            "weapon_main": "Велика сокира (1d12 рублюча, дворучна)",
             "weapon_off": None,
-            "armor": "Hide (AC 12 + DEX mod, max +2)",
+            "armor": "Шкура (КЗ 12+DEX max +2)",
             "shield": False,
             "items": [
-                "Carved bone trinket",
-                "Heavy furs",
-                "Skinning knife (1d4 piercing, light)",
+                "Кістяна дрібничка",
+                "Хутра",
+                "Ніж для оббілування (1d4 колота)",
             ],
             "gold": 5,
         },

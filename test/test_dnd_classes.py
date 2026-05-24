@@ -178,13 +178,13 @@ def test_get_class_raises_key_error_for_unknown_class():
 def test_knight_level_one_has_knightly_code_feature():
     features = get_class_features_at_level("Knight", 1)
     names = [f.name for f in features]
-    assert "Knightly Code" in names
+    assert "Лицарський кодекс" in names
 
 
 def test_knight_level_one_has_vows_of_service_feature():
     features = get_class_features_at_level("Knight", 1)
     names = [f.name for f in features]
-    assert "Vows of Service" in names
+    assert "Обітниця служіння" in names
 
 
 def test_knight_level_one_has_at_least_two_features():

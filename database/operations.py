@@ -37,6 +37,45 @@ gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 _users_db_lock: asyncio.Lock = asyncio.Lock()
 
 
+def _find_user_row_exact(sheet, user_id) -> int | None:
+    """Точний (НЕ regex/substring) пошук рядка user_id у колонці 1.
+
+    КРИТИЧНО: gspread 6.x `Worksheet.findall(query, in_column=N)` обробляє query
+    як regex search → "12345" знаходить "12345", "123456", "12345789" тощо.
+    Для Telegram user_id (9-10 цифр) це призводить до COLLISION — Player 2
+    знаходить рядок Player 1 і перезаписує його.
+
+    Цей helper читає всю колонку через col_values і робить EXACT string match.
+    Повертає 1-based row index або None.
+    """
+    target = str(user_id).strip()
+    try:
+        col_values = sheet.col_values(1)  # list[str], 1-індекс через enumerate(start=1)
+        for idx, val in enumerate(col_values, start=1):
+            if str(val).strip() == target:
+                return idx
+        return None
+    except Exception as e:
+        print(f"❌ _find_user_row_exact failed for {user_id}: {e}")
+        return None
+
+
+def _find_all_user_rows_exact(sheet, user_id) -> list[int]:
+    """Як _find_user_row_exact, але повертає список усіх exact-match рядків
+    (для cleanup дублікатів через delete)."""
+    target = str(user_id).strip()
+    rows: list[int] = []
+    try:
+        col_values = sheet.col_values(1)
+        for idx, val in enumerate(col_values, start=1):
+            if str(val).strip() == target:
+                rows.append(idx)
+        return rows
+    except Exception as e:
+        print(f"❌ _find_all_user_rows_exact failed for {user_id}: {e}")
+        return []
+
+
 # ================= РОБОТА З БАЗОЮ ГРАВЦІВ (Users_DB) =================
 
 async def get_user_data(user_id):
@@ -47,15 +86,14 @@ async def get_user_data(user_id):
             sheet = db.get_sheet(TAB_USERS)
             if not sheet: return None, None
 
-            cells = sheet.findall(str(user_id), in_column=1)
-            if not cells:
+            row = _find_user_row_exact(sheet, user_id)
+            if row is None:
                 return None, None
 
-            cell = cells[0]
-            raw_data = sheet.cell(cell.row, 3).value
+            raw_data = sheet.cell(row, 3).value
 
             if raw_data:
-                return json.loads(raw_data), cell.row
+                return json.loads(raw_data), row
             return None, None
         except Exception as e:
             print(f"❌ Помилка читання БД: {e}")
@@ -78,11 +116,10 @@ async def save_user_data(user_id, profile_data, char_name="Unknown"):
                 if not sheet: return False
 
                 json_str = json.dumps(profile_data, ensure_ascii=False)
-                cells = sheet.findall(str(user_id), in_column=1)
+                row = _find_user_row_exact(sheet, user_id)
 
-                if cells:
+                if row is not None:
                     # Існуючий гравець: оновлюємо обидва поля одним batch-запитом
-                    row = cells[0].row
                     sheet.update(
                         f"B{row}:C{row}",
                         [[char_name, json_str]],
@@ -112,11 +149,11 @@ async def delete_user_data(user_id):
                 sheet = db.get_sheet(TAB_USERS)
                 if not sheet:
                     return False
-                cells = sheet.findall(str(user_id), in_column=1)
-                for cell in reversed(cells):  # reversed щоб не зсунути індекси при видаленні
-                    sheet.delete_rows(cell.row)
-                    print(f"[Users_DB] Видалено рядок {cell.row} для user {user_id}")
-                return len(cells) > 0
+                rows = _find_all_user_rows_exact(sheet, user_id)
+                for row in reversed(rows):  # reversed щоб не зсунути індекси при видаленні
+                    sheet.delete_rows(row)
+                    print(f"[Users_DB] Видалено рядок {row} для user {user_id}")
+                return len(rows) > 0
             except Exception as e:
                 print(f"❌ Помилка видалення профілю {user_id}: {e}")
                 return False

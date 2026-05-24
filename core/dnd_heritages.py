@@ -36,7 +36,7 @@ HERITAGES: dict[str, HeritageDef] = {
         languages=["Common Tongue"],
         traits=[
             Trait(
-                name="Adaptable",
+                name="Адаптивний",
                 desc=(
                     "You gain proficiency in one additional skill of your choice from any "
                     "of the 18 D&D 5e skills. The Andal people are broadly capable survivors."
@@ -53,7 +53,7 @@ HERITAGES: dict[str, HeritageDef] = {
         languages=["Common Tongue", "High Valyrian"],
         traits=[
             Trait(
-                name="Fire Resistance",
+                name="Опір вогню",
                 desc=(
                     "You take half damage from fire, whether from mundane sources (burning "
                     "buildings, alchemist's fire) or magical ones (dragon breath, Red Priest "
@@ -61,7 +61,7 @@ HERITAGES: dict[str, HeritageDef] = {
                 ),
             ),
             Trait(
-                name="Dragon Bond",
+                name="Зв'язок з драконом",
                 desc=(
                     "If a living dragon of bonding age exists in the world and you have "
                     "spent at least 1 month with it, you establish a telepathic link. The "
@@ -82,7 +82,7 @@ HERITAGES: dict[str, HeritageDef] = {
         languages=["Common Tongue", "Old Tongue"],
         traits=[
             Trait(
-                name="Wolf Bond",
+                name="Зв'язок з вовком",
                 desc=(
                     "You begin play with one direwolf pup companion (CR 1/4, treat as wolf "
                     "stats per Monster Manual with HP 11, AC 13, bite attack +4 to hit "
@@ -92,7 +92,7 @@ HERITAGES: dict[str, HeritageDef] = {
                 ),
             ),
             Trait(
-                name="Warging",
+                name="Варгінг",
                 desc=(
                     "Once per long rest, as an action, you attempt to project your mind into "
                     "a beast (not a humanoid) within 100 feet. Make a WIS saving throw "
@@ -114,7 +114,7 @@ HERITAGES: dict[str, HeritageDef] = {
         languages=["Common Tongue", "Old Tongue"],
         traits=[
             Trait(
-                name="Cold Bred",
+                name="Загартований холодом",
                 desc=(
                     "You are immune to extreme cold environmental damage as defined in the "
                     "DMG. You never suffer Exhaustion levels from cold weather alone. "
@@ -122,7 +122,7 @@ HERITAGES: dict[str, HeritageDef] = {
                 ),
             ),
             Trait(
-                name="No Kneeler",
+                name="Не коліноприклонник",
                 desc=(
                     "You have disadvantage on Persuasion checks when dealing with Westerosi "
                     "nobles who know you are Free Folk (you refuse to adopt the expected "
@@ -141,7 +141,7 @@ HERITAGES: dict[str, HeritageDef] = {
         languages=["Common Tongue", "High Valyrian"],
         traits=[
             Trait(
-                name="Pyromancy",
+                name="Піромантія",
                 desc=(
                     "As an action, you call fire from R'hllor. Creatures in a 15-foot cone "
                     "must make a DEX saving throw (DC = 10 + your CHA modifier) or take "
@@ -151,7 +151,7 @@ HERITAGES: dict[str, HeritageDef] = {
                 ),
             ),
             Trait(
-                name="Fire-Reading",
+                name="Читання вогню",
                 desc=(
                     "Once per long rest, you spend 10 minutes gazing into an open flame and "
                     "commune with the Lord of Light. You may ask the GM one yes/no question "
@@ -171,7 +171,7 @@ HERITAGES: dict[str, HeritageDef] = {
         languages=["Common Tongue"],
         traits=[
             Trait(
-                name="Water Affinity",
+                name="Спорідненість з водою",
                 desc=(
                     "While you are in or adjacent to seawater (not freshwater), you gain a "
                     "+1 bonus to CON checks and CON saving throws. You can hold your breath "
@@ -180,7 +180,7 @@ HERITAGES: dict[str, HeritageDef] = {
                 ),
             ),
             Trait(
-                name="Reaver's Greed",
+                name="Жадоба налітника",
                 desc=(
                     "You have advantage on Athletics checks made to climb rigging, ropes, or "
                     "ship-board structures. You have disadvantage on Persuasion checks with "

@@ -92,13 +92,13 @@ def test_westerosi_andal_no_magic_is_true():
 def test_first_men_has_warging_trait():
     h = get_heritage("First Men (Stark line)")
     trait_names = [t.name for t in h.traits]
-    assert "Warging" in trait_names
+    assert "Варгінг" in trait_names
 
 
 def test_red_priest_has_pyromancy_trait():
     h = get_heritage("Red Priest")
     trait_names = [t.name for t in h.traits]
-    assert "Pyromancy" in trait_names
+    assert "Піромантія" in trait_names
 
 
 # ---------------------------------------------------------------------------

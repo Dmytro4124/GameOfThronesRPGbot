@@ -377,6 +377,27 @@ _SKILL_EMOJI: dict[str, str] = {
     "Persuasion": "🗣️",
 }
 
+SKILL_DISPLAY_NAMES: dict[str, str] = {
+    "Athletics": "Атлетика",
+    "Acrobatics": "Акробатика",
+    "Sleight of Hand": "Спритність рук",
+    "Stealth": "Стелс",
+    "Arcana": "Магія",
+    "History": "Історія",
+    "Investigation": "Розслідування",
+    "Nature": "Природа",
+    "Religion": "Релігія",
+    "Animal Handling": "Поводження з тваринами",
+    "Insight": "Інсайт",
+    "Medicine": "Медицина",
+    "Perception": "Сприйняття",
+    "Survival": "Виживання",
+    "Deception": "Обман",
+    "Intimidation": "Залякування",
+    "Performance": "Виступ",
+    "Persuasion": "Переконання",
+}
+
 
 def _build_dnd_profile_text(profile: dict, chat_id: int) -> str:
     """Build D&D 5e profile display text from a full D&D profile dict."""
@@ -477,31 +498,26 @@ def _build_dnd_profile_text(profile: dict, chat_id: int) -> str:
             mod = skill_modifier(profile, sk_name)
             suffix = " (exp)" if sk_name in skill_expertise else ""
             icon = _SKILL_EMOJI.get(sk_name, "•")
-            displayed_skills.append(f"{icon} {sk_name} {mod:+d}{suffix}")
+            display_name = SKILL_DISPLAY_NAMES.get(sk_name, sk_name)
+            displayed_skills.append(f"{icon} {display_name} {mod:+d}{suffix}")
     if displayed_skills:
         lines.append("")
         lines.append("🎓 *Skill profs:*")
         for sk_entry in displayed_skills:
             lines.append(f"  {sk_entry}")
 
-    # features (max 5)
+    # features — повний опис; send_safe_message split-ить при потребі
     if features_raw:
         lines.append("")
-        lines.append(f"🌟 *Features (L{level}):*")
-        shown = 0
+        lines.append(f"🌟 *Здібності (L{level}):*")
         for feat in features_raw:
-            if shown >= 5:
-                lines.append("  ... та інше")
-                break
             if isinstance(feat, dict):
                 fname = feat.get("name", "")
                 fdesc = feat.get("desc", "")
             else:
                 fname = str(feat)
                 fdesc = ""
-            desc_short = fdesc[:60] + "..." if len(fdesc) > 60 else fdesc
-            lines.append(f"  • {fname} — {desc_short}")
-            shown += 1
+            lines.append(f"  • *{fname}* — {fdesc}")
 
     # A) Equipment — inventory without truncation; send_safe_message handles split
     inv_str = str(inv_raw).strip() if inv_raw else "Нічого"

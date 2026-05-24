@@ -1256,3 +1256,230 @@ def test_execute_npc_actions_passes_schema_config():
     assert cfg is not None, "config must not be None (schema mode)"
     assert cfg.response_mime_type == "application/json"
     assert cfg.response_schema is not None
+
+
+# ===========================================================================
+# КРИТИЧНІ ТЕСТИ: BUG — HP гравця зменшується замість HP NPC
+# Regression suite для: dnd_combat_engine.py target sanitization
+#                        dnd_engine.py hp_damage_dice COMBAT guard
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Тест BUG-A: target_npc="player" → auto-sanitize → реальна атака на NPC
+# ---------------------------------------------------------------------------
+
+def test_execute_combat_round_target_player_string_sanitized_to_npc():
+    """
+    BUG-A regression: LLM повертає target_npc='player' (рядок, не null) через schema constraint.
+    execute_combat_round повинен:
+    1. Пізнати 'player' як недійсну ціль.
+    2. Виконати auto-select: атакувати першого живого NPC (Goblin).
+    3. Не змінювати HP гравця від власної атаки.
+    4. Зменшити HP Goblin (якщо атака влучила).
+    """
+    from core.dnd_combat_engine import execute_combat_round
+    from core.combat_state import set_combat_state, clear_combat_state
+
+    chat_id = 9001
+    goblin_initial_hp = 20
+    npc_data = {
+        "Goblin": {
+            "hp_current": goblin_initial_hp,
+            "hp_max": goblin_initial_hp,
+            "ac": 5,  # low AC → guaranteed hit
+            "Status": "Active",
+            "conditions": [],
+            "attacks": [{"name": "Scimitar", "to_hit": 2, "dmg": "1d6 slashing", "range": 5}],
+        }
+    }
+    state = _make_combat_state(chat_id=chat_id, player_hp=40, player_hp_max=40, npc_data=npc_data)
+    set_combat_state(chat_id, state)
+    player_initial_hp = state.player_snapshot["hp_current"]
+
+    # LLM hallucination: target_npc='player' instead of 'Goblin'
+    player_intent = {
+        "intent": "attack",
+        "target_npc": "player",  # <- BUG: invalid target string from LLM
+        "weapon": "Longsword",
+        "spell_or_ability": None,
+        "tactic": "normal",
+        "move_to": None,
+        "verdict_text": "Player attacks.",
+        "reasoning": "attack intent",
+    }
+
+    with patch("core.dnd_combat_engine.parse_player_combat_intent", new=AsyncMock(return_value=player_intent)):
+        with patch("core.dnd_combat_engine.decide_spotlight_npcs", new=AsyncMock(return_value=[])):
+            profile = _minimal_player_profile(mode="COMBAT")
+            combat_log, updates, npc_results = _run(
+                execute_combat_round(chat_id, "Атакую!", profile)
+            )
+
+    # Player HP must NOT change from their own attack
+    final_player_hp = state.player_snapshot["hp_current"]
+    assert final_player_hp == player_initial_hp, (
+        f"BUG-A: Player HP changed from {player_initial_hp} to {final_player_hp} "
+        f"when target_npc='player' was passed to execute_combat_round. "
+        f"target sanitization must redirect attack to NPC, not player."
+    )
+
+    # Goblin HP should have decreased (attack was redirected to Goblin via auto-select)
+    final_goblin_hp = state.npcs["Goblin"]["hp_current"]
+    assert final_goblin_hp < goblin_initial_hp, (
+        f"BUG-A: After target_npc='player' sanitization, Goblin HP should have decreased "
+        f"(auto-select redirected attack to Goblin). "
+        f"Initial: {goblin_initial_hp}, Final: {final_goblin_hp}. "
+        f"Combat log: {combat_log!r}"
+    )
+
+    clear_combat_state(chat_id)
+
+
+# ---------------------------------------------------------------------------
+# Тест BUG-B: apply_dnd_impacts з action_type='combat' ігнорує hp_damage_dice
+# ---------------------------------------------------------------------------
+
+def test_apply_dnd_impacts_suppresses_hp_damage_dice_in_combat_updates():
+    """
+    BUG-B regression: apply_dnd_impacts отримує updates з action_type='combat'
+    і hp_damage_dice='1d8'. Має ІГНОРУВАТИ hp_damage_dice (COMBAT pipeline
+    вже управляє HP через apply_damage/cleanup_and_exit_combat).
+    HP гравця НЕ повинен зменшуватись.
+    """
+    from core.dnd_engine import apply_dnd_impacts
+
+    initial_hp = 30
+    profile = {
+        "Ім'я": "TestPlayer",
+        "hp_current": initial_hp,
+        "hp_max": 40,
+        "Здоров'я": 75,
+        "Енергія": 800,
+        "Особисте Золото": 50,
+        "Ігровий час": "Day 1, Morning",
+        "Інвентар": "",
+        "Годинники": {},
+        "Поточне місцезнаходження": "Вінтерфелл",
+        "Поточна сцена": "Courtyard",
+        "Регіон": "Північ",
+        "Навички": {},
+        "Характеристики": {},
+        "conditions": [],
+        "level": 1,
+        "xp": 0,
+        "ability_scores": {"STR": 16, "DEX": 12, "CON": 14, "INT": 10, "WIS": 10, "CHA": 10},
+    }
+
+    # Simulated combat_updates from _build_combat_updates (action_type='combat')
+    combat_updates = {
+        "action_type": "combat",  # <- key that signals COMBAT pipeline
+        "hp_damage_dice": "1d8",  # <- LLM hallucination or NPC counter damage tag
+        "hp_heal_dice": "none",
+        "health_impact": "none",
+        "energy_impact": "none",
+        "gold_impact": "none",
+        "minutes_passed": 5,
+        "location_impact": "none",
+        "scene_impact": "none",
+        "inventory_new": [],
+        "inventory_lost": [],
+        "clocks_impact": {},
+        "condition_apply": [],
+        "condition_remove": [],
+        "xp_award": 0,
+        "combat_phase": "ONGOING",
+        "combat_ended": False,
+    }
+
+    updated_profile, logs = apply_dnd_impacts(profile, combat_updates)
+
+    assert updated_profile["hp_current"] == initial_hp, (
+        f"BUG-B: hp_current changed from {initial_hp} to {updated_profile['hp_current']} "
+        f"despite action_type='combat' guard. apply_dnd_impacts must suppress hp_damage_dice "
+        f"when processing COMBAT pipeline updates. logs: {logs}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Тест BUG-C: повний раунд — HP гравця і HP NPC коректні після раунду
+# ---------------------------------------------------------------------------
+
+def test_execute_combat_round_player_hp_unchanged_npc_hp_decreases():
+    """
+    BUG-C integration regression: execute_combat_round — гравець атакує Goblin.
+    Після раунду:
+    - state.player_snapshot['hp_current'] == initial (якщо Goblin не влучив АБО промахнувся)
+    - Якщо гравець влучив → state.npcs['Goblin']['hp_current'] < initial
+
+    Для детермінізму: мокуємо player_attack з гарантованим влучанням на Goblin,
+    а NPC actions — порожній список (Goblin вже мертвий після першого удару).
+    """
+    from core.dnd_combat_engine import execute_combat_round
+    from core.combat_state import set_combat_state, clear_combat_state
+    from core.dnd_combat import apply_damage, AttackResult
+
+    chat_id = 9003
+    goblin_initial_hp = 15
+    npc_data = {
+        "Goblin": {
+            "hp_current": goblin_initial_hp,
+            "hp_max": goblin_initial_hp,
+            "ac": 12,
+            "Status": "Active",
+            "conditions": [],
+            "attacks": [{"name": "Scimitar", "to_hit": 4, "dmg": "1d6+2 slashing", "range": 5}],
+            "cr": "1/4",
+        }
+    }
+    state = _make_combat_state(chat_id=chat_id, player_hp=40, player_hp_max=40, npc_data=npc_data)
+    set_combat_state(chat_id, state)
+    player_initial_hp = state.player_snapshot["hp_current"]
+
+    player_intent = {
+        "intent": "attack",
+        "target_npc": "Goblin",
+        "weapon": "Longsword",
+        "spell_or_ability": None,
+        "tactic": "normal",
+        "move_to": None,
+        "verdict_text": "Player swings at goblin.",
+        "reasoning": "obvious",
+    }
+
+    def _guaranteed_hit_on_goblin(cs, target_name, weapon_name, advantage=False, disadvantage=False):
+        """Force a hit on Goblin, dealing 8 damage. Player HP must not change."""
+        from core.dnd_combat import AttackResult
+        apply_damage(cs, "Goblin", 8, "slashing")
+        return AttackResult(
+            attacker="TestPlayer", target="Goblin", weapon=weapon_name,
+            to_hit_total=20, natural_roll=15, target_ac=12,
+            hit=True, critical=False, damage_total=8,
+            damage_dice_str="1d8+3", damage_type="slashing",
+            log_line="TestPlayer атакує Goblin: 8 slashing. Goblin отримує 8 slashing (HP: 15 → 7)",
+        )
+
+    with patch("core.dnd_combat_engine.parse_player_combat_intent", new=AsyncMock(return_value=player_intent)):
+        with patch("core.dnd_combat_engine.decide_spotlight_npcs", new=AsyncMock(return_value=[])):
+            with patch("core.dnd_combat_engine.player_attack", side_effect=_guaranteed_hit_on_goblin):
+                profile = _minimal_player_profile(mode="COMBAT")
+                combat_log, updates, npc_results = _run(
+                    execute_combat_round(chat_id, "Атакую гобліна!", profile)
+                )
+
+    # === Core assertions ===
+    final_player_hp = state.player_snapshot["hp_current"]
+    assert final_player_hp == player_initial_hp, (
+        f"BUG-C: Player HP changed from {player_initial_hp} to {final_player_hp} "
+        f"after player attacked Goblin (with no NPC counter-attack). "
+        f"Player should NOT take damage from their own attack. "
+        f"combat_log: {combat_log!r}"
+    )
+
+    final_goblin_hp = state.npcs["Goblin"]["hp_current"]
+    assert final_goblin_hp == goblin_initial_hp - 8, (
+        f"BUG-C: Goblin HP should be {goblin_initial_hp - 8} after 8 slashing damage. "
+        f"Got: {final_goblin_hp}. "
+        f"combat_log: {combat_log!r}"
+    )
+
+    clear_combat_state(chat_id)

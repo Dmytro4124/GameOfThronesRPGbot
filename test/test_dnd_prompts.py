@@ -624,3 +624,74 @@ def test_schema_has_properties(schema_fn, name):
     """Every schema must have at least one property defined."""
     schema = schema_fn()
     assert schema.properties, f"Schema '{name}' has no properties defined"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. Language guard — suggested_actions Ukrainian invariant
+# ─────────────────────────────────────────────────────────────────────────────
+
+import re
+
+
+def _is_ukrainian_text(text: str) -> bool:
+    """True if text contains only Ukrainian Cyrillic, digits, common punctuation.
+    Returns False if contains CJK characters or Latin words of 3+ chars."""
+    if re.search(r'[　-鿿가-힯]', text):
+        return False
+    latin_words = re.findall(r'[A-Za-z]{3,}', text)
+    if len(latin_words) > 0:
+        return False
+    return True
+
+
+def test_is_ukrainian_text_pure_ukrainian():
+    assert _is_ukrainian_text("Ввічливо попросити") is True
+
+
+def test_is_ukrainian_text_pure_ukrainian_with_punctuation():
+    assert _is_ukrainian_text("Я атакую гобліна!") is True
+
+
+def test_is_ukrainian_text_korean_mixed():
+    assert _is_ukrainian_text("억지 a polite request") is False
+
+
+def test_is_ukrainian_text_latin_word():
+    assert _is_ukrainian_text("Bow & ask") is False
+
+
+def test_is_ukrainian_text_english_intent():
+    assert _is_ukrainian_text("I politely request entry to the throne room") is False
+
+
+def test_is_ukrainian_text_short_latin_token_allowed():
+    # Single-char or 2-char latin tokens (e.g. initials) — не блокуємо
+    assert _is_ukrainian_text("Я йду до NPC") is False  # "NPC" = 3 символи → False (правило >=3)
+
+
+def test_gm_logic_prompt_contains_language_invariant(gm_logic_common_kwargs):
+    result = build_gm_logic_prompt(**gm_logic_common_kwargs, mode="NORMAL")
+    assert "LANGUAGE INVARIANT" in result, "Expected LANGUAGE INVARIANT guard in build_gm_logic_prompt"
+    assert "ВИКЛЮЧНО українською" in result, "Expected Ukrainian-only instruction in build_gm_logic_prompt"
+
+
+def test_gm_logic_prompt_antiexample_contains_wrong_example(gm_logic_common_kwargs):
+    result = build_gm_logic_prompt(**gm_logic_common_kwargs, mode="NORMAL")
+    assert "Bow & ask" in result, "Expected non-Ukrainian antiexample 'Bow & ask' in prompt antiexamples block"
+    assert "Ввічливо попросити" in result, "Expected correct Ukrainian example in prompt antiexamples block"
+
+
+def test_gm_logic_schema_button_has_description():
+    schema = build_gm_logic_schema(mode="NORMAL")
+    action_schema = schema.properties["suggested_actions"]
+    button_schema = action_schema.items.properties["button"]
+    assert button_schema.description is not None, "button schema must have a description"
+    assert "Ukrainian" in button_schema.description or "Cyrillic" in button_schema.description
+
+
+def test_gm_logic_schema_intent_has_description():
+    schema = build_gm_logic_schema(mode="NORMAL")
+    action_schema = schema.properties["suggested_actions"]
+    intent_schema = action_schema.items.properties["intent"]
+    assert intent_schema.description is not None, "intent schema must have a description"
+    assert "Ukrainian" in intent_schema.description
