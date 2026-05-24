@@ -760,7 +760,7 @@ def test_process_game_turn_combat_mode_uses_combat_pipeline():
         patch("core.engine.get_dead_npc_names", return_value=set()),
         patch("core.engine.model_gm_logic.generate_content", return_value=gm_resp),
         patch("core.engine.model_narrator.generate_content", return_value=narrator_resp),
-        patch("core.engine.asyncio.create_task", return_value=MagicMock()),
+        patch("core.engine._run_bg_task", return_value=MagicMock()),
         # COMBAT pipeline — patch the binding in core.engine (top-level import)
         patch("core.engine.execute_combat_round", new=execute_round_mock),
     ]
@@ -841,7 +841,7 @@ def test_process_game_turn_combat_imminent_triggers_initiation():
         patch("core.engine.get_dead_npc_names", return_value=set()),
         patch("core.engine.model_gm_logic.generate_content", return_value=gm_resp),
         patch("core.engine.model_narrator.generate_content", return_value=narrator_resp),
-        patch("core.engine.asyncio.create_task", return_value=MagicMock()),
+        patch("core.engine._run_bg_task", return_value=MagicMock()),
         patch("core.dnd_combat_engine.initiate_combat_from_normal", new=initiate_mock),
     ]
 
@@ -973,7 +973,7 @@ def test_combat_npc_death_persisted_to_sheets_via_background_task():
         patch("core.engine.save_user_data", new=AsyncMock()),
         patch("core.engine.summarize_full_turn", new=AsyncMock(return_value="Turn summary")),
         # Capture background tasks so we can run them while patches are still active
-        patch("core.engine.asyncio.create_task", side_effect=_capture_create_task),
+        patch("core.engine._run_bg_task", side_effect=_capture_create_task),
     ]
 
     async def _run_engine():
@@ -1018,3 +1018,241 @@ def test_combat_npc_death_persisted_to_sheets_via_background_task():
         "this reads from GM_Logic JSON, not from combat_updates/cleanup_result. "
         f"All npc entries received by update_npcs_in_db: {all_npc_entries!r}"
     )
+
+
+# ===========================================================================
+# Тест BUG #2: COMBAT mode — dice summary block відображається у відповіді
+# ===========================================================================
+
+def test_process_game_turn_combat_mode_shows_dice_summary():
+    """BUG #2 перевірка: COMBAT mode → result_text містить '📊' з рядком
+    'БІЙ Раунд' і log_line атак гравця/NPC.
+
+    Мокуємо execute_combat_round з нетривіальним combat_log і npc_actions що
+    містить AttackResult з log_line. Перевіряємо що process_game_turn повертає
+    рядок з '📊' і бойовими деталями.
+    """
+    from core.combat_state import set_combat_state, clear_combat_state
+    from core.dnd_combat import AttackResult
+
+    chat_id = 7001
+    state = _make_combat_state(chat_id=chat_id)
+    set_combat_state(chat_id, state)
+
+    profile = _minimal_player_profile(mode="COMBAT")
+
+    # Реалістичний combat_log: заголовок + player attack line
+    _player_log_line = (
+        "TestPlayer атакує Goblin зброєю Longsword: [15]→15 +3(атак) +2(проф) = 20 проти КЗ 12 → ВЛУЧАННЯ, 7 slashing."
+    )
+    combat_log_str = f"--- Раунд 1 ---\n{_player_log_line}"
+
+    # NPC attack result з log_line
+    _npc_log_line = (
+        "Goblin атакує TestPlayer (Scimitar): [8]→8 +4 = 12 проти КЗ 16 → ПРОМАХ"
+    )
+    _npc_attack_result = AttackResult(
+        attacker="Goblin", target="TestPlayer", weapon="Scimitar",
+        to_hit_total=12, natural_roll=8, target_ac=16,
+        hit=False, critical=False, damage_total=0,
+        damage_dice_str="1d6+2 slashing", damage_type="slashing",
+        log_line=_npc_log_line,
+    )
+
+    combat_upd = {
+        "combat_phase": "ONGOING",
+        "combat_ended": False,
+        "combat_round": 1,
+        "player_hp_current": 40,
+        "alive_npc_names": ["Goblin"],
+        "action_type": "combat",
+        "health_impact": "none",
+        "energy_impact": "none",
+        "gold_impact": "none",
+        "minutes_passed": 5,
+        "location_impact": "none",
+        "scene_impact": "none",
+        "inventory_new": [],
+        "inventory_lost": [],
+        "clocks_impact": {},
+        "skill_used": "None",
+        "outcome": "SUCCESS",
+    }
+
+    # npc_actions з attack_result
+    npc_actions_data = [
+        {
+            "npc_name": "Goblin",
+            "action_taken": "attack",
+            "attack_result": _npc_attack_result,
+            "log_lines": [_npc_log_line],
+        }
+    ]
+
+    _gm_json = {
+        "reasoning": "test", "npc_reasoning": "test",
+        "director_notes": ["Battle continues."],
+        "companion_npcs": [], "npc_updates": [],
+        "suggested_actions": [
+            {"button": "Attack", "intent": "Attack goblin"},
+            {"button": "Dodge", "intent": "Dodge"},
+            {"button": "Flee", "intent": "Run away"},
+            {"button": "Item", "intent": "Use item"},
+        ],
+    }
+
+    gm_resp = MagicMock()
+    gm_resp.text = json.dumps(_gm_json, ensure_ascii=False)
+    narrator_resp = MagicMock()
+    narrator_resp.text = "The battle rages. Swords clash in the moonlight."
+
+    execute_round_mock = AsyncMock(return_value=(combat_log_str, combat_upd, npc_actions_data))
+
+    patches = [
+        patch("core.engine.get_user_data", new=AsyncMock(return_value=(profile, 2))),
+        patch("core.engine.validate_action", new=AsyncMock(return_value=(True, ""))),
+        patch("core.engine.get_location_npcs", return_value=("", [], {})),
+        patch("core.engine.get_relevant_context", new=AsyncMock(return_value="")),
+        patch("core.engine.get_dead_npc_names", return_value=set()),
+        patch("core.engine.model_gm_logic.generate_content", return_value=gm_resp),
+        patch("core.engine.model_narrator.generate_content", return_value=narrator_resp),
+        patch("core.engine._run_bg_task", return_value=MagicMock()),
+        patch("core.engine.execute_combat_round", new=execute_round_mock),
+    ]
+
+    async def _run_engine():
+        from core.engine import process_game_turn
+        return await process_game_turn(chat_id=chat_id, user_input="Атакую!", narrator_queue=None)
+
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        result_text, suggested_actions = _run(_run_engine())
+
+    clear_combat_state(chat_id)
+
+    # === Ключові перевірки BUG #2 ===
+    assert "📊" in result_text, (
+        f"BUG #2: COMBAT result_text не містить '📊' dice summary. "
+        f"result_text (перші 300 символів): {result_text[:300]!r}"
+    )
+    assert "БІЙ Раунд" in result_text, (
+        f"BUG #2: result_text не містить 'БІЙ Раунд'. "
+        f"result_text: {result_text[:300]!r}"
+    )
+    # Перевіряємо що player attack log_line присутній
+    assert "ВЛУЧАННЯ" in result_text or "TestPlayer атакує" in result_text, (
+        f"BUG #2: Player attack log_line відсутній у result_text. "
+        f"result_text: {result_text[:400]!r}"
+    )
+    # Перевіряємо що NPC attack log_line присутній
+    assert "ПРОМАХ" in result_text or "Goblin атакує" in result_text, (
+        f"BUG #2: NPC attack log_line відсутній у result_text. "
+        f"result_text: {result_text[:400]!r}"
+    )
+
+
+# ===========================================================================
+# Тести Item 2 (Phase 11b): schema config передається до model_worker
+# ===========================================================================
+
+def test_parse_player_combat_intent_passes_schema_config():
+    """parse_player_combat_intent must call model_worker.generate_content
+    with a non-None config that has response_mime_type='application/json'."""
+    from core.dnd_combat_engine import parse_player_combat_intent
+
+    captured_configs = []
+    llm_data = {
+        "intent": "attack", "target_npc": "Goblin",
+        "weapon": "Longsword", "spell_or_ability": "",
+        "tactic": "normal", "move_to": "",
+        "verdict_text": "Attacks.", "reasoning": "Direct.",
+    }
+
+    def _mock_gen(prompt, max_retries=6, config=None):
+        captured_configs.append(config)
+        return _mock_llm_response(llm_data)
+
+    state = _make_combat_state()
+    profile = _minimal_player_profile()
+
+    with patch("core.dnd_combat_engine.model_worker.generate_content", side_effect=_mock_gen):
+        with patch("core.dnd_combat_engine.clean_and_parse_json", return_value=llm_data):
+            with patch("core.dnd_combat_engine.build_combat_round_prompt", return_value="MOCK"):
+                result = _run(parse_player_combat_intent("Атакую", profile, state))
+
+    assert result["intent"] == "attack"
+    assert len(captured_configs) >= 1, "generate_content must be called"
+    cfg = captured_configs[0]
+    assert cfg is not None, "config must not be None (schema mode)"
+    assert cfg.response_mime_type == "application/json", (
+        f"Expected 'application/json', got {cfg.response_mime_type!r}"
+    )
+    assert cfg.response_schema is not None, "response_schema must be set"
+
+
+def test_parse_player_combat_intent_schema_fallback_on_invalid_argument():
+    """When schema raises INVALID_ARGUMENT, parse_player_combat_intent falls back
+    to a free-JSON call and returns a valid intent dict."""
+    from core.dnd_combat_engine import parse_player_combat_intent
+
+    llm_data = {
+        "intent": "dodge", "target_npc": "",
+        "weapon": "", "spell_or_ability": "",
+        "tactic": "cautious", "move_to": "",
+        "verdict_text": "Dodge.", "reasoning": "Safe.",
+    }
+    call_count = []
+
+    def _mock_gen_fallback(prompt, max_retries=6, config=None):
+        call_count.append(config)
+        if config is not None:
+            raise Exception("400 INVALID_ARGUMENT: schema not supported")
+        return _mock_llm_response(llm_data)
+
+    state = _make_combat_state()
+    profile = _minimal_player_profile()
+
+    with patch("core.dnd_combat_engine.model_worker.generate_content", side_effect=_mock_gen_fallback):
+        with patch("core.dnd_combat_engine.clean_and_parse_json", return_value=llm_data):
+            with patch("core.dnd_combat_engine.build_combat_round_prompt", return_value="MOCK"):
+                result = _run(parse_player_combat_intent("Захищаюсь", profile, state))
+
+    assert result["intent"] == "dodge"
+    assert len(call_count) == 2, (
+        f"Must call twice (schema attempt + fallback). Got {len(call_count)}"
+    )
+    assert call_count[0] is not None, "First call must have config (schema)"
+    assert call_count[1] is None, "Second call must have config=None (fallback)"
+
+
+def test_execute_npc_actions_passes_schema_config():
+    """execute_npc_actions must call model_worker.generate_content
+    with a non-None config containing response_schema."""
+    from core.dnd_combat_engine import execute_npc_actions
+
+    captured_configs = []
+    llm_response = {
+        "actions": [
+            {"npc_name": "Goblin", "action": "attack", "target": "player",
+             "weapon": "Scimitar", "reason": "close range"},
+        ]
+    }
+
+    def _mock_gen(prompt, max_retries=6, config=None):
+        captured_configs.append(config)
+        return _mock_llm_response(llm_response)
+
+    state = _make_combat_state()
+
+    with patch("core.dnd_combat_engine.model_worker.generate_content", side_effect=_mock_gen):
+        with patch("core.dnd_combat_engine.clean_and_parse_json", return_value=llm_response):
+            with patch("core.dnd_combat_engine.build_npc_combat_action_prompt", return_value="MOCK"):
+                results = _run(execute_npc_actions(state, ["Goblin"]))
+
+    assert len(results) == 1
+    assert len(captured_configs) >= 1, "generate_content must be called"
+    cfg = captured_configs[0]
+    assert cfg is not None, "config must not be None (schema mode)"
+    assert cfg.response_mime_type == "application/json"
+    assert cfg.response_schema is not None

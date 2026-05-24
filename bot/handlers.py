@@ -291,7 +291,10 @@ async def start_game_with_character(bot: Bot, chat_id: int, char_name: str):
                 user_sessions.setdefault(chat_id, {})["action_intents"] = {}
                 user_sessions[chat_id]['history'].append({"role": "GM", "content": fallback_text})
 
-                # Фоновий LLM-intro — оновить повідомлення і закешує результат
+                # Фоновий LLM-intro — замінює placeholder на повне інтро з кнопками.
+                # Важливо: edit_text не підтримує ReplyKeyboardMarkup (лише InlineKeyboard),
+                # тому замість edit використовуємо delete + send_message — так само як
+                # send_safe_message з edit_message (bot/utils.py:25-29).
                 async def _bg_intro_task():
                     try:
                         intro_data = await get_narrative_intro(full_profile)
@@ -318,21 +321,29 @@ async def start_game_with_character(bot: Bot, chat_id: int, char_name: str):
                         if display_text:
                             # Кешуємо для майбутніх гравців з тією ж комбінацією
                             await set_cached_intro(profile_class, profile_heritage, profile_region, display_text)
-                            # Оновлюємо placeholder повним інтро
+                            markup = get_dynamic_menu(button_texts) if button_texts else get_main_menu()
+                            # Видаляємо placeholder, надсилаємо нове повідомлення з ReplyKeyboard
                             try:
-                                markup = get_dynamic_menu(button_texts) if button_texts else get_main_menu()
-                                await placeholder_msg.edit_text(display_text, reply_markup=markup, parse_mode=None)
+                                await placeholder_msg.delete()
+                            except Exception:
+                                pass
+                            try:
+                                await bot.send_message(chat_id, display_text, reply_markup=markup, parse_mode=None)
                                 if chat_id in user_sessions:
                                     user_sessions[chat_id]["action_intents"] = intents_map
                                     if user_sessions[chat_id].get('history'):
                                         user_sessions[chat_id]['history'][-1] = {"role": "GM", "content": display_text}
-                            except Exception as e_edit:
-                                print(f"[bg intro] edit_text failed: {e_edit}")
+                            except Exception as e_send:
+                                print(f"[bg intro] send_message failed: {e_send}")
                     except Exception as e:
                         print(f"[bg intro] Failed (using fallback): {e}")
-                        # Прибираємо спінер із fallback-повідомлення
+                        # При помилці LLM: видаляємо placeholder зі спінером, надсилаємо чистий fallback
                         try:
-                            await placeholder_msg.edit_text(fallback_text, reply_markup=get_main_menu(), parse_mode=None)
+                            await placeholder_msg.delete()
+                        except Exception:
+                            pass
+                        try:
+                            await bot.send_message(chat_id, fallback_text, reply_markup=get_main_menu(), parse_mode=None)
                         except Exception:
                             pass
 
@@ -343,6 +354,28 @@ async def start_game_with_character(bot: Bot, chat_id: int, char_name: str):
             await bot.send_message(chat_id, "❌ Помилка запису в базу даних.")
     else:
         await bot.send_message(chat_id, "❌ Помилка генерації профілю.")
+
+
+_SKILL_EMOJI: dict[str, str] = {
+    "Athletics": "🏋️",
+    "Acrobatics": "🤸",
+    "Sleight of Hand": "🃏",
+    "Stealth": "🥷",
+    "Arcana": "🔮",
+    "History": "📜",
+    "Investigation": "🔍",
+    "Nature": "🌿",
+    "Religion": "⛪",
+    "Animal Handling": "🐴",
+    "Insight": "💭",
+    "Medicine": "💊",
+    "Perception": "👁",
+    "Survival": "🏕️",
+    "Deception": "🎭",
+    "Intimidation": "😠",
+    "Performance": "🎤",
+    "Persuasion": "🗣️",
+}
 
 
 def _build_dnd_profile_text(profile: dict, chat_id: int) -> str:
@@ -413,16 +446,23 @@ def _build_dnd_profile_text(profile: dict, chat_id: int) -> str:
     lines.append(f"❤️ *HP:* {hp_current}/{hp_max}  |  🛡 *AC:* {ac}")
     lines.append(f"⚔️ *Proficiency:* +{prof_bonus}  |  💰 *Gold:* {gold} 🪙")
     lines.append("")
-    lines.append("💪 *Здібності:*")
+    # D) Tooltip-explainer перед abilities
     lines.append(
-        f"  STR {_score('STR')} ({_mod_str('STR')})    "
-        f"DEX {_score('DEX')} ({_mod_str('DEX')})    "
-        f"CON {_score('CON')} ({_mod_str('CON')})"
+        "💪 сила  🏃 спритність  ❤️ витривалість  "
+        "🧠 знання  👁 інтуїція  💬 переконання"
+    )
+    lines.append("")
+    # B) Abilities з emoji
+    lines.append("*Здібності:*")
+    lines.append(
+        f"  💪 STR {_score('STR')} ({_mod_str('STR')})   "
+        f"🏃 DEX {_score('DEX')} ({_mod_str('DEX')})   "
+        f"❤️ CON {_score('CON')} ({_mod_str('CON')})"
     )
     lines.append(
-        f"  INT {_score('INT')} ({_mod_str('INT')})    "
-        f"WIS {_score('WIS')} ({_mod_str('WIS')})    "
-        f"CHA {_score('CHA')} ({_mod_str('CHA')})"
+        f"  🧠 INT {_score('INT')} ({_mod_str('INT')})   "
+        f"👁 WIS {_score('WIS')} ({_mod_str('WIS')})   "
+        f"💬 CHA {_score('CHA')} ({_mod_str('CHA')})"
     )
 
     # saves
@@ -430,17 +470,19 @@ def _build_dnd_profile_text(profile: dict, chat_id: int) -> str:
         lines.append("")
         lines.append(f"🎯 *Saves proficient:* {', '.join(saves_proficient)}")
 
-    # skill profs (only proficient/expertise skills)
+    # C) Skill profs with emoji (only proficient/expertise skills)
     displayed_skills = []
     for sk_name in SKILLS:
         if sk_name in skill_profs or sk_name in skill_expertise:
             mod = skill_modifier(profile, sk_name)
             suffix = " (exp)" if sk_name in skill_expertise else ""
-            displayed_skills.append(f"{sk_name} {mod:+d}{suffix}")
+            icon = _SKILL_EMOJI.get(sk_name, "•")
+            displayed_skills.append(f"{icon} {sk_name} {mod:+d}{suffix}")
     if displayed_skills:
         lines.append("")
         lines.append("🎓 *Skill profs:*")
-        lines.append("  " + ", ".join(displayed_skills))
+        for sk_entry in displayed_skills:
+            lines.append(f"  {sk_entry}")
 
     # features (max 5)
     if features_raw:
@@ -461,10 +503,8 @@ def _build_dnd_profile_text(profile: dict, chat_id: int) -> str:
             lines.append(f"  • {fname} — {desc_short}")
             shown += 1
 
-    # equipment
+    # A) Equipment — inventory without truncation; send_safe_message handles split
     inv_str = str(inv_raw).strip() if inv_raw else "Нічого"
-    if len(inv_str) > 80:
-        inv_str = inv_str[:77] + "..."
     lines.append("")
     lines.append("⚔️ *Спорядження:*")
     lines.append(f"  Зброя: {weapon}")

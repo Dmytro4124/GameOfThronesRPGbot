@@ -59,11 +59,33 @@ _INTRO_DATA_SUCCESS = {
 
 
 def _build_bot_mock():
-    """Будує мок Bot з send_message, що повертає Message-мок (для edit_text)."""
+    """Будує мок Bot з send_message, що повертає Message-мок (для delete).
+
+    Примітка: після виправлення BUG#1 _bg_intro_task більше не викликає
+    placeholder_msg.edit_text — натомість вона викликає placeholder_msg.delete()
+    і bot.send_message() з повноцінним reply_markup.
+
+    Порядок send_message в cache MISS flow:
+      1. stats_msg ("✅ Персонажа створено!")
+      2. placeholder fallback (саме цей об'єкт ми хочемо відслідкувати — call #2)
+      3. "⚔️ Ваш шлях починається..."
+      4. (background) повне інтро після LLM
+    """
     bot = MagicMock()
     placeholder_message = MagicMock()
-    placeholder_message.edit_text = AsyncMock()
-    bot.send_message = AsyncMock(return_value=placeholder_message)
+    placeholder_message.edit_text = AsyncMock()  # більше не використовується; ізоляція
+    placeholder_message.delete = AsyncMock()
+    _secondary_msg = MagicMock()
+    _call_count = {"n": 0}
+
+    async def _send_message_side_effect(*args, **kwargs):
+        _call_count["n"] += 1
+        # Виклик #2 — саме fallback placeholder (після stats_msg)
+        if _call_count["n"] == 2:
+            return placeholder_message
+        return _secondary_msg
+
+    bot.send_message = AsyncMock(side_effect=_send_message_side_effect)
     bot.send_chat_action = AsyncMock()
     return bot, placeholder_message
 
@@ -196,6 +218,17 @@ def test_cache_miss_llm_success_fills_cache():
         assert _INTRO_DATA_SUCCESS["narrative_text"] in saved_text, (
             f"Кешований текст повинен містити narrative_text. Збережено: {repr(saved_text)}"
         )
+        # Фіксуємо BUG#1: placeholder видаляється, а не редагується
+        placeholder_msg.delete.assert_called()
+        # Перевіряємо що bot.send_message викликався з reply_markup (для відображення кнопок)
+        send_calls = bot.send_message.call_args_list
+        bg_calls_with_markup = [
+            c for c in send_calls
+            if c.kwargs.get("reply_markup") is not None
+        ]
+        assert bg_calls_with_markup, (
+            "bot.send_message повинна викликатись з reply_markup для відображення suggested_actions"
+        )
 
     asyncio.run(_run())
     from core.engine import user_sessions
@@ -238,6 +271,17 @@ def test_llm_failure_fallback_stays_no_exception():
         set_cached_mock.assert_not_called()
         # LLM викликалась (і впала)
         intro_mock.assert_called_once()
+        # Фіксуємо BUG#1: при fallback placeholder теж видаляється
+        placeholder_msg.delete.assert_called()
+        # Fallback надсилається через send_message з reply_markup
+        send_calls = bot.send_message.call_args_list
+        fallback_calls_with_markup = [
+            c for c in send_calls
+            if c.kwargs.get("reply_markup") is not None
+        ]
+        assert fallback_calls_with_markup, (
+            "Після помилки LLM fallback-текст повинен надсилатись з reply_markup"
+        )
 
     asyncio.run(_run())
     from core.engine import user_sessions

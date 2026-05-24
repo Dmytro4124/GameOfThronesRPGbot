@@ -5,6 +5,7 @@ We verify structural content (keywords, keys, schema elements) without invoking 
 No real Google Sheets or Gemini calls are made.
 """
 
+import json
 import pytest
 
 # Import Phase 4+ builders
@@ -16,6 +17,15 @@ from core.prompts import (
     build_gm_logic_prompt,
     build_narrator_prompt,
     build_initial_stats_prompt,
+    # Schema builders (Item 2)
+    build_validate_action_schema,
+    build_normal_resolve_schema,
+    build_combat_round_schema,
+    build_npc_combat_action_schema,
+    build_npc_regen_schema,
+    build_gm_logic_schema,
+    build_training_request_schema,
+    build_initial_stats_schema,
 )
 
 
@@ -445,3 +455,172 @@ def test_initial_stats_contains_required_output_keys(required_key):
         scenes_block_str="",
     )
     assert required_key in result, f"Expected output schema key '{required_key}' in initial stats prompt."
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. JSON Schema builders (Item 2) — gtypes.Schema validation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_validate_action_schema_returns_schema_object():
+    schema = build_validate_action_schema()
+    from google.genai import types as gtypes
+    assert isinstance(schema, gtypes.Schema)
+
+
+def test_validate_action_schema_required_keys():
+    schema = build_validate_action_schema()
+    assert set(schema.required) == {"is_valid", "refusal_reason"}
+
+
+def test_normal_resolve_schema_returns_schema_object():
+    schema = build_normal_resolve_schema()
+    from google.genai import types as gtypes
+    assert isinstance(schema, gtypes.Schema)
+
+
+def test_normal_resolve_schema_required_keys():
+    schema = build_normal_resolve_schema()
+    required = set(schema.required)
+    # All contract keys from §5.3 must be in required
+    for key in ["skill_check_reasoning", "difficulty_reasoning", "gold_reasoning",
+                "action_type", "ability_used", "skill_used", "difficulty",
+                "advantage_reason", "disadvantage_reason", "combat_imminent",
+                "verdict_text", "xp_award", "reputation_delta", "reputation_target_npc", "updates"]:
+        assert key in required, f"Expected '{key}' in normal_resolve_schema required"
+
+
+def test_normal_resolve_schema_ability_used_enum():
+    schema = build_normal_resolve_schema()
+    ab_schema = schema.properties["ability_used"]
+    assert set(ab_schema.enum) == {"STR", "DEX", "CON", "INT", "WIS", "CHA", "None"}
+
+
+def test_normal_resolve_schema_action_type_enum():
+    schema = build_normal_resolve_schema()
+    at_schema = schema.properties["action_type"]
+    assert set(at_schema.enum) == {"standard", "training"}
+
+
+def test_normal_resolve_schema_updates_required_fields():
+    schema = build_normal_resolve_schema()
+    updates = schema.properties["updates"]
+    required = set(updates.required)
+    for key in ["minutes_passed", "location_impact", "scene_impact",
+                "hp_damage_dice", "hp_heal_dice", "gold_impact",
+                "inventory_new", "inventory_lost", "clocks_impact",
+                "condition_apply", "condition_remove"]:
+        assert key in required, f"Expected '{key}' in updates.required"
+
+
+def test_combat_round_schema_returns_schema_object():
+    schema = build_combat_round_schema()
+    from google.genai import types as gtypes
+    assert isinstance(schema, gtypes.Schema)
+
+
+def test_combat_round_schema_required_keys():
+    schema = build_combat_round_schema()
+    required = set(schema.required)
+    for key in ["intent", "target_npc", "weapon", "tactic", "verdict_text", "reasoning"]:
+        assert key in required, f"Expected '{key}' in combat_round_schema required"
+
+
+def test_combat_round_schema_intent_enum():
+    schema = build_combat_round_schema()
+    intent_schema = schema.properties["intent"]
+    assert set(intent_schema.enum) == {"attack", "cast", "move", "dodge", "flee", "item", "help", "grapple", "shove"}
+
+
+def test_npc_combat_action_schema_returns_schema_object():
+    schema = build_npc_combat_action_schema()
+    from google.genai import types as gtypes
+    assert isinstance(schema, gtypes.Schema)
+    assert "actions" in schema.required
+
+
+def test_npc_regen_schema_returns_schema_object():
+    schema = build_npc_regen_schema()
+    from google.genai import types as gtypes
+    assert isinstance(schema, gtypes.Schema)
+
+
+def test_npc_regen_schema_required_keys():
+    schema = build_npc_regen_schema()
+    required = set(schema.required)
+    for key in ["cr", "ability_scores", "hp_max", "ac", "attacks", "reasoning"]:
+        assert key in required, f"Expected '{key}' in npc_regen_schema required"
+
+
+def test_npc_regen_schema_cr_enum():
+    schema = build_npc_regen_schema()
+    cr = schema.properties["cr"]
+    assert "0" in cr.enum and "10" in cr.enum and "1/4" in cr.enum
+
+
+def test_gm_logic_schema_normal_mode():
+    schema = build_gm_logic_schema(mode="NORMAL")
+    from google.genai import types as gtypes
+    assert isinstance(schema, gtypes.Schema)
+    required = set(schema.required)
+    for key in ["reasoning", "npc_reasoning", "director_notes",
+                "companion_npcs", "npc_updates", "suggested_actions",
+                "mode_transition", "frozen_fields_change_reason"]:
+        assert key in required, f"Expected '{key}' in gm_logic_schema required"
+
+
+def test_gm_logic_schema_combat_mode_identical_structure():
+    schema_n = build_gm_logic_schema(mode="NORMAL")
+    schema_c = build_gm_logic_schema(mode="COMBAT")
+    # Both modes share the same JSON contract
+    assert set(schema_n.required) == set(schema_c.required)
+
+
+def test_training_request_schema_returns_schema_object():
+    schema = build_training_request_schema()
+    from google.genai import types as gtypes
+    assert isinstance(schema, gtypes.Schema)
+    required = set(schema.required)
+    for key in ["is_training", "is_possible", "skill", "method", "reason_if_failed"]:
+        assert key in required
+
+
+def test_initial_stats_schema_returns_schema_object():
+    schema = build_initial_stats_schema()
+    from google.genai import types as gtypes
+    assert isinstance(schema, gtypes.Schema)
+
+
+def test_initial_stats_schema_required_keys():
+    schema = build_initial_stats_schema()
+    required = set(schema.required)
+    for key in ["thought_process", "suggested_class", "suggested_heritage",
+                "ability_scores", "background", "personality_traits", "bond", "flaw"]:
+        assert key in required, f"Expected '{key}' in initial_stats_schema required"
+
+
+def test_initial_stats_schema_class_enum():
+    schema = build_initial_stats_schema()
+    cls = schema.properties["suggested_class"]
+    assert "Knight" in cls.enum and "Wildling" in cls.enum and len(cls.enum) == 9
+
+
+def test_initial_stats_schema_heritage_enum():
+    schema = build_initial_stats_schema()
+    h = schema.properties["suggested_heritage"]
+    assert "Ironborn" in h.enum and len(h.enum) == 6
+
+
+@pytest.mark.parametrize("schema_fn,name", [
+    (build_validate_action_schema, "validate_action"),
+    (build_normal_resolve_schema, "normal_resolve"),
+    (build_combat_round_schema, "combat_round"),
+    (build_npc_combat_action_schema, "npc_combat_action"),
+    (build_npc_regen_schema, "npc_regen"),
+    (build_gm_logic_schema, "gm_logic"),
+    (build_training_request_schema, "training_request"),
+    (build_initial_stats_schema, "initial_stats"),
+])
+def test_schema_has_properties(schema_fn, name):
+    """Every schema must have at least one property defined."""
+    schema = schema_fn()
+    assert schema.properties, f"Schema '{name}' has no properties defined"

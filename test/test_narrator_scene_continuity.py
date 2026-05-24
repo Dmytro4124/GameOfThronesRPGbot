@@ -385,7 +385,7 @@ def _build_base_patches(narrator_mock: MagicMock, profile_override: dict = None)
             return_value=_make_gm_response(),
         ),
         patch("core.engine.model_narrator.generate_content", narrator_mock),
-        patch("core.engine.asyncio.create_task", return_value=MagicMock()),
+        patch("core.engine._run_bg_task", return_value=MagicMock()),
     ]
 
 
@@ -461,7 +461,7 @@ def test_engine_new_scene_passes_scene_continuity_new_to_narrator():
         patch("core.engine.get_dead_npc_names", return_value=set()),
         patch("core.engine.model_gm_logic.generate_content", return_value=_make_gm_response()),
         patch("core.engine.model_narrator.generate_content", narrator_mock),
-        patch("core.engine.asyncio.create_task", return_value=MagicMock()),
+        patch("core.engine._run_bg_task", return_value=MagicMock()),
     ]
 
     with ExitStack() as stack:
@@ -550,7 +550,7 @@ def test_engine_same_scene_passes_scene_continuity_continuing_to_narrator():
         patch("core.engine.get_dead_npc_names", return_value=set()),
         patch("core.engine.model_gm_logic.generate_content", return_value=_make_gm_response()),
         patch("core.engine.model_narrator.generate_content", narrator_mock),
-        patch("core.engine.asyncio.create_task", return_value=MagicMock()),
+        patch("core.engine._run_bg_task", return_value=MagicMock()),
     ]
 
     with ExitStack() as stack:

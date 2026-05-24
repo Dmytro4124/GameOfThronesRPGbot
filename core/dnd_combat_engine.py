@@ -11,7 +11,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-from core.ai_client import model_worker, clean_and_parse_json
+from core.ai_client import model_worker, clean_and_parse_json, build_strict_config
 from core.dnd_combat import (
     CombatState,
     initiate_combat,
@@ -37,6 +37,8 @@ from core.dnd_conditions import has_condition
 from core.prompts import (
     build_combat_round_prompt,
     build_npc_combat_action_prompt,
+    build_combat_round_schema,
+    build_npc_combat_action_schema,
 )
 
 # ---------------------------------------------------------------------------
@@ -87,10 +89,17 @@ async def parse_player_combat_intent(
 
     result: Optional[dict] = None
     try:
+        _combat_round_cfg = build_strict_config(model_worker, build_combat_round_schema())
         def _call():
-            return model_worker.generate_content(
-                prompt + "\n\nIMPORTANT: Reply ONLY with valid JSON."
-            )
+            try:
+                return model_worker.generate_content(prompt, config=_combat_round_cfg)
+            except Exception as _schema_err:
+                if "INVALID_ARGUMENT" in str(_schema_err) or "schema" in str(_schema_err).lower():
+                    logger.warning(f"[COMBAT_ENGINE] Schema rejected for combat intent, falling back: {_schema_err}")
+                    return model_worker.generate_content(
+                        prompt + "\n\nIMPORTANT: Reply ONLY with valid JSON."
+                    )
+                raise
 
         resp = await asyncio.to_thread(_call)
         result = clean_and_parse_json(resp.text)
@@ -192,10 +201,17 @@ async def execute_npc_actions(
 
     llm_actions: list[dict] = []
     try:
+        _npc_action_cfg = build_strict_config(model_worker, build_npc_combat_action_schema())
         def _call():
-            return model_worker.generate_content(
-                prompt + "\n\nIMPORTANT: Reply ONLY with valid JSON."
-            )
+            try:
+                return model_worker.generate_content(prompt, config=_npc_action_cfg)
+            except Exception as _schema_err:
+                if "INVALID_ARGUMENT" in str(_schema_err) or "schema" in str(_schema_err).lower():
+                    logger.warning(f"[COMBAT_ENGINE] Schema rejected for NPC actions, falling back: {_schema_err}")
+                    return model_worker.generate_content(
+                        prompt + "\n\nIMPORTANT: Reply ONLY with valid JSON."
+                    )
+                raise
 
         resp = await asyncio.to_thread(_call)
         parsed = clean_and_parse_json(resp.text)

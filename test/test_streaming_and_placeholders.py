@@ -178,7 +178,7 @@ def _build_patches(
             return_value=_make_gm_response(),
         ),
         # no-op asyncio.create_task → не запускати background_task з реальним Sheets
-        patch("core.engine.asyncio.create_task", return_value=MagicMock()),
+        patch("core.engine._run_bg_task", return_value=MagicMock()),
     ]
     if narrator_stream_mock is not None:
         patches.append(

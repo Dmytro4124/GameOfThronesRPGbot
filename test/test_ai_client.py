@@ -6,6 +6,7 @@ Unit-тести для AIWrapper.generate_content з circuit breaker та retry-
   - core.ai_client.random.random                    (для детермінованого jitter)
 """
 import time
+import asyncio
 import pytest
 from unittest.mock import patch, MagicMock, call
 
@@ -17,6 +18,8 @@ from core.ai_client import (
     CIRCUIT_BREAKER_THRESHOLD,
     CIRCUIT_BREAKER_COOLDOWN,
     get_circuit_breaker_status,
+    _normalize_prompt,
+    hedged_generate_content_async,
 )
 
 
@@ -303,3 +306,201 @@ def test_include_thoughts_returns_ai_response():
     assert isinstance(result, _AIResponse)
     assert result.text == "content text"
     mock_split.assert_called_once_with(fake_raw)
+
+
+# ─── Item 7: Unicode normalize ────────────────────────────────────────────────
+
+def test_normalize_prompt_nfc():
+    """Decomposed and composed forms of the same character produce identical NFC output."""
+    composed = "é"              # é as single codepoint (NFC)
+    decomposed = "é"          # e + combining acute accent (NFD)
+    assert composed != decomposed, "Pre-condition: inputs must differ"
+    assert _normalize_prompt(composed) == _normalize_prompt(decomposed)
+
+
+def test_normalize_handles_emoji_zwj():
+    """Emoji with ZWJ sequences normalise without raising an exception."""
+    zwj_emoji = "\U0001F468‍\U0001F469‍\U0001F467"  # family ZWJ sequence
+    result = _normalize_prompt(zwj_emoji)
+    assert isinstance(result, str)
+
+
+def test_normalize_handles_non_string():
+    """Non-string values (int, None) are returned as-is without crashing."""
+    assert _normalize_prompt(42) == 42
+    assert _normalize_prompt(None) is None
+
+
+# ─── Item 3: Hedging ─────────────────────────────────────────────────────────
+
+def _make_fake_resp(text="ok"):
+    resp = MagicMock()
+    resp.text = text
+    return resp
+
+
+def test_hedged_first_success():
+    """When both hedges succeed, one of the results is returned."""
+    _reset_cb()
+    wrapper = _make_wrapper()
+    fake = _make_fake_resp("hedged-ok")
+
+    # generate_content is synchronous; asyncio.to_thread will call it in a thread.
+    # Patching generate_content directly and letting real asyncio.to_thread work.
+    with patch("core.ai_client.client.models.generate_content", return_value=fake), \
+         patch("core.ai_client.time.sleep"):
+        result = asyncio.run(
+            hedged_generate_content_async(wrapper, "prompt", hedge_count=2, max_retries=1)
+        )
+
+    assert result is fake
+    assert result.text == "hedged-ok"
+
+
+def test_hedged_first_fails_second_succeeds():
+    """When both tasks finish together (same wait cycle) and one raised, the
+    successful result from the other task is returned.
+
+    Both coroutines complete before asyncio.wait returns (no 'pending'
+    tasks), so the hedge loop inspects all 'done' tasks and picks the
+    first non-exception result.
+    """
+    _reset_cb()
+    wrapper = _make_wrapper()
+    fake = _make_fake_resp("second-ok")
+
+    async def _run():
+        # Both complete instantly — asyncio.wait will return both in 'done'.
+        async def _fail():
+            raise Exception("500 first fails")
+
+        async def _succeed():
+            return fake
+
+        # Deterministic: task 0 → fail, task 1 → succeed
+        coro_queue = [_fail(), _succeed()]
+        coro_idx = {"n": 0}
+
+        async def _mock_to_thread(fn, *args, **kwargs):
+            c = coro_queue[coro_idx["n"]]
+            coro_idx["n"] += 1
+            return await c
+
+        with patch("core.ai_client.asyncio.to_thread", side_effect=_mock_to_thread):
+            return await hedged_generate_content_async(
+                wrapper, "prompt", hedge_count=2, max_retries=2
+            )
+
+    result = asyncio.run(_run())
+    assert result is fake
+
+
+def test_hedged_both_fail():
+    """When all hedges raise, the function propagates an exception."""
+    _reset_cb()
+    wrapper = _make_wrapper()
+
+    with patch("core.ai_client.client.models.generate_content",
+               side_effect=Exception("500 INTERNAL both fail")), \
+         patch("core.ai_client.time.sleep"):
+        with pytest.raises(Exception):
+            asyncio.run(
+                hedged_generate_content_async(wrapper, "prompt", hedge_count=2, max_retries=1)
+            )
+
+
+def test_hedged_cancels_pending():
+    """Once first task succeeds, pending tasks are cancelled before returning."""
+    _reset_cb()
+    wrapper = _make_wrapper()
+    fake = _make_fake_resp("fast-ok")
+
+    fast_done = False
+    slow_cancelled = False
+
+    async def _run():
+        nonlocal fast_done, slow_cancelled
+
+        async def _fast_task():
+            nonlocal fast_done
+            fast_done = True
+            return fake
+
+        async def _slow_task():
+            nonlocal slow_cancelled
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                slow_cancelled = True
+                raise
+            return _make_fake_resp("slow")
+
+        coro_queue = [_fast_task(), _slow_task()]
+        coro_idx = {"n": 0}
+
+        async def _mock_to_thread(fn, *args, **kwargs):
+            c = coro_queue[coro_idx["n"]]
+            coro_idx["n"] += 1
+            return await c
+
+        with patch("core.ai_client.asyncio.to_thread", side_effect=_mock_to_thread):
+            result = await hedged_generate_content_async(
+                wrapper, "prompt", hedge_count=2, max_retries=2
+            )
+        await asyncio.sleep(0)  # let CancelledError propagate
+        return result
+
+    result = asyncio.run(_run())
+    assert result is fake
+    assert fast_done is True
+    assert slow_cancelled is True
+
+
+# ─── Item 4: Prompt caching ───────────────────────────────────────────────────
+
+def test_cache_skipped_when_not_supported():
+    """When client.caches.create raises, _ensure_cache returns None and system_instruction is used inline."""
+    long_instruction = "x" * 1001  # > 1000 chars threshold
+    wrapper = _make_wrapper(system_instruction=long_instruction)
+
+    with patch("core.ai_client.client.caches.create", side_effect=Exception("caching not supported")):
+        cache_name = wrapper._ensure_cache()
+
+    assert cache_name is None
+    assert wrapper._cached_content_name is None
+    assert wrapper._cache_attempted is True
+
+    # _build_config must fall back to inline system_instruction
+    with patch("core.ai_client.client.caches.create", side_effect=Exception("not supported")):
+        wrapper2 = _make_wrapper(system_instruction=long_instruction)
+        cfg = wrapper2._build_config()
+
+    # system_instruction should be present in config (cache path failed)
+    assert cfg.system_instruction == long_instruction
+
+
+def test_cache_skipped_for_short_instruction():
+    """system_instruction shorter than 1000 chars is never sent to caches.create."""
+    wrapper = _make_wrapper(system_instruction="short")
+
+    with patch("core.ai_client.client.caches.create") as mock_create:
+        cache_name = wrapper._ensure_cache()
+
+    mock_create.assert_not_called()
+    assert cache_name is None
+
+
+def test_cache_idempotent():
+    """_ensure_cache is idempotent: caches.create called only once even if invoked multiple times."""
+    long_instruction = "y" * 1001
+    wrapper = _make_wrapper(system_instruction=long_instruction)
+    fake_cache = MagicMock()
+    fake_cache.name = "cachedContents/abc123"
+
+    with patch("core.ai_client.client.caches.create", return_value=fake_cache) as mock_create:
+        name1 = wrapper._ensure_cache()
+        name2 = wrapper._ensure_cache()
+        name3 = wrapper._ensure_cache()
+
+    mock_create.assert_called_once()
+    assert name1 == name2 == name3 == "cachedContents/abc123"

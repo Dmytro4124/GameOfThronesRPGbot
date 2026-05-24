@@ -987,7 +987,7 @@ def _make_process_patches(profile_overrides: dict = None, combat_imminent: bool 
         patch("core.engine.get_dead_npc_names", return_value=set()),
         patch("core.engine.model_gm_logic.generate_content", return_value=gm_resp),
         patch("core.engine.model_narrator.generate_content", return_value=narrator_resp),
-        patch("core.engine.asyncio.create_task", return_value=MagicMock()),
+        patch("core.engine._run_bg_task", return_value=MagicMock()),
     ]
 
 
@@ -1094,3 +1094,171 @@ class TestProcessGameTurnIntegration:
         # Result text should still be a valid narrative (not an error)
         assert isinstance(result_text, str) and len(result_text) > 0
         assert isinstance(result_actions, list)
+
+
+# ===========================================================================
+# Tests: Item 2 — response_schema config passed to model_worker (Phase 11b)
+# ===========================================================================
+
+class TestResolveNormalActionPassesSchema:
+    """Verify that resolve_normal_action passes a GenerateContentConfig with
+    response_schema to model_worker.generate_content (Item 2, Phase 11b)."""
+
+    def _capture_config_and_return(self, worker_data: dict):
+        """Helper: returns a generate_content mock that captures config kwarg."""
+        captured = []
+
+        def _mock_gen(prompt, max_retries=6, config=None):
+            captured.append(config)
+            m = MagicMock()
+            import json as _json
+            m.text = _json.dumps(worker_data, ensure_ascii=False)
+            return m
+
+        return _mock_gen, captured
+
+    def test_schema_config_is_passed_not_none(self):
+        """resolve_normal_action must pass a non-None config with response_mime_type='application/json'."""
+        data = _minimal_worker_data()
+        mock_gen, captured = self._capture_config_and_return(data)
+
+        prompt_patch = patch("core.dnd_engine.build_normal_resolve_prompt", return_value="MOCK")
+        parse_patch = patch("core.dnd_engine.clean_and_parse_json", return_value=data)
+
+        async def _run():
+            from core.dnd_engine import resolve_normal_action
+            return await resolve_normal_action("Do something", _dnd_profile())
+
+        with prompt_patch, parse_patch:
+            with patch("core.dnd_engine.model_worker.generate_content", side_effect=mock_gen):
+                _run_async(_run())
+
+        assert len(captured) >= 1, "generate_content must be called at least once"
+        cfg = captured[0]
+        assert cfg is not None, "config must not be None"
+        assert cfg.response_mime_type == "application/json", (
+            f"response_mime_type must be 'application/json', got {cfg.response_mime_type!r}"
+        )
+        assert cfg.response_schema is not None, "response_schema must not be None"
+
+    def test_schema_config_fallback_on_invalid_argument(self):
+        """If generate_content raises INVALID_ARGUMENT (schema rejected),
+        resolve_normal_action must fall back to a free-JSON call and succeed."""
+        data = _minimal_worker_data()
+        call_count = []
+
+        def _mock_gen_fallback(prompt, max_retries=6, config=None):
+            call_count.append(config)
+            if config is not None:
+                raise Exception("400 INVALID_ARGUMENT: schema not supported")
+            m = MagicMock()
+            import json as _json
+            m.text = _json.dumps(data, ensure_ascii=False)
+            return m
+
+        prompt_patch = patch("core.dnd_engine.build_normal_resolve_prompt", return_value="MOCK")
+        parse_patch = patch("core.dnd_engine.clean_and_parse_json", return_value=data)
+
+        async def _run():
+            from core.dnd_engine import resolve_normal_action
+            return await resolve_normal_action("Do something", _dnd_profile())
+
+        with prompt_patch, parse_patch:
+            with patch("core.dnd_engine.model_worker.generate_content", side_effect=_mock_gen_fallback):
+                verdict, updates = _run_async(_run())
+
+        # First call with schema (raises), second call without schema (succeeds)
+        assert len(call_count) == 2, (
+            f"Must call generate_content twice (schema then fallback). Got {len(call_count)}"
+        )
+        assert call_count[0] is not None, "First call must have config (schema attempt)"
+        assert call_count[1] is None, "Second call (fallback) must have config=None"
+        assert updates["outcome"] in {"SUCCESS", "FAILURE", "CRITICAL SUCCESS", "CRITICAL FAILURE"}
+
+    def test_build_strict_config_inherits_temperature(self):
+        """build_strict_config must use model_wrapper.temperature if no override given."""
+        from core.ai_client import build_strict_config, model_worker
+        from core.prompts import build_normal_resolve_schema
+        cfg = build_strict_config(model_worker, build_normal_resolve_schema())
+        assert cfg.temperature == model_worker.temperature, (
+            f"temperature must match model_worker.temperature={model_worker.temperature}, "
+            f"got {cfg.temperature}"
+        )
+
+    def test_build_strict_config_temperature_override(self):
+        """build_strict_config must use the provided temperature override."""
+        from core.ai_client import build_strict_config, model_worker
+        from core.prompts import build_normal_resolve_schema
+        cfg = build_strict_config(model_worker, build_normal_resolve_schema(), temperature=0.42)
+        assert cfg.temperature == 0.42, (
+            f"temperature override must be 0.42, got {cfg.temperature}"
+        )
+
+    def test_build_strict_config_has_schema_and_mime_type(self):
+        """build_strict_config always sets response_mime_type and response_schema."""
+        from core.ai_client import build_strict_config, model_worker
+        from core.prompts import build_validate_action_schema
+        schema = build_validate_action_schema()
+        cfg = build_strict_config(model_worker, schema)
+        assert cfg.response_mime_type == "application/json"
+        assert cfg.response_schema is schema
+
+
+class TestValidateActionPassesSchema:
+    """Verify that validate_action (Censor) passes schema config to model_worker."""
+
+    def test_validate_action_config_not_none(self):
+        """validate_action must call model_worker.generate_content with a non-None config."""
+        captured = []
+        censor_result = {"is_valid": True, "refusal_reason": ""}
+
+        def _mock_gen(prompt, max_retries=6, config=None):
+            captured.append(config)
+            m = MagicMock()
+            import json as _json
+            m.text = _json.dumps(censor_result)
+            return m
+
+        parse_patch = patch("core.mechanics.clean_and_parse_json", return_value=censor_result)
+
+        async def _run():
+            from core.mechanics import validate_action
+            return await validate_action("Attack the guard", _dnd_profile())
+
+        with parse_patch:
+            with patch("core.mechanics.model_worker.generate_content", side_effect=_mock_gen):
+                valid, reason = _run_async(_run())
+
+        assert valid is True
+        assert len(captured) >= 1
+        assert captured[0] is not None, "validate_action config must not be None"
+        assert captured[0].response_mime_type == "application/json"
+
+    def test_validate_action_schema_fallback(self):
+        """When schema raises INVALID_ARGUMENT, validate_action falls back gracefully."""
+        censor_result = {"is_valid": True, "refusal_reason": ""}
+        call_count = []
+
+        def _mock_gen_fallback(prompt, max_retries=6, config=None):
+            call_count.append(config)
+            if config is not None:
+                raise Exception("INVALID_ARGUMENT: unsupported schema")
+            m = MagicMock()
+            import json as _json
+            m.text = _json.dumps(censor_result)
+            return m
+
+        parse_patch = patch("core.mechanics.clean_and_parse_json", return_value=censor_result)
+
+        async def _run():
+            from core.mechanics import validate_action
+            return await validate_action("Attack the guard", _dnd_profile())
+
+        with parse_patch:
+            with patch("core.mechanics.model_worker.generate_content", side_effect=_mock_gen_fallback):
+                valid, reason = _run_async(_run())
+
+        assert valid is True
+        assert len(call_count) == 2, (
+            f"Must call twice (schema attempt + fallback). Got {len(call_count)}"
+        )

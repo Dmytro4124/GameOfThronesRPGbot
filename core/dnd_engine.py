@@ -13,7 +13,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from core.ai_client import model_worker, clean_and_parse_json
+from core.ai_client import model_worker, clean_and_parse_json, build_strict_config
 from core.dnd_core import (
     roll_d20, ability_modifier, proficiency_bonus, clamp_dc,
     LEGAL_DCS, skill_check, ability_check, CheckResult,
@@ -24,7 +24,7 @@ from core.dnd_progression import award_xp, level_up, apply_asi, get_level_for_xp
 from core.dnd_conditions import (
     apply_condition, remove_condition, has_condition, condition_modifies,
 )
-from core.prompts import build_normal_resolve_prompt
+from core.prompts import build_normal_resolve_prompt, build_normal_resolve_schema
 from core.world_constants import (
     get_region_for_location, get_locations_for_region,
     LOCATION_TO_REGION, VALID_REGIONS_ORDERED,
@@ -139,8 +139,17 @@ async def resolve_normal_action(
 
     # --- 2. Call LLM via asyncio.to_thread (§5.1 async invariant) ---
     try:
+        _worker_cfg = build_strict_config(model_worker, build_normal_resolve_schema())
         def _sync_gen():
-            return model_worker.generate_content(prompt + "\n\nIMPORTANT: Reply ONLY with valid JSON.")
+            try:
+                return model_worker.generate_content(prompt, config=_worker_cfg)
+            except Exception as _schema_err:
+                if "INVALID_ARGUMENT" in str(_schema_err) or "schema" in str(_schema_err).lower():
+                    print(f"⚠️ [DND_ENGINE] Schema rejected, falling back to free JSON: {_schema_err}")
+                    return model_worker.generate_content(
+                        prompt + "\n\nIMPORTANT: Reply ONLY with valid JSON."
+                    )
+                raise
 
         resp = await asyncio.to_thread(_sync_gen)
         data = clean_and_parse_json(resp.text)

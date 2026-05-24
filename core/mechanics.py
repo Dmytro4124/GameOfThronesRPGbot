@@ -5,9 +5,10 @@ import re
 import asyncio
 
 # Імпортуємо нашого ШІ-клієнта для функцій, які потребують суддівства
-from core.ai_client import model_worker, clean_and_parse_json
+from core.ai_client import model_worker, clean_and_parse_json, build_strict_config
 from core.prompts import (
     build_validate_action_prompt, build_training_request_prompt,
+    build_validate_action_schema, build_training_request_schema,
 )
 import difflib
 from core.world_constants import (
@@ -359,8 +360,15 @@ async def validate_action(user_input, profile):
 
     prompt = build_validate_action_prompt(char_name, user_input, inventory_list)
     try:
+        _schema_cfg = build_strict_config(model_worker, build_validate_action_schema())
         def _sync_gen_val():
-            return model_worker.generate_content(prompt)
+            try:
+                return model_worker.generate_content(prompt, config=_schema_cfg)
+            except Exception as _schema_err:
+                if "INVALID_ARGUMENT" in str(_schema_err) or "schema" in str(_schema_err).lower():
+                    print(f"⚠️ [Censor] Schema rejected, falling back to free JSON: {_schema_err}")
+                    return model_worker.generate_content(prompt)
+                raise
         response = await asyncio.to_thread(_sync_gen_val)
         result = clean_and_parse_json(response.text)
 
@@ -447,8 +455,15 @@ async def process_training_request(
 
     resp = None
     try:
+        _train_cfg = build_strict_config(model_worker, build_training_request_schema())
         def _sync_gen_train():
-            return model_worker.generate_content(prompt)
+            try:
+                return model_worker.generate_content(prompt, config=_train_cfg)
+            except Exception as _schema_err:
+                if "INVALID_ARGUMENT" in str(_schema_err) or "schema" in str(_schema_err).lower():
+                    print(f"⚠️ [Training] Schema rejected, falling back to free JSON: {_schema_err}")
+                    return model_worker.generate_content(prompt)
+                raise
         resp = await asyncio.to_thread(_sync_gen_train)
         data = clean_and_parse_json(resp.text)
     except Exception as e:

@@ -146,7 +146,7 @@ def _build_patches(narrator_mock: MagicMock) -> list:
         ),
         patch("core.engine.model_narrator.generate_content", narrator_mock),
         # no-op asyncio.create_task → не запускати background_task з реальним Sheets
-        patch("core.engine.asyncio.create_task", return_value=MagicMock()),
+        patch("core.engine._run_bg_task", return_value=MagicMock()),
     ]
 
 
@@ -231,8 +231,9 @@ def test_narrator_truncated_long_text_used_without_retry():
         "Test setup error: text must not end with punctuation"
 
     truncated_resp = _make_narrator_response(truncated_text)
-    # Лише один елемент у side_effect — якщо retry спробує викликати ще раз, упаде StopIteration
-    narrator_mock = MagicMock(side_effect=[truncated_resp])
+    # return_value (не side_effect): hedging робить 2 calls на Шар 1, всі дають той самий truncated_resp.
+    # Якщо retry (Шар 2/3) спробує — теж отримає truncated. Перевірка нижче: retry НЕ викликаний.
+    narrator_mock = MagicMock(return_value=truncated_resp)
 
     async def _run():
         from core.engine import process_game_turn
@@ -253,10 +254,11 @@ def test_narrator_truncated_long_text_used_without_retry():
         f"Truncated text must end with '…'. Got: {story_part[-20:]!r}"
     )
 
-    # generate_content викликано рівно 1 раз (retry не відбувся)
-    assert narrator_mock.call_count == 1, (
-        f"generate_content must be called exactly once (no retry). "
-        f"Called {narrator_mock.call_count} times."
+    # Hedging виконує до 2 calls у Шар 1, але retry (Шар 2/3) НЕ викликаний.
+    # call_count має бути ≤ 2 (1 або 2 — залежить від таймінгу hedge race).
+    assert narrator_mock.call_count <= 2, (
+        f"generate_content must be called at most twice (hedge_count=2, no retry). "
+        f"Called {narrator_mock.call_count} times — schicheints retry."
     )
 
 
@@ -277,12 +279,13 @@ def test_narrator_third_attempt_recovers():
     )
     assert len(third_attempt_text) >= 50, "Test setup: third attempt text must be ≥50 chars"
 
+    # Шар 1 hedging може робити більше ніж 2 calls (race з cancelled tasks).
+    # Шар 2 = 1 call. Шар 3 = 1-2 calls. Запас на 10 calls безпечно.
     narrator_mock = MagicMock(
-        side_effect=[
-            _make_empty_narrator_response(),   # attempt 1
-            _make_empty_narrator_response(),   # attempt 2 (retry)
-            _make_narrator_response(third_attempt_text),  # attempt 3
-        ]
+        side_effect=(
+            [_make_empty_narrator_response()] * 3
+            + [_make_narrator_response(third_attempt_text)] * 7
+        )
     )
 
     async def _run():
@@ -512,8 +515,13 @@ def test_narrator_retry_success_returns_story():
     )
     retry_resp = _make_narrator_response(retry_text)
 
+    # Hedging може зробити до 3 calls у Шар 1 (race з cancelled tasks).
+    # Шар 2 (retry) — 1 call. Запас на 10 calls.
+    # Ключова семантика: ВСІ empty відповіді → retry text. Тест перевіряє що retry_text у результаті.
     narrator_mock = MagicMock(
-        side_effect=[_make_empty_narrator_response(), retry_resp]
+        side_effect=(
+            [_make_empty_narrator_response()] * 3 + [retry_resp] * 7
+        )
     )
 
     async def _run():

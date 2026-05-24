@@ -30,6 +30,12 @@ EMBEDDING_MODEL = "gemini-embedding-2-preview"  # ЄДИНА МОДЕЛЬ ДЛЯ
 # Ініціалізація клієнта Gemini
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
+# Lock для запобігання race condition при паралельних записах у Users_DB.
+# Гарантує, що findall→append_row та findall→update_cell виконуються атомарно:
+# два паралельні /start не можуть обидва побачити "рядок не знайдено" і обидва
+# зробити append_row, що призводило б до дублювання або перезапису чужих даних.
+_users_db_lock: asyncio.Lock = asyncio.Lock()
+
 
 # ================= РОБОТА З БАЗОЮ ГРАВЦІВ (Users_DB) =================
 
@@ -59,47 +65,63 @@ async def get_user_data(user_id):
 
 
 async def save_user_data(user_id, profile_data, char_name="Unknown"):
-    """Асинхронно зберігає або оновлює дані гравця"""
+    """Асинхронно зберігає або оновлює дані гравця.
 
-    def _sync_save():
-        try:
-            sheet = db.get_sheet(TAB_USERS)
-            if not sheet: return False
+    Захищено _users_db_lock: операція findall → write є атомарною для asyncio,
+    тому два паралельні виклики для різних user_id не можуть перезаписати
+    чужий рядок, а два виклики для одного user_id не створять дублікат.
+    """
+    async with _users_db_lock:
+        def _sync_save():
+            try:
+                sheet = db.get_sheet(TAB_USERS)
+                if not sheet: return False
 
-            json_str = json.dumps(profile_data, ensure_ascii=False)
-            cells = sheet.findall(str(user_id), in_column=1)
+                json_str = json.dumps(profile_data, ensure_ascii=False)
+                cells = sheet.findall(str(user_id), in_column=1)
 
-            if cells:
-                cell = cells[0]
-                sheet.update_cell(cell.row, 3, json_str)
-                sheet.update_cell(cell.row, 2, char_name)
-            else:
-                sheet.append_row([str(user_id), char_name, json_str])
-            return True
-        except Exception as e:
-            print(f"❌ Помилка збереження: {e}")
-            return False
+                if cells:
+                    # Існуючий гравець: оновлюємо обидва поля одним batch-запитом
+                    row = cells[0].row
+                    sheet.update(
+                        f"B{row}:C{row}",
+                        [[char_name, json_str]],
+                    )
+                    print(f"[Users_DB] Оновлено рядок {row} для user {user_id}")
+                else:
+                    # Новий гравець: додаємо рядок у кінець таблиці
+                    sheet.append_row([str(user_id), char_name, json_str])
+                    print(f"[Users_DB] Додано новий рядок для user {user_id}")
+                return True
+            except Exception as e:
+                print(f"❌ Помилка збереження: {e}")
+                return False
 
-    return await asyncio.to_thread(_sync_save)
+        return await asyncio.to_thread(_sync_save)
 
 
 async def delete_user_data(user_id):
-    """Видаляє рядок гравця з Users_DB за Telegram ID. Для чистого рестарту гри."""
+    """Видаляє рядок гравця з Users_DB за Telegram ID. Для чистого рестарту гри.
 
-    def _sync_delete():
-        try:
-            sheet = db.get_sheet(TAB_USERS)
-            if not sheet:
+    Захищено _users_db_lock: видалення рядка зсуває індекси всіх рядків нижче,
+    тому воно не може відбуватись паралельно з іншим записом у ту саму таблицю.
+    """
+    async with _users_db_lock:
+        def _sync_delete():
+            try:
+                sheet = db.get_sheet(TAB_USERS)
+                if not sheet:
+                    return False
+                cells = sheet.findall(str(user_id), in_column=1)
+                for cell in reversed(cells):  # reversed щоб не зсунути індекси при видаленні
+                    sheet.delete_rows(cell.row)
+                    print(f"[Users_DB] Видалено рядок {cell.row} для user {user_id}")
+                return len(cells) > 0
+            except Exception as e:
+                print(f"❌ Помилка видалення профілю {user_id}: {e}")
                 return False
-            cells = sheet.findall(str(user_id), in_column=1)
-            for cell in reversed(cells):  # reversed щоб не зсунути індекси при видаленні
-                sheet.delete_rows(cell.row)
-            return len(cells) > 0
-        except Exception as e:
-            print(f"❌ Помилка видалення профілю {user_id}: {e}")
-            return False
 
-    return await asyncio.to_thread(_sync_delete)
+        return await asyncio.to_thread(_sync_delete)
 
 
 def clear_npc_cache(user_id=None):

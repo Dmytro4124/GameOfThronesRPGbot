@@ -557,116 +557,46 @@ Last turn: {last_turn_str}
 </scene_data>
 
 <thinking_directives>
-MANDATORY GATE CHECKLIST — answer every gate in order before writing JSON.
-Write your gate reasoning in "skill_check_reasoning", "difficulty_reasoning", "gold_reasoning".
+MANDATORY GATE CHECKLIST — answer every gate before writing JSON.
+Write reasoning in "skill_check_reasoning", "difficulty_reasoning", "gold_reasoning".
 
 [GATE 1 — FREE ACTION?]
-Is the action a greeting, casual talk, examining an object, drawing a weapon without combat,
-waiting, resting briefly, or moving within the same scene?
-→ YES → ability_used="None", skill_used="None", difficulty=5, combat_imminent=false.
-   Write the free-action verdict in verdict_text. Jump to GATE 4.
-→ NO  → continue to GATE 2.
+Greeting, casual talk, examining object, drawing weapon without combat, waiting, moving within same scene?
+→ YES → ability_used="None", skill_used="None", difficulty=5, combat_imminent=false. Jump to GATE 4.
+→ NO  → GATE 2.
 
-[GATE 2 — ABILITY + SKILL NEEDED?]
-Does the action require a meaningful test against resistance or risk?
-Step A — pick ABILITY: STR (lift, grapple, melee), DEX (stealth, finesse, ranged),
-  CON (endure, resist), INT (recall lore, investigate, decipher), WIS (sense motive, track, heal),
-  CHA (persuade, deceive, intimidate, perform).
-Step B — pick SKILL (optional): If the action matches one of the 18 skills listed in <output_schema>,
-  add it. A pure physical feat ("lift the portcullis") = STR, no skill. Social CHA = Persuasion or Deception.
-  RULE: if skill_used ≠ "None", then ability_used MUST also be non-None.
-→ If no real resistance → ability_used="None", skill_used="None", difficulty=5 (trivial).
-→ Otherwise → continue to GATE 3.
+[GATE 2 — ABILITY + SKILL?]
+Pick ABILITY: STR(lift/melee) DEX(stealth/ranged) CON(endure) INT(lore/investigate) WIS(sense/track/heal) CHA(persuade/deceive/intimidate).
+Pick SKILL (optional, from <output_schema> list). RULE: skill_used≠"None" → ability_used must be non-None.
+No real resistance → ability_used="None", skill_used="None", difficulty=5.
 
-[GATE 3 — DC SELECTION — STRICT ENUM {_LEGAL_DCS_NORMAL}]
-Choose EXACTLY ONE value. Values outside this list DO NOT EXIST.
-  DC 5:  trivial (almost impossible to fail even with disadvantage)
-  DC 10: easy (find a tavern, recall a common lord's name)
-  DC 12: trivial+ (remember a minor detail, open a simple lock)
-  DC 15: medium (persuade a sullen guard, climb a rough wall)
-  DC 17: hard (sneak past an alert watchman, swim in strong current)
-  DC 20: very hard (crack an encrypted letter, convince a skeptical lord)
-  DC 22: stretch (hold Tywin Lannister's gaze, CHA save vs. terror)
-  DC 25: nearly impossible (swim the Trident in ice, crack a Valyrian cipher)
-  DC 28: legendary (warg into a bear — First Men only)
-  DC 30: god-tier (seduce Cersei Lannister)
-NPC reputation modifier: score >= 60 → -2 DC; score -60..-20 → +2 DC; score < -60 → +5 DC.
-Nature-of-action escalation: polite request → DC 12-15; bold demand/threat → DC 17-20;
-  outright lie/false accusation → DC 20-22; assassination attempt on a king → DC 25-28.
-NEVER escalate DC solely because of target's rank.
+[GATE 3 — DC — STRICT ENUM {_LEGAL_DCS_NORMAL}]
+5=trivial | 10=easy | 12=trivial+ | 15=medium | 17=hard | 20=very hard | 22=stretch | 25=near-impossible | 28=legendary | 30=god-tier.
+Rep modifier: score≥60→-2DC; score≤-60→+5DC. Escalation: request→12-15; threat→17-20; assassination→25-28.
 
-[GATE 4 — GOLD CHECK]
-Did gold PHYSICALLY leave the player's possession this turn?
-→ NO (offer refused, pending, bribe rejected) → gold_impact="none". STOP.
-→ YES, VOLUNTARY (purchase complete, bribe accepted) → deduct exact amount or tag.
-→ YES, INVOLUNTARY (thrown/knocked/stolen) → gold_impact="-N" always.
+[GATE 4 — GOLD]
+Gold physically left player? NO→gold_impact="none". YES voluntary→exact tag. YES involuntary→"-N".
 
 [GATE 5 — MOVEMENT?]
-Did the player explicitly state intent to move to a different place?
-→ YES → generate non-"none" scene_impact or location_impact.
-→ NO  → "none" for both.
+Explicit move to different place? YES→non-"none" scene/location_impact. NO→both "none".
 
 [GATE 6 — COMBAT IMMINENT?]
-Did the player initiate or attempt a PHYSICAL ATTACK or is an NPC demonstrably attacking right now?
-→ YES (clear physical violence: swing a weapon, shoot, grapple to harm) → combat_imminent=true.
-→ NO (verbal threat, intimidation, argument, drawing a weapon without attacking) → combat_imminent=false.
-RULE: words alone NEVER trigger combat_imminent=true.
+Physical attack initiated NOW? YES→combat_imminent=true. Verbal threat/drawing weapon→false.
+RULE: words NEVER trigger combat_imminent=true.
 
-[GATE 7 — TRAINING INTENT?]
-Did the player explicitly state they are TRAINING / PRACTICING / STUDYING a specific D&D skill?
-Examples (training): "тренуюся з мечем", "вправляюся у стрільбі", "вивчаю книгу про отрути", "практикую переконання з ментором".
-Examples (NOT training): "Я атакую вовка" (combat), "Я переконую лорда" (social action), "Я біжу до коня" (movement).
-→ YES → action_type="training". The downstream engine will award XP via training pipeline.
-→ NO → action_type="standard".
-RULE: training requires EXPLICIT player intent to practice/study, NOT incidental skill use during gameplay.
+[GATE 7 — TRAINING?]
+Explicit TRAIN/PRACTICE/STUDY intent? YES→action_type="training". Incidental skill use→"standard".
 </thinking_directives>
 
 <antiexamples>
-These outputs are WRONG — study to avoid repeating them:
-
-❌ WRONG: DC not in legal enum
-Action: "Я погрожую варті словами"
-"difficulty": 18    ← 18 ∉ {_LEGAL_DCS_NORMAL}
-✅ CORRECT: "difficulty": 17
-
-❌ WRONG: skill_used set but ability_used is None
-"ability_used": "None", "skill_used": "Athletics"
-✅ CORRECT: "ability_used": "STR", "skill_used": "Athletics"
-
-❌ WRONG: combat_imminent=true for a verbal threat
-Action: "Я кажу йому що вб'ю його якщо він не відступить"
-"combat_imminent": true    ← words, not a physical strike
-✅ CORRECT: "combat_imminent": false
-
-❌ WRONG: xp_award outside legal enum
-"xp_award": 75    ← 75 ∉ {{0,25,50,100,200}}
-✅ CORRECT: "xp_award": 50
-
-❌ WRONG: condition_apply for non-mechanical effect
-Action: "Кидаю виклик лорду" — no poison, no spell
-"condition_apply": [{{"name":"frightened","duration":3,"target":"player"}}]
-✅ CORRECT: "condition_apply": []
-
-❌ WRONG: gold deducted for refused offer
-"gold_impact": "-15"   ← NPC rejected the bribe
-✅ CORRECT: "gold_impact": "none"
-
-❌ WRONG: Free action gets skill check
-Action: "Я озираюся по сторонам"
-"ability_used": "WIS", "skill_used": "Perception", "difficulty": 10
-✅ CORRECT: "ability_used": "None", "skill_used": "None", "difficulty": 5
-(passive Perception applies automatically — no roll needed for a casual glance)
+❌ difficulty=18 (18∉enum) → ✅ difficulty=17
+❌ ability_used="None", skill_used="Athletics" → ✅ ability_used="STR", skill_used="Athletics"
+❌ combat_imminent=true for verbal "Я кажу що вб'ю його" → ✅ false
 </antiexamples>
 
 <location_rules>
-Nearby canonical locations (same region): {locs_nearby}
-All canonical locations grouped by region:
-{all_canonical_locs_grouped}
-
-RULE A — Player moves to a NEARBY location: location_impact = exact name from nearby list.
-RULE B — Player moves to a non-canonical sub-place (tavern, market, street): scene_impact only.
-RULE C — Player travels to a distant city/region: location_impact = exact name from all-locs.
-RULE D — Player stays in the same spot: location_impact="none", scene_impact="none".
+Nearby: {locs_nearby} | All by region: {all_canonical_locs_grouped}
+location_impact: exact canonical name when player moves to a different canonical location; scene_impact: new micro-scene name for non-canonical sub-places; both "none" if player stays.
 </location_rules>
 
 <player_action>
@@ -688,7 +618,6 @@ difficulty_reasoning  : string ≥20 chars — GATE 3 walkthrough
 gold_reasoning        : string ≥20 chars — GATE 4 walkthrough
 verdict_text     : string — 1 sentence for GM context (Ukrainian)
 xp_award         : one integer from {{{_LEGAL_XP}}}
-  (0=free/trivial action, 25=minor challenge, 50=standard, 100=hard, 200=exceptional)
 reputation_delta : integer -3..+3 (0 if no social NPC interaction)
 reputation_target_npc : string — exact NPC name or ""
 updates (object):
@@ -1035,26 +964,20 @@ def build_gm_logic_prompt(
 
     # Mode-specific instruction blocks
     if mode == "COMBAT":
-        mode_block = """<mode>COMBAT</mode>
-<combat_mode_rules>
-You are managing an ACTIVE COMBAT round. Rules:
-1. suggested_actions must use COMBAT slots: ATTACK / DEFEND / FLEE / SPECIAL.
-   ATTACK: specific weapon + target NPC name.
-   DEFEND: dodge/parry/raise shield — no attack.
-   FLEE: attempt to disengage and escape (DEX check may be required by engine).
-   SPECIAL: use a heritage trait or class ability (name it explicitly).
-2. director_notes must describe round events in punchy tactical facts:
-   who hit whom, damage description (no numbers), conditions applied, positioning.
-3. npc_updates must include hp_current for every NPC that took damage or was healed this round.
-4. mode_transition: set "TO_NORMAL" if all enemies are Dead/Fled/Unconscious or player fled successfully.
-   Otherwise null.
-5. companion_npcs: keep updated — fleeing companions exit the combat roster.
-</combat_mode_rules>"""
+        mode_block = (
+            "<mode>COMBAT</mode>\n"
+            "<combat_mode_rules>\n"
+            "ACTIVE COMBAT round. suggested_actions: ATTACK(weapon+target)/DEFEND(dodge/parry)/FLEE(disengage)/SPECIAL(heritage/class ability).\n"
+            "director_notes: punchy tactical facts (who hit whom, conditions, positioning — no numbers).\n"
+            "npc_updates: include hp_current for every NPC that took damage/healing. "
+            "mode_transition: \"TO_NORMAL\" if all enemies Dead/Fled/Unconscious or player fled; else null.\n"
+            "</combat_mode_rules>"
+        )
         action_slot_guide = (
-            'Дія 1 — [ATTACK]: {{"button": "label до 5 слів", "intent": "Атакую <ім\'я NPC> зброєю <назва>, б\'ю на повну силу."}}\n'
-            'Дія 2 — [DEFEND]: {{"button": "label до 5 слів", "intent": "Приймаю захисну стійку, блокую удари, не атакую."}}\n'
-            'Дія 3 — [FLEE]: {{"button": "label до 5 слів", "intent": "Намагаюся вирватися з бою і втекти з місця сутички."}}\n'
-            'Дія 4 — [SPECIAL]: {{"button": "label до 5 слів", "intent": "Використовую <назва heritage/class ability> проти <ціль>."}}'
+            'Дія 1 — [ATTACK]: {{"button": "label до 5 слів", "intent": "Атакую <ім\'я NPC> зброєю <назва>."}}\n'
+            'Дія 2 — [DEFEND]: {{"button": "label до 5 слів", "intent": "Приймаю захисну стійку, не атакую."}}\n'
+            'Дія 3 — [FLEE]: {{"button": "label до 5 слів", "intent": "Намагаюся вирватися з бою і втекти."}}\n'
+            'Дія 4 — [SPECIAL]: {{"button": "label до 5 слів", "intent": "Використовую <назва ability> проти <ціль>."}}'
         )
     else:
         mode_block = "<mode>NORMAL</mode>"
@@ -1073,13 +996,11 @@ You are managing an ACTIVE COMBAT round. Rules:
 </system>
 
 <thinking_directives>
-Перед генерацією JSON, ОБОВ'ЯЗКОВО подумай про:
-1. МЕХАНІЧНИЙ ВЕРДИКТ: Що сталося за механікою (успіх/провал)? Як це впливає на NPC?
-2. NPC АНАЛІЗ: Для КОЖНОГО NPC з активного ростеру — що змінилося? hp_current, conditions, ставлення, локація, інвентар, стан? Якщо нічого — чому?
-3. ІЗОЛЯЦІЯ СЦЕН: Чи кожен NPC в npc_updates ФІЗИЧНО присутній у поточній сцені?
-4. COMPANION_NPCS: Чи гравець ЯВНО назвав NPC для подорожі? Якщо ні — companion_npcs = [].
-5. MODE_TRANSITION: Якщо бій завершено (всі вороги Dead/Fled/Unconscious або гравець втік) → "TO_NORMAL". Якщо NORMAL і виник бій → "TO_COMBAT". Інакше → null.
-6. HP та УМОВИ: Якщо NPC отримав пошкодження цього ходу — ОБОВ'ЯЗКОВО вкажи нове hp_current у npc_updates.
+1. Що сталося за механікою? Як реагує кожен NPC з ростеру (hp, conditions, локація, інвентар)?
+2. Кожен NPC в npc_updates — фізично присутній у сцені?
+3. companion_npcs: тільки якщо гравець ЯВНО назвав NPC для подорожі, інакше [].
+4. mode_transition: бій завершено→"TO_NORMAL"; виник бій→"TO_COMBAT"; інакше→null.
+5. NPC отримав пошкодження → ОБОВ'ЯЗКОВО вкажи hp_current у npc_updates.
 </thinking_directives>
 
 <player_identity>
@@ -1119,53 +1040,28 @@ You are managing an ACTIVE COMBAT round. Rules:
 {impact_block}
 
 <reputation_behavior_rules>
-ВИСОКА РЕПУТАЦІЯ (Score >= 60): NPC допомагає проактивно.
-НЕЙТРАЛЬНА (20-59): Стандартна поведінка.
-ХОЛОДНА (-19..19): NPC підозрілий, навіть при SUCCESS додає умови.
-ВОРОЖА (-20..-59): При SUCCESS — мінімум з неохотою. FAILURE — жорстка відмова.
-КРИВАВИЙ ВОРОГ (<= -60): Не виконує добровільно НІКОЛИ.
+≥60: допомагає проактивно | 20-59: стандарт | -19..19: підозрілий | -20..-59: мінімум/відмова | ≤-60: ніколи добровільно.
 </reputation_behavior_rules>
 
 <field_mutation_rules>
-STRICT FROZEN ENUM — 4 поля NPC ЗАМОРОЖЕНІ за замовчуванням:
-Description | Character | Goal | Secrets
-
-ПРАВИЛО ЗА ЗАМОВЧУВАННЯМ (99% ходів): Ці поля ВІДСУТНІ в npc_updates.
-"frozen_fields_change_reason": "" (порожній рядок — обов'язково присутній у JSON).
-
-ЄДИНИЙ ВИНЯТОК — ЕПІЧНА та НЕЗВОРОТНА подія цього ходу:
-Description: каліцтво, навмисна зміна зовнішності
-Character: психологічна травма, прокляття, збожеволів
-Goal: зрада, досягнення або втрата ключової мети
-Secrets: таємниця публічно розкрита або фундаментально змінилась
-
-ЯКЩО виняток: frozen_fields_change_reason ≥20 символів з ім'ям NPC + подія + чому незворотна.
-
-RELATION_PLAYER — SYSTEM-MANAGED (D&D SCHEMA):
-У новій D&D-схемі Relation_Player — lore-текстове поле без системного впливу.
-НІКОЛИ не включай його в npc_updates. Репутація тепер через reputation_delta у Worker.
+ЗАМОРОЖЕНІ поля (Description|Character|Goal|Secrets): ВІДСУТНІ в npc_updates за замовчуванням.
+"frozen_fields_change_reason": "" завжди присутній.
+Виняток — незворотна епічна подія (каліцтво/травма/розкрита таємниця): frozen_fields_change_reason ≥20 символів.
+Relation_Player — НІКОЛИ не включати в npc_updates (системне поле).
 </field_mutation_rules>
 
 <antiexamples>
-WRONG: frozen-поле без виправдання
-{{"frozen_fields_change_reason": "", "npc_updates": [{{"Name": "Тиріон", "Description": "Виглядає сумним"}}]}}
-CORRECT: не включати Description взагалі.
-
-WRONG: пряма зміна Relation_Player
-{{"npc_updates": [{{"Name": "Тиріон", "Relation_Player": "Прихильний"}}]}}
-CORRECT: не включати Relation_Player в npc_updates взагалі.
-
-WRONG: hp_current відсутній для NPC що отримав пошкодження
-{{"npc_updates": [{{"Name": "Варта", "Status": "Unconscious"}}]}}
-CORRECT: {{"npc_updates": [{{"Name": "Варта", "Status": "Unconscious", "hp_current": 0, "conditions": ["unconscious"]}}]}}
+❌ Description у npc_updates без незворотної події → не включати взагалі.
+❌ Relation_Player у npc_updates → ніколи.
+❌ Status:"Unconscious" без hp_current → ✅ додати hp_current:0, conditions:["unconscious"].
 </antiexamples>
 
 <golden_laws_of_agency>
-1. НЕ ЧІПАЙ ГРАВЦЯ: Ти керуєш NPC та фізикою світу. Гравець керує ТІЛЬКИ своїм Героєм.
-2. НАМІР vs РЕЗУЛЬТАТ: Гравець описує НАМІР. Ти визначаєш РЕЗУЛЬТАТ.
-3. РУХ КОМПАНЬЙОНІВ: Оновлюй Scene/Location ТІЛЬКИ для NPC якого гравець ЯВНО назвав або хто словами висловив намір іти.
-4. COMPANION_NPCS: Якщо гравець переміщується з NPC — ОБОВ'ЯЗКОВО заповни масив companion_npcs точними іменами.
-5. ПРИВАТНІ СЦЕНИ: Scene NPC що знаходиться в приватному просторі = поточна сцена гравця (точний рядок).
+1. НЕ ЧІПАЙ ГРАВЦЯ — тільки NPC та фізика світу.
+2. Гравець описує НАМІР, ти визначаєш РЕЗУЛЬТАТ.
+3. Scene/Location NPC змінюється лише якщо він ЯВНО названий або висловив намір іти.
+4. Гравець переміщується з NPC → заповни companion_npcs точними іменами.
+5. NPC в приватному просторі → Scene = поточна сцена гравця.
 </golden_laws_of_agency>
 
 <history>
@@ -1197,16 +1093,12 @@ CORRECT: {{"npc_updates": [{{"Name": "Варта", "Status": "Unconscious", "hp_
 </absent_npcs>''' if absent_npcs else ''}
 
 <json_generation_rules>
-1. DIRECTOR_NOTES: Масив 3-7 коротких фактичних речень. БЕЗ літературних прикрас. Тільки голі факти.
-   В COMBAT mode: 4-6 речень, тактичні факти раунду (хто вдарив, що впало, хто відступив).
-2. NPC hp та conditions: Якщо NPC отримав/відновив HP — вкажи нове hp_current (int). conditions = список активних станів.
-3. СЕМАНТИКА ПОЛЯ '': пусте = поле не змінилось. Якщо змінилось — нове реальне значення.
-4. SUGGESTED_ACTIONS — рівно 4 об'єкти:
-{action_slot_guide}
-5. LOCATION/SCENE правила: Region НЕ включай — система визначає автоматично.
-   Location: ВИКЛЮЧНО зі списку:
-   {region_locs_str}
-6. ЗАБОРОНА БЕЗІМЕННИХ NPC: НІКОЛИ не вводь нового персонажа без першого імені.
+1. director_notes: 3-7 фактичних речень (COMBAT: 4-6 тактичних). БЕЗ літературних прикрас.
+2. NPC з пошкодженнями/лікуванням: hp_current (int) + conditions обов'язкові.
+3. '' = поле не змінилось; нове значення = реальна зміна.
+4. suggested_actions — рівно 4: {action_slot_guide}
+5. Location: ВИКЛЮЧНО зі списку: {region_locs_str} (Region не включати — система визначає).
+6. Нові NPC: НІКОЛИ без першого імені.
 </json_generation_rules>
 
 ВІДПОВІДАЙ СТРОГО У ФОРМАТІ JSON:
@@ -1445,13 +1337,7 @@ HOUSE: {house_name} (Origin: {origin_region})
 </system_rules>
 
 <thought_algorithm>
-Застосуй ToT (Tree of Thoughts) та Adversarial Validation у ключі "thought_process":
-1. Branch 1 (Lore Master): Канонічний статус {char_name} у 298 році. Локація. Перевір що вона є в valid_locations_str.
-2. Branch 2 (Class/Heritage Balancer): Який клас та спадщина найточніше відображають роль? Чому?
-3. Branch 3 (Stats Balancer): Ability scores 8-15, сума ~72. Які пріоритети для цього класу?
-4. Adversarial Check: "Чи не занадто сильні stats для такого персонажа?", "Чи локація є в списку?",
-   "Чи клас відповідає лору?", "Чи ability_scores у межах 8-15?".
-5. Синтез: Фінальне рішення.
+У "thought_process": 1) Канонічний статус {char_name} у 298р + локація зі списку. 2) Клас і спадщина — чому? 3) Ability scores 8-15, сума ~72. 4) Adversarial: stats надто сильні? локація є в списку? 5) Синтез.
 </thought_algorithm>
 
 <output_requirements>
@@ -1461,18 +1347,9 @@ HOUSE: {house_name} (Origin: {origin_region})
 </output_requirements>
 
 <antiexamples>
-WRONG: suggested_class не з дозволеного списку
-{{"suggested_class": "Fighter"}}    ← не існує в GoT-системі
-CORRECT: {{"suggested_class": "Knight"}}
-
-WRONG: ability_score поза межами 8-15
-{{"ability_scores": {{"STR": 18, "DEX": 8, "CON": 14, "INT": 10, "WIS": 10, "CHA": 12}}}}
-← STR 18 до heritage bonus = порушення point-buy
-CORRECT: {{"ability_scores": {{"STR": 15, "DEX": 10, "CON": 14, "INT": 10, "WIS": 10, "CHA": 13}}}}
-
-WRONG: "Поточне місцезнаходження" містить назву регіону
-{{"Поточне місцезнаходження": "Північ"}}
-CORRECT: {{"Поточне місцезнаходження": "Вінтерфелл"}}
+❌ suggested_class="Fighter" → ✅ "Knight" (тільки 9 GoT-класів)
+❌ STR=18 до heritage bonus → ✅ max 15 (point-buy 8-15)
+❌ Поточне місцезнаходження="Північ" (регіон) → ✅ "Вінтерфелл" (місто)
 </antiexamples>
 
 <few_shot_example>
@@ -1515,3 +1392,305 @@ CORRECT: {{"Поточне місцезнаходження": "Вінтерфе�
     "Риси": "<comma-separated traits>",
     "Вади": "<comma-separated flaws>"
 }}"""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# JSON Schema builders — response_schema для Google Gemini JSON mode
+# Використовуються у core/engine.py та core/dnd_engine.py разом із
+# response_mime_type="application/json" для технічного усунення MALFORMED_RESPONSE.
+#
+# ПРАВИЛО МУТАЦІЇ: якщо контракт промпту змінюється — синхронно оновлювати schema
+# тут і в споживачі (engine.py/dnd_engine.py). Це домен python-dev.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def build_validate_action_schema():
+    """Schema для Censor (build_validate_action_prompt). 2 обов'язкові ключі."""
+    from google.genai import types as gtypes
+    return gtypes.Schema(
+        type=gtypes.Type.OBJECT,
+        properties={
+            "is_valid": gtypes.Schema(type=gtypes.Type.BOOLEAN),
+            "refusal_reason": gtypes.Schema(type=gtypes.Type.STRING),
+        },
+        required=["is_valid", "refusal_reason"],
+    )
+
+
+def build_normal_resolve_schema():
+    """Schema для Worker NORMAL (build_normal_resolve_prompt).
+
+    Всі обов'язкові ключі верхнього рівня зафіксовані у required[].
+    Вкладений об'єкт updates зафіксований окремо.
+    """
+    from google.genai import types as gtypes
+
+    _str = gtypes.Schema(type=gtypes.Type.STRING)
+    _int = gtypes.Schema(type=gtypes.Type.INTEGER)
+    _bool = gtypes.Schema(type=gtypes.Type.BOOLEAN)
+    _arr_str = gtypes.Schema(type=gtypes.Type.ARRAY, items=_str)
+
+    updates_schema = gtypes.Schema(
+        type=gtypes.Type.OBJECT,
+        properties={
+            "minutes_passed": _int,
+            "location_impact": _str,
+            "scene_impact": _str,
+            "hp_damage_dice": _str,
+            "hp_heal_dice": _str,
+            "gold_impact": _str,
+            "inventory_new": _arr_str,
+            "inventory_lost": _arr_str,
+            "clocks_impact": gtypes.Schema(type=gtypes.Type.OBJECT),
+            "condition_apply": gtypes.Schema(type=gtypes.Type.ARRAY, items=gtypes.Schema(type=gtypes.Type.OBJECT)),
+            "condition_remove": gtypes.Schema(type=gtypes.Type.ARRAY, items=gtypes.Schema(type=gtypes.Type.OBJECT)),
+        },
+        required=[
+            "minutes_passed", "location_impact", "scene_impact",
+            "hp_damage_dice", "hp_heal_dice", "gold_impact",
+            "inventory_new", "inventory_lost", "clocks_impact",
+            "condition_apply", "condition_remove",
+        ],
+    )
+
+    return gtypes.Schema(
+        type=gtypes.Type.OBJECT,
+        properties={
+            "skill_check_reasoning": _str,
+            "difficulty_reasoning": _str,
+            "gold_reasoning": _str,
+            "action_type": gtypes.Schema(type=gtypes.Type.STRING, enum=["standard", "training"]),
+            "ability_used": gtypes.Schema(
+                type=gtypes.Type.STRING,
+                enum=["STR", "DEX", "CON", "INT", "WIS", "CHA", "None"],
+            ),
+            "skill_used": _str,
+            "difficulty": _int,
+            "advantage_reason": _str,
+            "disadvantage_reason": _str,
+            "combat_imminent": _bool,
+            "verdict_text": _str,
+            "xp_award": _int,
+            "reputation_delta": _int,
+            "reputation_target_npc": _str,
+            "updates": updates_schema,
+        },
+        required=[
+            "skill_check_reasoning", "difficulty_reasoning", "gold_reasoning",
+            "action_type", "ability_used", "skill_used", "difficulty",
+            "advantage_reason", "disadvantage_reason", "combat_imminent",
+            "verdict_text", "xp_award", "reputation_delta", "reputation_target_npc",
+            "updates",
+        ],
+    )
+
+
+def build_combat_round_schema():
+    """Schema для Worker COMBAT (build_combat_round_prompt)."""
+    from google.genai import types as gtypes
+    _str = gtypes.Schema(type=gtypes.Type.STRING)
+    return gtypes.Schema(
+        type=gtypes.Type.OBJECT,
+        properties={
+            "intent": gtypes.Schema(
+                type=gtypes.Type.STRING,
+                enum=["attack", "cast", "move", "dodge", "flee", "item", "help", "grapple", "shove"],
+            ),
+            "target_npc": _str,
+            "weapon": _str,
+            "spell_or_ability": _str,
+            "tactic": gtypes.Schema(type=gtypes.Type.STRING, enum=["reckless", "normal", "cautious"]),
+            "move_to": _str,
+            "verdict_text": _str,
+            "reasoning": _str,
+        },
+        required=["intent", "target_npc", "weapon", "spell_or_ability", "tactic", "move_to", "verdict_text", "reasoning"],
+    )
+
+
+def build_npc_combat_action_schema():
+    """Schema для NPC combat action (build_npc_combat_action_prompt). Батч 1-2 NPC."""
+    from google.genai import types as gtypes
+    _str = gtypes.Schema(type=gtypes.Type.STRING)
+    action_item = gtypes.Schema(
+        type=gtypes.Type.OBJECT,
+        properties={
+            "npc_name": _str,
+            "action": gtypes.Schema(
+                type=gtypes.Type.STRING,
+                enum=["attack", "dodge", "flee", "help", "cast", "none"],
+            ),
+            "target": _str,
+            "weapon": _str,
+            "reason": _str,
+        },
+        required=["npc_name", "action", "target", "weapon", "reason"],
+    )
+    return gtypes.Schema(
+        type=gtypes.Type.OBJECT,
+        properties={
+            "actions": gtypes.Schema(type=gtypes.Type.ARRAY, items=action_item),
+        },
+        required=["actions"],
+    )
+
+
+def build_npc_regen_schema():
+    """Schema для NPC statblock regen (build_npc_regen_prompt)."""
+    from google.genai import types as gtypes
+    _str = gtypes.Schema(type=gtypes.Type.STRING)
+    _int = gtypes.Schema(type=gtypes.Type.INTEGER)
+    _obj = gtypes.Schema(type=gtypes.Type.OBJECT)
+    _arr_str = gtypes.Schema(type=gtypes.Type.ARRAY, items=_str)
+    attack_item = gtypes.Schema(
+        type=gtypes.Type.OBJECT,
+        properties={
+            "name": _str,
+            "to_hit": _int,
+            "dmg": _str,
+            "range": _int,
+        },
+        required=["name", "to_hit", "dmg"],
+    )
+    return gtypes.Schema(
+        type=gtypes.Type.OBJECT,
+        properties={
+            "cr": gtypes.Schema(
+                type=gtypes.Type.STRING,
+                enum=["0", "1/8", "1/4", "1/2", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
+            ),
+            "ability_scores": _obj,
+            "hp_max": _int,
+            "ac": _int,
+            "speed": _int,
+            "attacks": gtypes.Schema(type=gtypes.Type.ARRAY, items=attack_item),
+            "saves": _obj,
+            "skills": _obj,
+            "conditions": _arr_str,
+            "tags": _arr_str,
+            "reasoning": _str,
+        },
+        required=["cr", "ability_scores", "hp_max", "ac", "speed", "attacks", "saves", "skills", "conditions", "tags", "reasoning"],
+    )
+
+
+def build_gm_logic_schema(mode: str = "NORMAL"):
+    """Schema для GM_Logic (build_gm_logic_prompt). mode="NORMAL"|"COMBAT"."""
+    from google.genai import types as gtypes
+    _str = gtypes.Schema(type=gtypes.Type.STRING)
+    _int = gtypes.Schema(type=gtypes.Type.INTEGER)
+    _arr_str = gtypes.Schema(type=gtypes.Type.ARRAY, items=_str)
+
+    npc_update_item = gtypes.Schema(
+        type=gtypes.Type.OBJECT,
+        properties={
+            "Name": _str,
+            "Location": _str,
+            "Scene": _str,
+            "Memory_Anchor": _str,
+            "Relation_NPCs": _str,
+            "Inventory": _str,
+            "Status": gtypes.Schema(
+                type=gtypes.Type.STRING,
+                enum=["Active", "Dead", "Fled", "Unconscious"],
+            ),
+            "hp_current": _int,
+            "conditions": _arr_str,
+        },
+        required=["Name", "Status"],
+    )
+
+    action_item = gtypes.Schema(
+        type=gtypes.Type.OBJECT,
+        properties={
+            "button": _str,
+            "intent": _str,
+        },
+        required=["button", "intent"],
+    )
+
+    mode_transition_values = [None, "TO_COMBAT", "TO_NORMAL"]  # null handled by nullable
+    return gtypes.Schema(
+        type=gtypes.Type.OBJECT,
+        properties={
+            "reasoning": _str,
+            "npc_reasoning": _str,
+            "frozen_fields_change_reason": _str,
+            "mode_transition": _str,
+            "director_notes": _arr_str,
+            "companion_npcs": _arr_str,
+            "npc_updates": gtypes.Schema(type=gtypes.Type.ARRAY, items=npc_update_item),
+            "suggested_actions": gtypes.Schema(type=gtypes.Type.ARRAY, items=action_item),
+        },
+        required=[
+            "reasoning", "npc_reasoning", "frozen_fields_change_reason",
+            "mode_transition", "director_notes", "companion_npcs",
+            "npc_updates", "suggested_actions",
+        ],
+    )
+
+
+def build_training_request_schema():
+    """Schema для training intent detection (build_training_request_prompt)."""
+    from google.genai import types as gtypes
+    _str = gtypes.Schema(type=gtypes.Type.STRING)
+    _bool = gtypes.Schema(type=gtypes.Type.BOOLEAN)
+    return gtypes.Schema(
+        type=gtypes.Type.OBJECT,
+        properties={
+            "is_training": _bool,
+            "is_possible": _bool,
+            "skill": _str,
+            "method": gtypes.Schema(type=gtypes.Type.STRING, enum=["solo", "mentor", ""]),
+            "reason_if_failed": _str,
+        },
+        required=["is_training", "is_possible", "skill", "method", "reason_if_failed"],
+    )
+
+
+def build_initial_stats_schema():
+    """Schema для character creation (build_initial_stats_prompt)."""
+    from google.genai import types as gtypes
+    _str = gtypes.Schema(type=gtypes.Type.STRING)
+    _int = gtypes.Schema(type=gtypes.Type.INTEGER)
+    _arr_str = gtypes.Schema(type=gtypes.Type.ARRAY, items=_str)
+
+    ability_scores_schema = gtypes.Schema(
+        type=gtypes.Type.OBJECT,
+        properties={
+            "STR": _int, "DEX": _int, "CON": _int,
+            "INT": _int, "WIS": _int, "CHA": _int,
+        },
+        required=["STR", "DEX", "CON", "INT", "WIS", "CHA"],
+    )
+
+    return gtypes.Schema(
+        type=gtypes.Type.OBJECT,
+        properties={
+            "thought_process": _str,
+            "narrative_intro": _str,
+            "Ім'я": _str,        # "Ім'я"
+            "Дім": _str,         # "Дім"
+            "suggested_class": gtypes.Schema(
+                type=gtypes.Type.STRING,
+                enum=["Knight", "Hedge Knight", "Maester", "Septon", "Sellsword", "Spy", "Courtier", "Bastard", "Wildling"],
+            ),
+            "suggested_heritage": gtypes.Schema(
+                type=gtypes.Type.STRING,
+                enum=["Westerosi (Andal)", "Valyrian Descent", "First Men (Stark line)", "Free Folk", "Red Priest", "Ironborn"],
+            ),
+            "background": _str,
+            "ability_scores": ability_scores_schema,
+            "personality_traits": _arr_str,
+            "bond": _str,
+            "flaw": _str,
+            "Поточне місцезнаходження": _str,  # "Поточне місцезнаходження"
+            "Поточна сцена": _str,  # "Поточна сцена"
+            "Світогляд": _str,  # "Світогляд"
+            "Риси": _str,   # "Риси"
+            "Вади": _str,   # "Вади"
+        },
+        required=[
+            "thought_process", "narrative_intro", "suggested_class", "suggested_heritage",
+            "background", "ability_scores", "personality_traits", "bond", "flaw",
+        ],
+    )

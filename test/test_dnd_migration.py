@@ -367,7 +367,7 @@ class TestRegenerateCanonNpcViallm:
 
         call_count = [0]
 
-        def side_effect(prompt):
+        def side_effect(prompt, *args, **kwargs):
             call_count[0] += 1
             resp = MagicMock()
             if call_count[0] == 2:

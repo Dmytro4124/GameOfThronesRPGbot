@@ -4,10 +4,11 @@ import json
 import asyncio
 from database.sheets import db
 from database.operations import refresh_npc_database, find_best_match, ensure_user_npc_sheet, _npc_tab_name
-from core.ai_client import model, model_gm_logic, ask_gemini, clean_and_parse_json
+from core.ai_client import model, model_gm_logic, ask_gemini, clean_and_parse_json, build_strict_config
 from core.prompts import (
     GAME_ERA_CONTEXT, build_famous_characters_prompt,
     build_initial_stats_prompt, build_game_intro_prompt, build_populate_npcs_prompt,
+    build_initial_stats_schema,
 )
 from core.world_constants import get_region_for_location, get_locations_for_region, is_valid_location, VALID_LOCATIONS_ORDERED, format_scenes_for_prompt, LOCATION_SCENES
 from database.canon_npc import get_canon_npcs_copy
@@ -103,8 +104,15 @@ async def generate_initial_stats(char_name, house_name, house_data):
 
     # Gemma 4 31B — одноразова генерація, якість важливіша за швидкість
     try:
+        _stats_cfg = build_strict_config(model_gm_logic, build_initial_stats_schema())
         def _sync_gen_profile():
-            return model_gm_logic.generate_content(prompt)
+            try:
+                return model_gm_logic.generate_content(prompt, config=_stats_cfg)
+            except Exception as _schema_err:
+                if "INVALID_ARGUMENT" in str(_schema_err) or "schema" in str(_schema_err).lower():
+                    print(f"⚠️ [D&D] Schema rejected for initial_stats, falling back: {_schema_err}")
+                    return model_gm_logic.generate_content(prompt)
+                raise
 
         response = await asyncio.to_thread(_sync_gen_profile)
         llm_data = clean_and_parse_json(response.text)

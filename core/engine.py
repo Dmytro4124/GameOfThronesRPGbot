@@ -7,7 +7,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from core.ai_client import model_worker, model_gm_logic, model_narrator, clean_and_parse_json, clear_thoughts, record_thought
+from core.ai_client import model_worker, model_gm_logic, model_narrator, clean_and_parse_json, clear_thoughts, record_thought, hedged_generate_content_async, build_strict_config
 from config import MODEL_NARRATOR_NAME
 from core.mechanics import apply_system_impacts, process_training_request, safe_int, validate_action
 from core.dnd_engine import resolve_normal_action, apply_dnd_impacts
@@ -20,8 +20,49 @@ from core.dnd_combat_engine import (
 from core.prompts import (
     GAME_ERA_CONTEXT, build_summarize_turn_prompt, build_summarize_full_turn_prompt,
     build_narrator_prompt, build_gm_logic_prompt, build_history_summary_prompt,
+    build_gm_logic_schema,
 )
 from core.world_constants import VALID_LOCATIONS_ORDERED, VALID_REGIONS_ORDERED, TRAVEL_LOCATION, get_region_for_location, get_locations_for_region, LOCATION_DESCRIPTIONS, format_scenes_for_prompt
+
+
+# ── Safe wrapper for sync functions passed to asyncio.to_thread ─────────────
+# Python asyncio bug: StopIteration from a thread cannot be propagated into a
+# Future (raises "StopIteration interacts badly with generators and cannot be
+# raised into a Future") — the Future hangs forever. Happens when MagicMock
+# side_effect exhausts in tests or any sync code raises StopIteration.
+# Wrapping converts StopIteration → RuntimeError so the awaiter sees a failure.
+def _safe_thread_call(fn):
+    """Decorator: convert StopIteration → RuntimeError for asyncio.to_thread targets."""
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except StopIteration as exc:
+            raise RuntimeError(f"StopIteration in thread ({fn.__name__}): {exc}") from exc
+    wrapper.__name__ = getattr(fn, "__name__", "wrapper")
+    return wrapper
+
+
+async def _safe_to_thread(fn, *args, **kwargs):
+    """asyncio.to_thread wrapper that converts StopIteration → RuntimeError.
+
+    See _safe_thread_call for rationale. Use this instead of asyncio.to_thread
+    for any function that might raise StopIteration (e.g. functions calling
+    iterables, or functions called against mocks with exhausted side_effect).
+    """
+    return await asyncio.to_thread(_safe_thread_call(fn), *args, **kwargs)
+
+
+# ── Background task wrapper ──────────────────────────────────────────────────
+# Тести масово патчать це замість asyncio.create_task — щоб не блокувати
+# hedging у core.ai_client, який потребує живого asyncio.create_task.
+def _run_bg_task(coro):
+    """Wrapper навколо asyncio.create_task для background tasks engine.py.
+
+    Тести підміняють цю функцію (patch core.engine._run_bg_task) щоб
+    подавити справжнє виконання background_task / travel_population_task
+    БЕЗ впливу на asyncio.create_task у hedging/ai_client.
+    """
+    return asyncio.create_task(coro)
 from core.world import populate_contextual_npcs
 from database.operations import (
     get_user_data, save_user_data, get_relevant_context,
@@ -332,7 +373,16 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
     old_scene = profile.get("Поточна сцена", "Невідомо")
 
     # === P1 FIX: Фільтрований стан для GM (без числових статів) ===
-    hp = safe_int(profile.get("Здоров'я", 100), 100)
+    # D&D-профіль: hp_current / hp_max (абсолютні числа, напр. 11/11).
+    # Legacy-профіль: "Здоров'я" вже у шкалі 0–100.
+    # _qualitative очікує шкалу 0–100, тому для D&D конвертуємо ratio.
+    if "hp_current" in profile and "hp_max" in profile:
+        hp_max_val = safe_int(profile.get("hp_max", 0), 0)
+        hp_current_val = safe_int(profile.get("hp_current", 0), 0)
+        # hp_max=0 не може бути у живого персонажа — дефолт 100 (повне здоров'я)
+        hp = round(100 * hp_current_val / hp_max_val) if hp_max_val > 0 else 100
+    else:
+        hp = safe_int(profile.get("Здоров'я", 100), 100)
     energy = safe_int(profile.get("Енергія", 1000), 1000)
     gold = safe_int(profile.get("Особисте Золото", 0), 0)
 
@@ -450,6 +500,42 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                         f"{combat_log[:500]}"
                     )
                     mechanical_updates = combat_updates
+
+                    # === COMBAT DICE SUMMARY (відображається внизу повідомлення як 📊 блок) ===
+                    _combat_round_num = combat_updates.get("combat_round", "?")
+                    _combat_dice_lines: list[str] = []
+
+                    # Рядок дії гравця — перший не-заголовний рядок у combat_log
+                    for _cl in combat_log.splitlines():
+                        _cl_s = _cl.strip()
+                        if _cl_s and not _cl_s.startswith("---"):
+                            _combat_dice_lines.append(f"  {_cl_s}")
+                            break
+
+                    # Рядки атак NPC (attack_result.log_line присутній у кожному NPC результаті)
+                    for _npc_res in npc_actions:
+                        _ar = _npc_res.get("attack_result")
+                        if _ar is not None and hasattr(_ar, "log_line") and _ar.log_line:
+                            _combat_dice_lines.append(f"  {_ar.log_line}")
+
+                    # HP summary рядок
+                    _player_hp_now = combat_updates.get("player_hp_current")
+                    _player_hp_max = profile.get("hp_max")
+                    _hp_parts: list[str] = []
+                    if _player_hp_now is not None and _player_hp_max:
+                        _hp_parts.append(f"HP гравця: {_player_hp_now}/{_player_hp_max}")
+                    if combat_state is not None:
+                        for _npc_name, _npc_snap in combat_state.npcs.items():
+                            _nhp = _npc_snap.get("hp_current", "?")
+                            _nhp_max = _npc_snap.get("hp_max", "?")
+                            _nstatus = _npc_snap.get("Status", "Active")
+                            _dead_mark = " ☠️" if _nstatus == "Dead" else ""
+                            _hp_parts.append(f"{_npc_name}: {_nhp}/{_nhp_max}{_dead_mark}")
+                    if _hp_parts:
+                        _combat_dice_lines.append("  " + " | ".join(_hp_parts))
+
+                    if _combat_dice_lines:
+                        logs.append(f"БІЙ Раунд {_combat_round_num}:\n" + "\n".join(_combat_dice_lines))
 
                     # Build combat_log list for Narrator
                     _combat_log_for_narrator = (
@@ -577,8 +663,14 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         if _scene_npcs_for_combat:
             try:
                 from core.dnd_combat_engine import initiate_combat_from_normal
-                await initiate_combat_from_normal(chat_id, profile, _scene_npcs_for_combat)
-                logs.append("⚔️ БІЙ РОЗПОЧАТО! Наступний хід — бойовий режим.")
+                _new_cs = await initiate_combat_from_normal(chat_id, profile, _scene_npcs_for_combat)
+                # Initiative display: "Ім'я (roll), Ім'я (roll)"
+                _init_parts = [
+                    f"{_ref.name} ({_ref.init_roll})"
+                    for _ref in _new_cs.initiative_order
+                ]
+                _init_str = ", ".join(_init_parts) if _init_parts else "?"
+                logs.append(f"⚔️ БІЙ РОЗПОЧАТО! Ініціатива: {_init_str}")
                 logger.info(f"[FSM] combat_imminent=true → CombatState initiated for chat_id={chat_id}")
             except Exception as _ci_exc:
                 logger.error(f"[FSM] initiate_combat_from_normal failed: {_ci_exc}", exc_info=True)
@@ -727,8 +819,17 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             await progress_callback("🌍 Оновлюємо стан світу...")
         t_gm_logic = time.time()
 
+        _gm_logic_cfg = build_strict_config(
+            model_gm_logic, build_gm_logic_schema(mode=_gm_mode)
+        )
         def _sync_gen_gm_logic():
-            return model_gm_logic.generate_content(gm_logic_prompt)
+            try:
+                return model_gm_logic.generate_content(gm_logic_prompt, config=_gm_logic_cfg)
+            except Exception as _schema_err:
+                if "INVALID_ARGUMENT" in str(_schema_err) or "schema" in str(_schema_err).lower():
+                    print(f"⚠️ [GM_Logic] Schema rejected, falling back to free JSON: {_schema_err}")
+                    return model_gm_logic.generate_content(gm_logic_prompt)
+                raise
 
         gm_logic_response = await asyncio.to_thread(_sync_gen_gm_logic)
         gm_logic_raw = gm_logic_response.text.strip()
@@ -869,15 +970,16 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 print(f"🔵 [STREAM] Done. Total chunks: {len(chunks)}")
                 return "".join(chunks)
 
-            story = await asyncio.to_thread(_sync_stream_narrator)
+            story = await _safe_to_thread(_sync_stream_narrator)
             story = story.strip() if story else ""
             # None надсилається ПІСЛЯ перевірки на обрізання — див. нижче
         else:
-            # === BLOCKING MODE: стандартний виклик ===
-            def _sync_gen_narrator():
-                return model_narrator.generate_content(narrator_prompt)
-
-            narrator_response = await asyncio.to_thread(_sync_gen_narrator)
+            # === BLOCKING MODE: hedged call (2 parallel requests, first success wins) ===
+            # Робастність: _safe_to_thread / hedging _safe_call конвертують StopIteration
+            # → RuntimeError (asyncio.to_thread не propagate-ить StopIteration → hang).
+            narrator_response = await hedged_generate_content_async(
+                model_narrator, narrator_prompt, hedge_count=2, max_retries=2
+            )
             story = narrator_response.text.strip() if narrator_response and narrator_response.text else ""
 
         # === Шар 1: обрізаний, але змістовний текст — приймаємо без retry ===
@@ -960,7 +1062,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                     )
                     return _result
 
-                story = await asyncio.to_thread(_sync_stream_retry)
+                story = await _safe_to_thread(_sync_stream_retry)
                 story = story.strip() if story else ""
 
                 if not story or len(story) < 20:
@@ -992,7 +1094,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                     # Hard timeout 90s — якщо blocking fallback не встиг → deterministic fallback
                     try:
                         third_resp = await asyncio.wait_for(
-                            asyncio.to_thread(_sync_gen_narrator_third),
+                            _safe_to_thread(_sync_gen_narrator_third),
                             timeout=90.0,
                         )
                     except asyncio.TimeoutError:
@@ -1053,7 +1155,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                     )
                     return resp
 
-                retry_resp = await asyncio.to_thread(_sync_gen_narrator_retry)
+                retry_resp = await _safe_to_thread(_sync_gen_narrator_retry)
                 story = retry_resp.text.strip() if retry_resp and retry_resp.text else ""
 
                 if not story or len(story) < 20:
@@ -1080,7 +1182,18 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                         )
                         return resp
 
-                    third_resp = await asyncio.to_thread(_sync_gen_narrator_third_blocking)
+                    # Hard timeout 90s + захист від exceptions (StopIteration з exhausted mock тощо)
+                    try:
+                        third_resp = await asyncio.wait_for(
+                            _safe_to_thread(_sync_gen_narrator_third_blocking),
+                            timeout=90.0,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning("[NARRATOR_FAIL] Attempt 3 timed out after 90s — falling through to deterministic fallback")
+                        third_resp = None
+                    except Exception as _exc:
+                        logger.warning(f"[NARRATOR_FAIL] Attempt 3 exception: {type(_exc).__name__}: {_exc} — falling through")
+                        third_resp = None
                     third_text = third_resp.text.strip() if third_resp and third_resp.text else ""
                     if third_text and len(third_text) >= 50:
                         story = third_text
@@ -1205,7 +1318,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 except Exception as e:
                     logger.error(f"[BG] travel_population_task failed: {e}", exc_info=True)
 
-            asyncio.create_task(travel_population_task(new_location, current_char_name))
+            _run_bg_task(travel_population_task(new_location, current_char_name))
 
         async def background_task(chat_id_arg, user_id_arg, profile_arg, char_name_arg, input_arg, story_arg,
                                   npc_changes_arg, legal_names_arg, mech_updates_arg=None,
@@ -1275,7 +1388,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
 
         _player_loc_changed  = (old_location != new_location)
         _player_scene_changed = (old_scene != curr_scene)
-        asyncio.create_task(
+        _run_bg_task(
             background_task(
                 chat_id, user_id, profile, profile.get("Ім'я"), user_input, story, npc_changes,
                 legal_npc_names, mechanical_updates,
