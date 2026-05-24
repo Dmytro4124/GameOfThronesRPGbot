@@ -791,8 +791,10 @@ async def handle_general_messages(message: Message, bot: Bot):
             # КРОК 2: Фоновий typing на весь час обробки
             typing_task = asyncio.create_task(keep_typing(bot, chat_id))
 
-            # Streaming вимикається для еротичного режиму — streamGenerateContent блокує NSFW
-            USE_STREAMING = chat_id not in EROTIC_USERS
+            # Streaming тимчасово ВИМКНЕНО глобально через нестабільність gemma-4-31b-it
+            # (часті MALFORMED_RESPONSE, 500 INTERNAL посеред stream-ів).
+            # Раніше: USE_STREAMING = chat_id not in EROTIC_USERS
+            USE_STREAMING = False
             narrator_queue = asyncio.Queue() if USE_STREAMING else None
 
             # Streaming consumer — оновлює повідомлення кожні 1.5с новим текстом

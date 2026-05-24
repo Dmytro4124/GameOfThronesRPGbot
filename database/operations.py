@@ -116,7 +116,19 @@ async def save_user_data(user_id, profile_data, char_name="Unknown"):
                 if not sheet: return False
 
                 json_str = json.dumps(profile_data, ensure_ascii=False)
-                row = _find_user_row_exact(sheet, user_id)
+                # Читаємо col_values ОДИН раз — для пошуку і обчислення next_row
+                try:
+                    col_values = sheet.col_values(1)
+                except Exception as _exc:
+                    print(f"❌ [Users_DB] Не вдалося прочитати col_values: {_exc}")
+                    return False
+
+                target = str(user_id).strip()
+                row: int | None = None
+                for idx, val in enumerate(col_values, start=1):
+                    if str(val).strip() == target:
+                        row = idx
+                        break
 
                 if row is not None:
                     # Існуючий гравець: оновлюємо обидва поля одним batch-запитом
@@ -124,11 +136,17 @@ async def save_user_data(user_id, profile_data, char_name="Unknown"):
                         f"B{row}:C{row}",
                         [[char_name, json_str]],
                     )
-                    print(f"[Users_DB] Оновлено рядок {row} для user {user_id}")
+                    print(f"[Users_DB] Оновлено рядок {row} для user {user_id} (всього рядків: {len(col_values)})")
                 else:
-                    # Новий гравець: додаємо рядок у кінець таблиці
-                    sheet.append_row([str(user_id), char_name, json_str])
-                    print(f"[Users_DB] Додано новий рядок для user {user_id}")
+                    # Новий гравець: EXPLICIT update у наступний порожній рядок.
+                    # Не використовуємо append_row бо gspread auto-detect табличного
+                    # діапазону може хибно вирішити що "наступний" це row 2 (поверх Player 1).
+                    next_row = len(col_values) + 1
+                    sheet.update(
+                        f"A{next_row}:C{next_row}",
+                        [[str(user_id), char_name, json_str]],
+                    )
+                    print(f"[Users_DB] Додано рядок {next_row} для user {user_id} (всього рядків було: {len(col_values)})")
                 return True
             except Exception as e:
                 print(f"❌ Помилка збереження: {e}")
