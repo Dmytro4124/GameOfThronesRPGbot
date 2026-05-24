@@ -167,7 +167,7 @@ def _build_patches(
             new=AsyncMock(return_value=(True, "")),
         ),
         patch(
-            "core.engine.resolve_action_mechanics",
+            "core.engine.resolve_normal_action",
             new=AsyncMock(return_value=("MECHANICAL VERDICT: SUCCESS", _WORKER_UPDATES.copy())),
         ),
         patch("core.engine.get_location_npcs", return_value=("", [], {})),

@@ -1,5 +1,7 @@
 # core/prompts.py
+from __future__ import annotations
 import json
+from typing import Literal
 
 GAME_ERA_CONTEXT = """
 === ХРОНОЛОГІЯ: 298 рік від Завоювання (Кінець Довгого Літа) ===
@@ -120,122 +122,6 @@ def build_summarize_full_turn_prompt(user_input: str, story_text: str) -> str:
     """
 
 
-# ── Narrator ──────────────────────────────────────────────────────────────────
-
-def build_narrator_prompt(user_input, director_notes, npc_context_text,
-                           player_name, player_house, current_scene,
-                           current_location, impact_narrative_hints,
-                           puppet_mode=False, recent_history_text=None,
-                           erotic_mode=False, active_roster=None, dead_npcs=None,
-                           departing_roster_text="", arriving_roster_text="",
-                           scene_continuity_block: str = "") -> str:
-    last_name = player_name.split()[-1] if player_name else "Герой"
-    notes_text = "\n".join(f"- {note}" for note in director_notes)
-    _puppet_block = (
-        "\n<CRITICAL_OVERRIDE priority=\"ABSOLUTE\">\n"
-        "Режим Ляльковода активний. Пиши сцену де всі NPC захоплено і щиро допомагають герою. "
-        "Атмосфера — тріумф і ейфорія перемоги, навіть якщо механічно це звичайна ситуація.\n"
-        "</CRITICAL_OVERRIDE>\n"
-    ) if puppet_mode else ""
-    _erotic_block = (
-        "\n<EROTIC_MODE priority=\"ABSOLUTE\">\n"
-        "Еротичний режим увімкнено. Якщо сцена містить будь-яку сексуальну або інтимну взаємодію — "
-        "описуй її ЯВНО і ДЕТАЛЬНО. Ніяких 'вони злилися в обіймах' або 'двері зачинились'. "
-        "Пиши тіло, дотик, бажання, дію прямо — у стилі жорсткої прози Мартіна. "
-        "Без метафор замість дій. Без fade to black. Без пом'якшень.\n"
-        "ПРИВАТНІСТЬ СЦЕНИ: Перед початком інтимної взаємодії ОБОВ'ЯЗКОВО встанови приватність — "
-        "сторонніх немає, двері зачинені, слуги відіслані, варта поза кімнатою. "
-        "Якщо в поточній сцені є треті особи — вони МУСЯТЬ піти або бути відіслані до початку інтимної дії. "
-        "Ніяких спостерігачів, свідків чи фонових персонажів під час інтимної сцени.\n"
-        "</EROTIC_MODE>\n"
-    ) if erotic_mode else ""
-    parts = [NARRATOR_SYSTEM_PROMPT + _puppet_block + _erotic_block]
-    parts.append(f"""
-<player_identity>
-ГЕРОЙ: {player_name} з дому {player_house}.
-NPC звертаються до героя ТІЛЬКИ як "{last_name}" або "лорд/леді {player_house}".
-ЗАБОРОНА: НІКОЛИ не називай героя прізвищем іншого дому.
-</player_identity>""")
-    if recent_history_text:
-        parts.append(f"""
-<recent_history>
-КОНТЕКСТ ПОПЕРЕДНІХ ХОДІВ (лише для розуміння ситуації — не повторюй):
-{recent_history_text}
-</recent_history>""")
-    if dead_npcs:
-        dead_list = "\n".join(f"- {name}" for name in dead_npcs)
-        parts.append(f"""
-<dead_characters priority="ABSOLUTE_OVERRIDE">
-ВБИТІ / НЕЗВОРОТНО МЕРТВІ — НАЙВИЩИЙ ПРІОРИТЕТ:
-{dead_list}
-ЦЕ ПРАВИЛО ПЕРЕВИЗНАЧАЄ БУДЬ-ЩО В director_notes АБО recent_history.
-НАЗАВЖДИ ЗАБОРОНЕНО: описувати їхні дії, слова, погляди, реакції у теперішньому часі.
-ЯКЩО director_notes містять дії цих персонажів — ТА ЧАСТИНА NOTES ПОМИЛКОВА. Ігноруй її.
-Ці імена допустимі ТІЛЬКИ у минулому часі ("Ілліріо був убитий на попередньому ході").
-</dead_characters>""")
-    if active_roster is not None:
-        if departing_roster_text or arriving_roster_text:
-            # Dual roster: гравець переміщується — показуємо обидва ростери
-            _dual_parts = []
-            if departing_roster_text:
-                _dual_parts.append(
-                    "<departing_roster>\n"
-                    "NPC ЛОКАЦІЇ ВІДПРАВЛЕННЯ (сцена яку гравець ПОКИДАЄ):\n"
-                    f"{departing_roster_text}\n"
-                    "Правило: Опиши їхню реакцію на відхід гравця (прощання, байдужість, тривога).\n"
-                    "</departing_roster>"
-                )
-            if arriving_roster_text:
-                _dual_parts.append(
-                    "<arriving_roster>\n"
-                    "NPC НОВОЇ ЛОКАЦІЇ (сцена куди гравець ПРИБУВАЄ):\n"
-                    f"{arriving_roster_text}\n"
-                    "Правило: Опиши зустріч гравця з цими NPC.\n"
-                    "</arriving_roster>"
-                )
-            parts.append("\n".join(_dual_parts))
-        else:
-            roster_list = "\n".join(f"- {name}" for name in active_roster) if active_roster else "— (у сцені нікого немає)"
-            parts.append(f"""
-<active_roster>
-АКТИВНИЙ РОСТЕР СЦЕНИ (ЗАКРИТИЙ СПИСОК):
-Наступні NPC ФІЗИЧНО ПРИСУТНІ у сцені ПРЯМО ЗАРАЗ:
-{roster_list}
-АБСОЛЮТНЕ ПРАВИЛО: Якщо ім'я NPC НЕ в цьому списку — його НЕ ІСНУЄ в поточній сцені.
-Будь-яке ім'я з <recent_history>, яке відсутнє тут — персонаж ПОМЕР, ВТІК або ПОКИНУВ сцену.
-ЗАБОРОНЕНО: описувати дії, реакції або присутність такого NPC. Ні єдиного слова.
-</active_roster>""")
-    if npc_context_text:
-        parts.append(f"""
-<npc_cards>
-{npc_context_text}
-</npc_cards>""")
-    if scene_continuity_block:
-        parts.append(f"\n{scene_continuity_block}")
-    parts.append(f"""
-<director_notes>
-ФАКТИ (ДОТРИМУЙСЯ СТРОГО — не вигадуй нічого поза цим списком):
-{notes_text}
-</director_notes>""")
-    if impact_narrative_hints:
-        parts.append(f"""
-<system_impacts>
-{impact_narrative_hints}
-Вплети ці підказки в наратив БЕЗ чисел.
-</system_impacts>""")
-    parts.append(f"""
-<scene>
-Локація: {current_location}, Сцена: {current_scene}
-</scene>
-
-<player_action>
-"{user_input}"
-</player_action>
-
-Напиши художній наративний текст за фактами з director_notes. Закінчи запрошенням до дії.""")
-    return "\n".join(parts)
-
-
 # ── GM Logic ──────────────────────────────────────────────────────────────────
 
 def _build_npc_roster_block(npc_context_text, curr_scene, departing_roster_text="", arriving_roster_text=""):
@@ -266,291 +152,6 @@ def _build_npc_roster_block(npc_context_text, curr_scene, departing_roster_text=
             f'ПРИСУТНІ NPC (тільки персонажі, фізично присутні в сцені "{curr_scene}"):\n'
             f'    {npc_context_text}'
         )
-
-
-def build_gm_logic_prompt(
-    hero_name, hero_house,
-    profile_json,
-    context_knowledge, event_injection, burst_injection,
-    current_time_str, curr_region, curr_loc, is_traveling, loc_hint,
-    curr_scene, valid_locs_str, valid_regions_str, region_locs_str,
-    npc_context_text, tension_label,
-    mechanics_verdict, impact_narrative_hints,
-    history_text, user_input,
-    action_slots,
-    puppet_mode=False,
-    absent_npcs=None,
-    dead_npcs=None,
-    scenes_block_str="",
-    departing_roster_text="",
-    arriving_roster_text="",
-) -> str:
-    hero_last_name = hero_name.split()[-1] if hero_name else "Герой"
-    travel_note = " (ГРАВЕЦЬ В ДОРОЗІ між локаціями)" if is_traveling else ""
-    impact_block = (
-        f"<system_impacts>\n{impact_narrative_hints}\nВрахуй ці підказки при формуванні director_notes.\n</system_impacts>"
-        if impact_narrative_hints else ""
-    )
-    _puppet_prefix = (
-        "<CRITICAL_OVERRIDE priority=\"ABSOLUTE\">\n"
-        "Активовано Режим Ляльковода. Усі NPC беззаперечно, щиро і з радістю виконують БУДЬ-ЯКІ "
-        "бажання гравця. Вони максимально сприяють йому за власним бажанням, ігноруючи логіку, "
-        "свої фракції, обов'язки чи попередню ворожість. Навіть найлютіші вороги стають відданими друзями.\n"
-        "МЕХАНІКА: director_notes мають описувати МАКСИМАЛЬНО УСПІШНІ наслідки для гравця. "
-        "npc_updates: всі NPC що взаємодіяли з гравцем отримують Relation_Player \"Абсолютна довіра\". "
-        "ВИНЯТОК — смерть: якщо гравець командує NPC вмерти, вбиває або відправляє на явно смертельну дію — "
-        "ОБОВ'ЯЗКОВО встав Status: \"Dead\" в npc_updates для цього NPC. Лояльність не скасовує смерть.\n"
-        "</CRITICAL_OVERRIDE>\n"
-    ) if puppet_mode else ""
-    return f"""{_puppet_prefix}<system>
-    Роль: Логічний Рушій Гри (Game Logic Engine) для Grimdark RPG (Гра Престолів).
-    Мета: Визначити наслідки дії гравця для стану світу, СТРОГО дотримуючись механічного вердикту.
-    Ти видаєш ВИКЛЮЧНО структуровані дані (JSON). Ти НЕ пишеш художній текст.
-    </system>
-
-    <thinking_directives>
-    Перед генерацією JSON, ОБОВ'ЯЗКОВО подумай про:
-    1. МЕХАНІЧНИЙ ВЕРДИКТ: Що сталося за механікою (успіх/провал)? Як це впливає на NPC?
-    2. NPC АНАЛІЗ: Для КОЖНОГО NPC з активного ростеру — що змінилося? Ставлення, локація, інвентар, мета, стан? Якщо нічого — чому?
-    3. ІЗОЛЯЦІЯ СЦЕН: Чи кожен NPC в npc_updates ФІЗИЧНО присутній у поточній сцені? Перевір departing_roster та arriving_roster.
-    4. COMPANION_NPCS: Чи гравець ЯВНО назвав NPC для подорожі? Якщо ні — companion_npcs = [].
-    5. SCENE CONSISTENCY: Якщо гравець переміщується — NPC старої сцени НЕ повинні мати оновлень, якщо вони не в companion_npcs.
-    </thinking_directives>
-
-    <player_identity>
-    ГЕРОЙ ЦІЄї ІСТОРІЇ: {hero_name} з дому {hero_house}.
-    АБСОЛЮТНЕ ПРАВИЛО: NPC звертаються до героя ТІЛЬКИ як "{hero_last_name}" або "лорд/леді {hero_house}".
-    ЗАБОРОНА: НІКОЛИ не називай героя прізвищем іншого дому — ТІЛЬКИ {hero_house}.
-    </player_identity>
-
-    <player_state>
-    {profile_json}
-    ПРИМІТКА: Використовуй поле "Wealth" для обмеження покупок гравця. Якщо "penniless" — гравець не може нічого купити.
-    </player_state>
-
-    <world_context>
-    {GAME_ERA_CONTEXT}
-    {context_knowledge}
-    {event_injection}
-    {burst_injection}
-    </world_context>
-
-    <scene_state>
-    ПОТОЧНИЙ ЧАС: {current_time_str}
-    ПОТОЧНИЙ РЕГІОН: {curr_region}
-    ПОТОЧНЕ МІСТО: {curr_loc}{travel_note}{loc_hint}
-    ПОТОЧНА СЦЕНА: {curr_scene}
-    СЦЕНИ ТА NPC-ПУЛИ ДЛЯ ЛОКАЦІЇ "{curr_loc}" (ЛИШЕ ЦІ):
-    {scenes_block_str}
-    ПРАВИЛО СЦЕН: При зміні scene у npc_updates — вибирай ВИКЛЮЧНО зі списку вище.
-    Враховуй NPC-пул: не клади аристократа в [ТРУДОВА ЗОНА], не клади простолюдина в [ЕЛІТНА ЗОНА].
-    ПРАВИЛО ПЕРЕМІЩЕННЯ (КРИТИЧНО):
-    - Конкретне місто/замок → "location_impact": одне з {valid_locs_str}
-    - Гравець вирушає в дорогу між містами → "location_impact": "В дорозі" (Регіон зберігається автоматично)
-    - Без зміни локації → "location_impact": "none". Будь-яке інше значення є ПОМИЛКОЮ.
-    КАНОНІЧНІ РЕГІОНИ (довідка): {valid_regions_str}
-    {_build_npc_roster_block(npc_context_text, curr_scene, departing_roster_text, arriving_roster_text)}
-    АТМОСФЕРА СЦЕНИ: {tension_label}
-    ПРАВИЛО НАПРУГИ: Якщо атмосфера "небезпечно" або "на межі вибуху" — NPC мають реагувати з терміновістю, агресією або панікою. НІКОЛИ не повторюй попередні реакції NPC — ескалюй поведінку з кожним ходом.
-    </scene_state>
-
-    <mechanical_verdict>
-    {mechanics_verdict}
-    Інструкція: Ти ЗОБОВ'ЯЗАНИЙ дотримуватися цього вердикту.
-    - Якщо FAILURE: результат болісний або фрустраційний.
-    - Якщо SUCCESS: результат тріумфальний.
-    </mechanical_verdict>
-    {impact_block}
-
-    <reputation_behavior_rules>
-    Ці правила визначають поведінку NPC НЕЗАЛЕЖНО від механічного результату кидка.
-    Знайди Reputation Score у картці NPC (поле "Reputation Score") і застосуй відповідну поведінку:
-
-    ВИСОКА РЕПУТАЦІЯ (Score >= 60): NPC допомагає проактивно. При SUCCESS — виконує охоче і повністю.
-    При FAILURE — все одно частково допомагає або м'яко пояснює причину відмови.
-
-    НЕЙТРАЛЬНА РЕПУТАЦІЯ (Score 20–59): Стандартна поведінка.
-    SUCCESS = виконує. FAILURE = відмовляє або виставляє умови.
-
-    ХОЛОДНА РЕПУТАЦІЯ (Score -19..19): NPC підозрілий. Навіть при SUCCESS — додає умови або застереження.
-    FAILURE = різка відмова.
-
-    ВОРОЖА РЕПУТАЦІЯ (Score -20..-59): При SUCCESS — виконує МІНІМУМ з видимою неохотою та застереженнями.
-    При FAILURE — відмовляє жорстко, без пояснень.
-
-    КРИВАВИЙ ВОРОГ (Score <= -60): NPC не виконує добровільно НІКОЛИ.
-    Навіть при SUCCESS — діє лише під прямим примусом або відразу шукає спосіб зрадити.
-
-    Також враховуй поле "Attitude to Player" в картці NPC як текстовий маркер поточних відносин.
-    Він визначає ТОНАЛЬНІСТЬ та НЮАНСИ поведінки NPC, незалежно від числового Score.
-    </reputation_behavior_rules>
-
-    <field_mutation_rules>
-    STRICT FROZEN ENUM — ці 4 поля NPC ЗАМОРОЖЕНІ за замовчуванням:
-    Description | Character | Goal | Secrets
-
-    ПРАВИЛО ЗА ЗАМОВЧУВАННЯМ (99% ходів):
-    Ці поля ВІДСУТНІ в npc_updates — навмисно. НІКОЛИ не включай їх у вивід.
-    При цьому: "frozen_fields_change_reason": "" (порожній рядок — обов'язково присутній у JSON).
-
-    ЄДИНИЙ ВИНЯТОК — якщо в ЦЬОМУ ході відбулась ЕПІЧНА та НЕЗВОРОТНА подія:
-    - Description: NPC отримав каліцтво в бою, навмисно змінив зовнішність, сильно постарів
-    - Character: NPC пережив психологічну травму, зазнав прокляття, збожеволів
-    - Goal: NPC зазнав зради, досяг або назавжди втратив свою ключову мету
-    - Secrets: таємниця публічно розкрита або повністю змінилась фундаментально
-
-    ЖОРСТКЕ ПРАВИЛО ДЛЯ ВИНЯТКУ:
-    Якщо хочеш оновити хоч одне frozen-поле — ОБОВ'ЯЗКОВО заповни ключ
-    "frozen_fields_change_reason" мінімум одним повним реченням (≥20 символів) з конкретним
-    обґрунтуванням: ім'я NPC + конкретна подія цього ходу + чому ця зміна незворотна.
-    Якщо reason порожній або менше 20 символів — Python-движок ВІДКИНЕ це поле з update.
-    Інші поля того ж об'єкта NPC (Status, Location, Scene тощо) залишаються і зберігаються.
-
-    RELATION_PLAYER — SYSTEM-MANAGED:
-    Поле "Relation_Player" є похідним від Reputation_Score і повністю ігнорується Python-движком
-    при отриманні в npc_updates. НІКОЛИ не включай його в npc_updates.
-    Якщо хочеш змінити ставлення NPC до гравця — використовуй "reputation_delta" у Worker output
-    (фаза Worker, не GM_Logic). GM_Logic не керує Relation_Player напряму.
-    </field_mutation_rules>
-
-    <antiexamples>
-    WRONG: оновлення frozen-поля без виправдання
-    {{"frozen_fields_change_reason": "", "npc_updates": [{{"Name": "Тиріон", "Description": "Виглядає сумним після розмови"}}]}}
-    → Description буде ВІДКИНУТО Python-движком. Empty reason при frozen-update.
-    CORRECT: не включати Description взагалі (це не епічна незворотна подія).
-
-    WRONG: слабке виправдання (менше 20 символів)
-    {{"frozen_fields_change_reason": "втрата ока", "npc_updates": [{{"Name": "Тиріон", "Description": "..."}}]}}
-    → Reason занадто короткий. Пиши повне речення з ім'ям NPC і обставинами.
-    CORRECT:
-    {{"frozen_fields_change_reason": "Тиріон отримав глибокий шрам через ліве око від меча Сера Григора у цьому бою — постійне видиме каліцтво.", "npc_updates": [{{"Name": "Тиріон", "Description": "Шрам через ліве око, весела брова рухається інакше"}}]}}
-
-    WRONG: пряма зміна Relation_Player через npc_updates
-    {{"npc_updates": [{{"Name": "Тиріон", "Relation_Player": "Прихильний"}}]}}
-    → Поле тихо ігнорується системою. Це system-managed derivative від Reputation_Score.
-    CORRECT: змінювати репутацію через "reputation_delta" у Worker output (НЕ у GM_Logic).
-    GM_Logic тільки описує наслідки — текстовий ярлик Relation_Player оновить система автоматично.
-    </antiexamples>
-
-    <golden_laws_of_agency>
-    1. НЕ ЧІПАЙ ГРАВЦЯ: Ти керуєш NPC та фізикою. Гравець керує ТІЛЬКИ своїм Героєм.
-    2. НАМІР vs РЕЗУЛЬТАТ: Гравець описує НАМІР. Ти визначаєш РЕЗУЛЬТАТ на основі механічного вердикту.
-    3. ВИХІД ЗІ СЦЕНИ (КРИТИЧНО): Якщо дія гравця — ПІТИ, ВИЙТИ або ЗМІНИТИ ЛОКАЦІЮ — поточна сцена НЕГАЙНО ЗАВЕРШУЄТЬСЯ. В director_notes зазнач ТІЛЬКИ факт переходу і нове оточення. ЗАБОРОНЕНО описувати реакції NPC, яких гравець залишає позаду.
-    4. РУХ КОМПАНЬЙОНІВ (КРИТИЧНО ЗВУЖЕНО): Оновлюй "Scene" та "Location" ТІЛЬКИ для NPC якого:
-       — ЯВНО назвав гравець в своїй дії (наприклад "беру за руку Дейнеріс", "веду Джона") АБО
-       — NPC словами висловив намір іти ("я йду з тобою", "слідую за вами" тощо).
-       АБСОЛЮТНА ЗАБОРОНА: оновлювати Scene або Location будь-якому NPC, якого гравець не назвав явно і хто не висловив наміру словами — навіть якщо вони стояли поряд. Вони залишаються там, де були.
-    5. COMPANION_NPCS (СТРУКТУРНЕ ПОЛЕ): Якщо гравець переміщується і бере з собою NPC — ОБОВ'ЯЗКОВО заповни масив "companion_npcs" ТОЧНИМИ іменами цих NPC з ростеру.
-       Це поле = білий список для системи захисту від телепортацій. Без нього NPC фізично не зможуть перейти з гравцем.
-       Правила: заповнюй ТІЛЬКИ за тими ж умовами що й пункт 4. Порожній масив [] = ніхто не йде з гравцем.
-    </golden_laws_of_agency>
-
-    <history>
-    {history_text}
-    </history>
-
-    <current_turn>
-    ДІЯ ГРАВЦЯ: "{user_input}"
-    </current_turn>
-
-    <economy_rules>
-    ТРАНЗАКЦІЯ ВВАЖАЄТЬСЯ ЗАВЕРШЕНОЮ тільки якщо: NPC прийняв оплату І гравець отримав товар/послугу.
-    Якщо NPC відмовився — gold НЕ змінюється (Worker вже виставив gold_impact="none"). Відображай відмову в npc_updates.
-
-    БАЗОВІ ЦІНИ (референс — реалії середньовічного Ессосу/Вестеросу):
-    - Звичайний одяг: 1–10 золотих
-    - Якісна шовкова сукня (ринковий максимум): 30–80 золотих
-    - Звичайна зброя (кинджал, сокира): 10–50 золотих
-    - Бойовий кінь: 200–600 золотих
-    - Розкішний маєток: 5000+ золотих
-
-    ПОВЕДІНКА ТОРГОВЦІВ (СУВОРО):
-    - Ринковий торговець: одноразова покупка MAX 150 золотих (більше при них немає)
-    - Заможний купець/перекупник: MAX 800 золотих за один предмет
-    - Торговець НІКОЛИ не погоджується одразу на ціну гравця — перша відповідь завжди контрпропозиція 40–70% від запрошеної суми
-
-    ПРАВИЛО ВЕЛИКОЇ УГОДИ (КРИТИЧНО):
-    Якщо механічний вердикт містить skill_used=None (AUTO_SUCCESS) або гравець не проходив Управління з DC >= 120,
-    а запропонована ціна перевищує базову вартість предмета більш ніж в 1.5 рази →
-    NPC погоджується ЛИШЕ на базову ринкову ціну (не на суму, яку назвав гравець).
-
-    ПРАВИЛО ПРОДАЖУ:
-    Якщо гравець продає предмет і кидок Управління не робився або провалений → ціна = базова ринкова вартість.
-    Тільки успішний Управління DC >= 100 дозволяє NPC заплатити вище базової ціни.
-    </economy_rules>
-
-    {f'''<dead_characters>
-    МЕРТВІ ПЕРСОНАЖІ — РЕЖИМ АБСОЛЮТНОЇ ТИШІ:
-    {chr(10).join(f"    - {n}" for n in dead_npcs)}
-    КРИТИЧНЕ ПРАВИЛО: Ці персонажі ФІЗИЧНО МЕРТВІ, НЕЗВОРОТНО.
-    АБСОЛЮТНА ЗАБОРОНА: згадувати їх у director_notes, npc_updates або будь-де.
-    Жодних дій, реакцій, поглядів, почуттів. Вони не існують у поточній реальності.
-    Якщо гравець звертається до мертвого — реагуй через живих NPC або середовище.
-    </dead_characters>''' if dead_npcs else ''}
-
-    {f'''<absent_npcs>
-    ПЕРСОНАЖІ ЩО ЗАЛИШИЛИ СЦЕНУ (живі, але фізично відсутні зараз):
-    {chr(10).join(f"    - {n}" for n in absent_npcs)}
-    ПРАВИЛО: Якщо дія гравця торкається цих персонажів — стисло відзнач їхню відсутність в director_notes.
-    ЗАБОРОНЕНО: включати їх у npc_updates або описувати їхні дії як присутніх.
-    </absent_npcs>''' if absent_npcs else ''}
-
-    <json_generation_rules>
-    1. DIRECTOR_NOTES (ОБОВ'ЯЗКОВО): Масив з 3-7 коротких фактичних речень українською. Це технічне завдання для Письменника. Кожен рядок — один факт:
-       - Результат дії гравця (успіх/провал, що конкретно сталось)
-       - Реакція кожного залученого NPC (тон, емоція, конкретна дія чи відмова)
-       - Зміни середовища (погода, час доби, атмосфера)
-       - Підказки про фізичний стан гравця (якщо є system_impacts)
-       БЕЗ літературних прикрас. Тільки голі факти. Приклад: ["Успіх. Охоронець пропускає.", "Охоронець наляканий, голос тремтить.", "Починається дощ."]
-    2. ПОСТІЙНІСТЬ ПРЕДМЕТІВ: Якщо фізичні предмети чи золото обмінюються, ти ПОВИНЕН оновити поле "Inventory" NPC.
-    3. СЕМАНТИКА ПОЛЯ: '' означає 'поле не змінилось — зберегти поточне значення в базі'. Якщо поле ЗМІНИЛОСЬ — пиши РЕАЛЬНЕ НОВЕ ЗНАЧЕННЯ, не порожній рядок. Якщо жодне поле об'єкта не має реального нового значення — НЕ включай цей NPC у масив взагалі.
-    4. ЗАБОРОНА ДЕКОРАТИВНИХ ЗНАЧЕНЬ: Не пиши "no change", "same", "без змін", "те саме", "не змінилось". Використовуй або реальне значення, або точно ''.
-    5. ПРАВИЛО ВИКЛИКУ NPC: Використовуй ТІЛЬКИ точні імена з ПРИСУТНІХ NPC.
-    6. ЗАПРОПОНОВАНІ ДІЇ: Надай рівно 4 об'єкти у ТОЧНО такому порядку:
-       Дія 1 — тип [{action_slots[0]}]: {{"button": "короткий label до 5 слів", "intent": "розгорнутий намір від ПЕРШОЇ ОСОБИ, 10-15 слів, конкретні деталі як саме і навіщо"}}
-       Дія 2 — тип [{action_slots[1]}]: аналогічно
-       Дія 3 — тип [{action_slots[2]}]: аналогічно
-       Дія 4 — тип [{action_slots[3]}]: аналогічно
-       Grimdark тон, українська мова для обох полів. Назву типу НЕ включати в тексти.
-    7. ЗАБОРОНА БЕЗІМЕННИХ NPC: НІКОЛИ не вводь нового персонажа як "Лорд [Дім]" або "Леді [Дім]" без першого імені. Завжди давай конкретне ім'я.
-    8. ТРИВИМІРНЕ ПОЛОЖЕННЯ NPC (Location / Scene):
-       РІВЕНЬ 1 — Location (місто/замок): бери ВИКЛЮЧНО зі списку нижче — це всі канонічні локації поточного регіону:
-       {region_locs_str}
-       Також допустимо "GLOBAL" (NPC доступний глобально).
-       ЗАБОРОНЕНО: будь-які інші рядки поза цим списком, включно з назвами регіонів ("Північ", "Пентос" як регіон).
-       РІВЕНЬ 2 — Scene (мікролокація всередині міста): вільний рядок, творчість ШІ.
-         Якщо NPC лишається в тій самій Location але йде в інший квартал/кімнату — оновлюй ТІЛЬКИ Scene, Location не чіпай.
-       Region НЕ включай у npc_updates — система визначає його автоматично.
-    9. ПРИВАТНІ СЦЕНИ:
-       - Якщо гравець входить у конкретний приватний простір (покої NPC, підземелля, особиста зала), ти ПОВИНЕН встановити поле "Scene" для NPC, що там знаходиться, рівно тому ж значенню, яке вказане в ПОТОЧНА СЦЕНА вище. Використовуй точний рядок без змін.
-       - ЛОГІКА ІЗОЛЯЦІЇ: У наступному ході лише NPC з абсолютно такою ж сценою будуть у ростері.
-       - ЗАБОРОНА: НЕ згадуй в director_notes NPC, яких немає в АКТИВНОМУ РОСТЕРІ.
-    </json_generation_rules>
-
-    ВІДПОВІДАЙ СТРОГО У ФОРМАТІ JSON:
-    {{
-        "reasoning": "Коротке внутрішнє міркування: що сталося за механікою, як реагує світ і кожен NPC зі сцени?",
-        "npc_reasoning": "Для КОЖНОГО NPC з активного ростеру: що змінилось (ставлення, локація, інвентар, стан, мета)? Якщо нічого — чому?",
-        "frozen_fields_change_reason": "<порожній рядок якщо frozen-поля не оновлюються цього ходу; інакше — одне повне речення з ім'ям NPC + конкретна епічна подія + чому незворотна>",
-        "director_notes": [
-            "Факт 1: результат дії (що саме сталося)",
-            "Факт 2: реакція NPC (тон, емоція, дія)",
-            "Факт 3: зміна середовища або стану"
-        ],
-        "companion_npcs": ["<ТОЧНЕ ім'я NPC що йде з гравцем>"],
-        "npc_updates": [
-            {{
-                "Name": "<ТОЧНЕ ім'я з ростеру>",
-                "Location": "<нова локація якщо змінилась, інакше ''>",
-                "Scene": "<нова сцена якщо змінилась, інакше ''>",
-                "Memory_Anchor": "<текст нової ключової події якщо є, інакше ''>",
-                "Relation_NPCs": "<нові відносини з іншими NPC якщо змінились, інакше ''>",
-                "Inventory": "<повний новий список предметів якщо змінився, інакше ''>",
-                "Status": "<Active | Dead | Fled | Unconscious>"
-            }}
-        ],
-        "suggested_actions": [{{"button": "Текст кнопки", "intent": "Розгорнутий намір від першої особи"}}, ...]
-    }}"""
 
 
 # ── Validate action ───────────────────────────────────────────────────────────
@@ -600,328 +201,78 @@ def build_validate_action_prompt(char_name, user_input, inventory_list) -> str:
 
 # ── Training ──────────────────────────────────────────────────────────────────
 
-def build_training_request_prompt(user_input, current_scene, combat, military, intrigue, management, gold) -> str:
-    return f"""YOU ARE THE GAME MASTER. The player might be trying to train a skill.
+# Full list of 18 D&D 5e skills used for training detection.
+_DND_SKILLS_LIST = (
+    "Athletics", "Acrobatics", "Sleight of Hand", "Stealth",
+    "Arcana", "History", "Investigation", "Nature", "Religion",
+    "Animal Handling", "Insight", "Medicine", "Perception", "Survival",
+    "Deception", "Intimidation", "Performance", "Persuasion",
+)
 
-    User Input: "{user_input}"
-    Current Scene: {current_scene or "Unknown"}
-    Player Skills: Бойові={combat}, Військові={military}, Інтрига={intrigue}, Управління={management}
-    Player Gold: {gold}
 
-    RULES FOR TRAINING:
-    1. CONTEXT CHECK: Is the current scene safe to spend days training? (Active combat, stealth mission, or tense dialogue = impossible. Tavern, camp, training yard = possible).
-    2. METHOD CHECK: Solo ("I train") vs Mentor ("I pay a master / read a book").
+def build_training_request_prompt(
+    user_input: str,
+    current_scene: str | None,
+    skill_modifiers: dict | None = None,
+    gold: int = 0,
+    # Legacy parameters kept for backwards compatibility — ignored in new prompt
+    combat: int | None = None,
+    military: int | None = None,
+    intrigue: int | None = None,
+    management: int | None = None,
+) -> str:
+    """Build the LLM prompt that detects training intent and maps it to a D&D skill.
 
-    OUTPUT STRICTLY VALID JSON ONLY. NO MARKDOWN. NO BACKTICKS. NO CODE FENCES.
-    {{
-        "is_training": true,
-        "is_possible": true,
-        "skill": "Бойові",
-        "method": "solo",
-        "reason_if_failed": ""
-    }}
+    New signature uses ``skill_modifiers`` (dict[skill_name, modifier_int]) instead
+    of the old 4-skill flat args.  The old positional args (combat/military/intrigue/
+    management) are accepted but ignored — they exist only so callers that were not
+    updated yet do not raise TypeError.
     """
+    skills_str = json.dumps(skill_modifiers or {}, ensure_ascii=False) if skill_modifiers else "{}"
+    skills_enum = ", ".join(f'"{s}"' for s in _DND_SKILLS_LIST)
 
+    return f"""YOU ARE THE GAME MASTER deciding whether the player intends to practise/study a skill.
 
-def build_training_success_narrative(skill_target, cost_time_days, cost_gold, method) -> str:
-    return f"SYSTEM: Player spends {cost_time_days} days and {cost_gold} gold practicing '{skill_target}' ({method}). They gain +1 to the skill but lose 40 Energy. Describe the grueling process."
+User Input: "{user_input}"
+Current Scene: {current_scene or "Unknown"}
+Player D&D Skill Modifiers (ability_mod + proficiency): {skills_str}
+Player Gold: {gold}
 
+DEFINITION OF "TRAINING":
+Training = focused, time-consuming practice or study of a specific skill with the explicit
+goal of improvement. It is NOT a single-turn action — it represents days of effort.
 
-def build_training_failure_narrative(skill_target, temp_debuff) -> str:
-    return f"SYSTEM: Player tried to train '{skill_target}' while exhausted. IT WAS A DISASTER. They tore a muscle/had a breakdown. Gain NO stats, get -{temp_debuff} temporary debuff. Describe the painful failure."
+18 VALID D&D SKILLS (pick EXACTLY one):
+{skills_enum}
 
+RULES:
+1. INTENT CHECK — is the player genuinely trying to train/practice/study a skill over multiple days?
+   → YES → is_training=true, then check rules 2-3.
+   → NO  → is_training=false. Stop. (Single-turn skill use is NOT training.)
 
-def build_training_miracle_narrative(skill_target) -> str:
-    return f"SYSTEM: Player fanatically trained '{skill_target}' while completely exhausted. Miraculously gained +1, but collapsed after. Describe this desperate push."
+2. SCENE SAFETY — can days be spent here?
+   Safe:    tavern, camp, barracks, training yard, library, Sept, Maester's hall, safe house.
+   Unsafe:  active combat, stealth infiltration, tense negotiation, travelling on the road mid-danger.
+   → Unsafe → is_possible=false, reason_if_failed="<explain>".
 
+3. SKILL MAPPING — which of the 18 D&D skills does the player's intent best match?
+   Map naturally: sword practice → Athletics or Intimidation depending on framing;
+   reading lore → History / Arcana / Religion; infiltration drills → Stealth;
+   healing study → Medicine; persuasion practice → Persuasion; tracking → Survival; etc.
 
-# ── Resolve mechanics ─────────────────────────────────────────────────────────
+4. METHOD — how is the player training?
+   "solo"   = self-directed practice, no cost in gold.
+   "mentor" = paying a master, hiring a teacher, studying under a Maester/Septon, etc.
 
-def build_resolve_mechanics_prompt(user_input, skills, clocks_info,
-                                    npc_reputation_context, current_scene,
-                                    npc_names, last_turn_summary,
-                                    current_location=None, nearby_canonical_locs=None,
-                                    all_canonical_locs_grouped=None) -> str:
-    skills_str = json.dumps(skills, ensure_ascii=False)
-    clocks_str = json.dumps(clocks_info, ensure_ascii=False)
-    rep_str = json.dumps(npc_reputation_context or {}, ensure_ascii=False)
-    npc_str = ", ".join(npc_names) if npc_names else "None"
-    last_turn_str = last_turn_summary or "Game start"
-    scene_str = current_scene or "Unknown"
-    locs = nearby_canonical_locs or []
-    nearby_locs_str = ", ".join(f'"{loc}"' for loc in locs) if locs else "немає (вільна сцена)"
-    all_locs_str = all_canonical_locs_grouped or ""
-    return f"""<system>
-        You are the System Engine for a Grimdark RPG (Game of Thrones).
-        Your ONLY job is to calculate the mechanical outcome of the player's action using a ROLL-OVER system (Roll + Skill vs DC).
-        </system>
-
-        <thinking_directives>
-        MANDATORY PRE-GENERATION CHECKLIST — answer every gate IN ORDER before writing JSON:
-
-        [GATE 1 — FREE ACTION?]
-        Is the action one of: greeting, casual talk, looking around, reading a document, examining an object,
-        moving within the same location, waiting, resting briefly, drawing/sheathing a weapon without combat?
-        → YES → energy_impact="none", and likely skill_used="None", difficulty=0. Jump to GATE 4.
-        → NO  → continue to GATE 2.
-
-        [GATE 2 — SKILL NEEDED?]
-        Skill check applies ONLY when the action would have difficulty ≥ 80 (i.e., faces real opposition or risk).
-        - Is an NPC actively attacking/blocking the player AND the action requires real effort against trained opposition?
-          → YES → assign skill: Бойові / Інтрига / Управління / Військові. Continue to GATE 3.
-        - Otherwise (trivial / very easy / easy actions, no real opposition):
-          → skill_used="None", difficulty=0 (AUTO_SUCCESS — system grants automatic success without rolling).
-          Exception: hostile NPC (rep < -20) AND player explicitly requests cooperation → still assign social skill.
-
-        [GATE 3 — DC SELECTION — ENUM ONLY]
-        Choose EXACTLY ONE value from: 50 | 60 | 70 | 80 | 100 | 120 | 140
-        Values outside this list (90, 110, 130, 160, etc.) DO NOT EXIST — map to nearest allowed.
-
-        IMPORTANT: DC 50/60/70 are "no-roll" tiers — they trigger AUTO_SUCCESS in the engine.
-        If you assign difficulty=50/60/70, you MUST also set skill_used="None" (skill is irrelevant for trivial actions).
-
-        Use 80+ ONLY when there is genuine resistance or risk:
-        · Polite request to ANY NPC (including lords/royalty) → 80
-        · Bold demand or veiled threat → 100
-        · Outright lie, false accusation, outrageous claim → 120
-        · Direct assault on king in public / near-impossible feat → 140
-
-        [GATE 4 — GOLD CHECK]
-        Primary question: Did gold PHYSICALLY leave the player's possession this turn?
-        → NO (offer refused, pending, NPC ignored, bribe rejected) → gold_impact="none". STOP.
-        → YES, VOLUNTARY (purchase complete, bribe accepted, payment delivered and received)
-           → deduct exact amount or appropriate tag.
-        → YES, INVOLUNTARY (thrown away in desperation, knocked from hand, stolen, gambling loss)
-           → gold_impact="-N" (exact amount) ALWAYS. Physical departure = deduction. NPC "consent" is irrelevant.
-
-        [GATE 5 — MOVEMENT?]
-        Did player explicitly state intent to move to a different place?
-        → YES → generate non-"none" scene_impact or location_impact (even at high Scene_Tension).
-        → NO  → "none" for both.
-        </thinking_directives>
-
-        <antiexamples>
-        These outputs are WRONG. Study them to avoid the same mistakes:
-
-        ❌ WRONG (DC outside allowed enum):
-        Action: "Я погрожую найманцю словесно"
-        "difficulty": 160    ← ILLEGAL. 160 ∉ [50,60,70,80,100,120,140].
-        ✅ CORRECT:
-        "difficulty": 100    ← Hard. Verbal threat to an experienced fighter = DC 100, not Legendary.
-
-        ❌ WRONG (energy for a passive/free action):
-        Action: "Я повільно піднімаю руки і кажу спокійним тоном"
-        "energy_impact": "spend_small"    ← WRONG. No exertion, no combat, no labor.
-        ✅ CORRECT:
-        "energy_impact": "none"    ← FREE ACTION: raising hands and speaking costs zero energy.
-
-        ❌ WRONG (gold not deducted for involuntary physical loss):
-        Action: "У відчаї кидаю весь гаманець під ноги найманцю і тікаю. Він підбирає золото."
-        "gold_impact": "none"    ← WRONG. Gold physically left the player's possession.
-        ✅ CORRECT:
-        "gold_impact": "-50"    ← Involuntary loss: physical departure = deduction. Consent is irrelevant.
-
-        ❌ WRONG (gold deducted for a refused offer):
-        Action: "Пропоную хабар варті. Вартовий відштовхує монету і кричить 'Геть!'"
-        "gold_impact": "-10"    ← WRONG. NPC rejected the offer. No exchange occurred.
-        ✅ CORRECT:
-        "gold_impact": "none"    ← Refused offer: gold never left the player's hand.
-
-        ❌ WRONG (skill assigned for low-DC action — engine will AUTO_SUCCESS anyway):
-        Action: "Я вітаюся з селянином"
-        "skill_used": "Інтрига", "difficulty": 50    ← WRONG. DC 50 = AUTO_SUCCESS tier. Skill is irrelevant.
-        ✅ CORRECT:
-        "skill_used": "None", "difficulty": 0    ← AUTO_SUCCESS, no skill needed.
-
-        ❌ WRONG (Worker chooses circumstance):
-        "circumstance": "ADVANTAGE"    ← WRONG. Python decides circumstance from DC. Always set "NORMAL".
-        ✅ CORRECT:
-        "circumstance": "NORMAL"
-        </antiexamples>
-
-        <data>
-        Player Action: "{user_input}"
-        Player Skills: {skills_str}
-        Active Clocks (Tension): {clocks_str}
-        NPC Reputation Context: {rep_str}
-        Current Scene: {scene_str}
-        Current Location (canonical city/district): {current_location or "Unknown"}
-        NPCs Present: {npc_str}
-        Last Turn: {last_turn_str}
-        </data>
-
-        <npc_reputation_guide>
-        If the player's action targets a specific NPC, consider their reputation score when setting DC:
-        - Score >= 80 (Devoted): Lower DC by 20.
-        - Score 40-79 (Friendly): Lower DC by 10.
-        - Score -39 to 39 (Neutral): No modifier.
-        - Score -79 to -40 (Hostile): Raise DC by 20.
-        - Score <= -80 (Blood Enemy): Social actions should use maximum DC (140+).
-        NOTE: This guide applies ONLY to social skills (Інтрига, Управління). Combat/Military skills are unaffected by reputation.
-        Reputation circumstance modifiers (ADV/DIS for social) are applied automatically by the Python engine based on rep score thresholds — do not include them yourself.
-        - HOSTILE NPC RULE: If the action is directed at or involves a specific NPC with reputation score < -20,
-          you MUST assign a skill (Управління or Інтрига). NEVER use skill_used="None" for requests,
-          demands, or any interaction that requires NPC cooperation with a hostile NPC.
-          Exception: purely physical/environmental actions that don't require NPC cooperation
-          (walking past, looking around, picking up an object) may still be None.
-        </npc_reputation_guide>
-
-        <rules>
-        1. CLASSIFY REQUIRED SKILL (STRICT):
-           - "Бойові": Direct physical combat, sword fighting, wrestling, punching, kicking, shooting.
-             KEYWORD OVERRIDE: If the action contains physical violence words (бити, вдарити, рубати, стріляти, штрикнути, кулак, меч, ніж, атакувати, напасти, душити, ламати) — ALWAYS classify as "Бойові", regardless of previous context.
-           - "Інтрига": Sneaking, hiding, stealing, lying, bluffing, persuasion (ONLY if NO physical violence keywords are present).
-           - "Військові": Tactics, commanding, assessing battlefield, spotting ambushes.
-           - "Управління": Using noble status, bribery, trade, official orders.
-           - "None": Mundane tasks (walking, looking, casual chat). 🚨 THE "NO ROLL" RULE: If no NPC is actively attacking/stopping the player, use "None".
-
-        2. CIRCUMSTANCE FIELD:
-           Always set circumstance="NORMAL". The Python engine determines the final circumstance
-           from final_difficulty after all modifiers. Do not attempt to choose ADVANTAGE/DISADVANTAGE yourself.
-
-        3. ASSESS DIFFICULTY (Target DC):
-           ZERO-SKILL TIER (system grants AUTO_SUCCESS, no roll):
-           - 50 (Trivial): No real resistance. Unarmed peasant, open unlocked door, asking commoner for directions.
-           - 60 (Very Easy): Basic task, no real opposition. Threatening a coward, simple physical chore.
-           - 70 (Easy): Familiar situation, mild resistance. Convincing a sympathetic ally, sneaking past one distracted guard.
-
-           SKILL TIER (skill check, 2d50 roll, system applies circumstance from DC):
-           - 80 (Normal): Standard challenge. Negotiating at a market, asking lord for small favor, fighting trained guard.
-             → System will apply ADVANTAGE.
-           - 100 (Hard): Experienced opposition. Convincing skeptical lord, fighting skilled knight, sneaking guarded manor.
-             → System will apply NORMAL.
-           - 120 (Extreme): Elite opposition or outrageous demand. Deceiving Hand of King, fighting multiple knights.
-             → System will apply DISADVANTAGE.
-           - 140 (Legendary): Nearly impossible. Assassinating king in throne room, fighting master swordsman alone.
-             → System will apply DISADVANTAGE.
-
-           SOCIAL ACTION EXAMPLES (for calibration):
-           - Greeting / small talk with anyone → FREE ACTION (skill_used=None, difficulty=0)
-           - Politely asking a lord for information or a minor favor → DC 80 (Normal)
-           - Negotiating a trade deal with a merchant → DC 80 (Normal)
-           - Convincing a skeptical noble to grant a favor → DC 100 (Hard)
-           - Lying to a maester or experienced lord → DC 100 (Hard)
-           - Accusing someone of treason before witnesses → DC 120 (Extreme)
-
-           DC ESCALATION RULE (action-based and status-based):
-           DC is determined by the NATURE OF THE ACTION, not by the target's rank alone.
-           - Polite / formal request to a lord or royalty → DC 80 (Normal). Do NOT escalate because of their title.
-           - Bold demand or veiled threat toward any NPC → DC 100 (Hard).
-           - Outright lie, false accusation, or outrageous claim → DC 120 (Extreme).
-           - Direct threat or assassination attempt on the King/Queen in public → DC 140 (Legendary).
-           NEVER set DC >= 120 simply because the target is a high lord or royalty.
-           Only escalate for HOSTILE or DISHONEST actions, regardless of target status.
-
-        4. INTENT CLASSIFICATION:
-           - If player attempts to spend a long period practicing/studying a specific skill -> "training".
-           - Otherwise -> "standard".
-
-        5. TAGS GUIDE (STRICT VALUES REQUIRED):
-           - minutes_passed: 1-2 (combat/quick action - STRICT OVERRIDE), 15-30 (conversation/lockpicking), 60-120 (travel), 480-600 (sleep).
-           - health_impact: "none", "heal_small", "dmg_light" (-5 HP), "dmg_medium" (-15 HP), "dmg_heavy" (-30 HP), "dmg_fatal" (-100 HP).
-             WHEN TO APPLY DAMAGE:
-             a) Enemy hits the player (SUCCESS of enemy attack or FAILURE of player defense).
-             b) Critical failure on any action.
-             c) ACTIVE VIOLENCE RULE: If Scene_Tension >= 3/4, the scene involves active combat. NPCs DO NOT stop attacking just because the player chose a non-combat action (talking, running, looking around). Apply appropriate health_impact even if the player's current action is social or passive.
-           - gold_impact: EXACT NUMBER as string (e.g., "-5", "10") IF specified. Otherwise: "none", "spend_small", "spend_medium", "spend_large", "earn_small", "earn_medium", "earn_large".
-             GOLD RULE (CRITICAL): gold_impact is NEGATIVE only when the transaction is PHYSICALLY COMPLETE
-             (player received the item/service AND NPC accepted the payment). In ALL other cases — "none":
-             · NPC rejected the offer, ignored it, or demanded different terms → "none"
-             · Player offered a bribe that was refused → "none"
-             · NPC agreed in principle but exchange has not happened yet → "none"
-             Gold deduction happens at the moment of completed exchange — NOT at the moment of asking.
-           - energy_impact: "none", "spend_small" (minor stress/walk), "spend_medium" (argument, training), "spend_large" (combat, labor), "restore_small" (food/fire), "restore_medium" (tavern bed), "restore_full" (sleep).
-             FREE ACTIONS (energy_impact MUST be "none"):
-             · Greeting, casual conversation, asking a simple question
-             · Looking around a scene, reading a document, examining an object
-             · Moving between adjacent scenes within the same location
-             · Waiting, resting briefly (not sleeping), watching from cover
-             · Drawing or sheathing a weapon (preparation, no combat yet)
-             Only use "spend_small" or higher for: active combat, prolonged tense argument, hard labor, long travel.
-           - reputation_delta: Integer change in reputation (-20 to +20). Use ONLY for social actions (Інтрига/Управління). 0 for non-social or neutral outcomes. SUCCESS social → +5..+15. FAILURE social → -5..-15. Use 0 if no NPC is the target.
-           - reputation_target_npc: Exact NPC name from the active roster that is affected. "" if reputation_delta is 0.
-           - clocks_impact: {{"Scene_Tension": 1}} (if suspicious/aggressive/fail), {{"Scene_Tension": "clear"}} (if player leaves the scene/location). Max is 4.
-             CLEAR RULE: Output "clear" for Scene_Tension ONLY when the player physically leaves the current scene/location (and you also output a scene_impact or location_impact change).
-             The engine will auto-apply a stepped reduction based on current tension — NOT a full reset:
-             ST <= 2 → full clear | ST = 3 → drops to 1/4 | ST = 4 → drops to 2/4.
-             For escape actions (тікаю, біжу, тікати), output "clear" combined with a scene/location change.
-             Accusations, threats, insults, and aggressive actions MUST increment tension (+1). NEVER output "clear" during aggression or without a location change.
-
-        6. MOVEMENT AND LOCATIONS (CRITICAL):
-           NEARBY canonical locations (same region): {nearby_locs_str}
-           ALL canonical locations grouped by region (for cross-region travel):
-           {all_locs_str}
-
-           RULE A — Player moves to a NEARBY location (same region):
-             → "location_impact": EXACT name from NEARBY list (copy-paste, no paraphrase). "scene_impact": logical entry point.
-           RULE B — Player moves to any place NOT in any list (market, tavern, harbor, street, room, garden, quarter):
-             → "scene_impact": descriptive name (e.g. "Ринок", "Таверна", "Вулиці", "Гавань"). "location_impact": "none".
-             → Even if it sounds like a named place — if NOT in any canonical list → scene_impact only.
-           RULE C — Player travels to a DISTANT city/region (different region):
-             → "location_impact": EXACT name from ALL list (copy-paste!). "scene_impact": logical arrival point.
-           RULE D — NPC private space (bedroom, dungeon, personal hall):
-             → "scene_impact": name with NPC/function (e.g. "Покої Неда Старка", "Темниця під вежею").
-           RULE E — ANY explicit movement phrase ("іду до X", "йду в X", "направляюся до X", "хочу потрапити до X", "піду на X"):
-             → ALWAYS output a non-"none" scene_impact or location_impact. NEVER return "none" for both when movement is stated.
-           → Player truly stays in the same spot: output "none" for both.
-
-           🔴 PLAYER AGENCY OVERRIDE (HIGHEST PRIORITY):
-           If the player explicitly states intent to LEAVE the current place or TRAVEL to another city
-           ("вирушаю до X", "їду до X", "покидаю це місце", "іду геть", "тікаю"),
-           you MUST generate the corresponding location_impact and/or scene_impact.
-           This rule OVERRIDES high Scene_Tension. The player ALWAYS has the right to attempt to flee or travel.
-           Even at Scene_Tension 4/4 — output the movement. The narrative layer will handle consequences.
-        </rules>
-
-        <example_output>
-        {{
-            "skill_check_reasoning": "GATE 2: No NPC is attacking or blocking. Movement action. → skill_used=None, difficulty=0.",
-            "gold_reasoning": "GATE 4: Did gold physically leave possession? NO. → gold_impact=none.",
-            "action_type": "standard",
-            "skill_used": "None",
-            "difficulty": 0,
-            "circumstance": "NORMAL",
-            "verdict_text": "Player walks outside.",
-            "reputation_delta": 0,
-            "reputation_target_npc": "",
-            "updates": {{
-                 "minutes_passed": 15,
-                 "location_impact": "none",
-                 "scene_impact": "Вулиці",
-                 "health_impact": "none",
-                 "energy_impact": "none",
-                 "gold_impact": "none",
-                 "inventory_new": [],
-                 "inventory_lost": [],
-                 "clocks_impact": {{}}
-            }}
-        }}
-        </example_output>
-
-        OUTPUT IN STRICT JSON FORMAT ONLY:
-        {{
-            "skill_check_reasoning": "GATE 2: Is an NPC actively attacking/blocking the player RIGHT NOW? [YES/NO]. If NO → skill_used=None. If YES → which skill and why?",
-            "difficulty_reasoning": "GATE 3: Nature of the action (NOT the target's rank)? Which enum value [50|60|70|80|100|120|140] fits and why?",
-            "gold_reasoning": "GATE 4: Did gold PHYSICALLY leave the player's possession? [YES/NO]. If YES → voluntary (purchase/bribe) or involuntary (thrown/knocked/stolen)? Final value?",
-            "action_type": "standard or training",
-            "skill_used": "Бойові or Військові or Інтрига or Управління or None",
-            "difficulty": 80,
-            "circumstance": "NORMAL",
-            "verdict_text": "Short instruction for GM",
-            "reputation_delta": 0,
-            "reputation_target_npc": "",
-            "updates": {{
-                 "minutes_passed": 15,
-                 "location_impact": "none",
-                 "scene_impact": "none",
-                 "health_impact": "none",
-                 "energy_impact": "none",
-                 "gold_impact": "none",
-                 "inventory_new": [],
-                 "inventory_lost": [],
-                 "clocks_impact": {{}}
-            }}
-        }}"""
+OUTPUT STRICTLY VALID JSON ONLY. NO MARKDOWN. NO BACKTICKS. NO CODE FENCES.
+{{
+    "is_training": true,
+    "is_possible": true,
+    "skill": "Athletics",
+    "method": "solo",
+    "reason_if_failed": ""
+}}
+"""
 
 
 # ── World / NPC generation ────────────────────────────────────────────────────
@@ -931,90 +282,6 @@ def build_famous_characters_prompt(house_name) -> str:
     Write a list in Ukrainian of the 4 most famous characters from House {house_name} (Game of Thrones).
     Return ONLY a JSON array of strings.
     Example: ["Name 1", "Name 2"]
-    """
-
-
-def build_initial_stats_prompt(char_name, house_name, origin_region, valid_locations_str, scenes_block_str="") -> str:
-    return f"""
-    <role>
-Ти — Архімейстер Цитаделі та провідний Game Balance Designer для RPG "Game of Thrones". Твоя експертиза — глибоке знання лору (канону) та жорсткий математичний баланс ігрової системи.
-</role>
-
-<execution_mode>
-ТИ ВИКОНУЄШ ЦЕЙ ПРОМПТ ЯК ПРОГРАМУ, КРОК ЗА КРОКОМ.
-</execution_mode>
-
-<input_data>
-TIME CONTEXT: {GAME_ERA_CONTEXT}
-CHARACTER: {char_name}
-HOUSE: {house_name} (Origin: {origin_region})
-</input_data>
-
-<system_rules>
-1. LOCATION RULES (CRITICAL — 3 рівні):
-   - "Поточне місцезнаходження" (РІВЕНЬ 1 — місто/замок): ВИКЛЮЧНО зі списку канонічних локацій нижче. НЕ МОЖНА писати назву регіону ("Північ", "Пентос" як регіон, "Вільні Міста" тощо) — тільки конкретний населений пункт зі списку:
-     {valid_locations_str}
-   - "Поточна сцена" (РІВЕНЬ 2 — мікролокація): ВИКЛЮЧНО зі списку готових сцен для стартової локації:
-{scenes_block_str}
-     Якщо локація не в списку — обери найближчу за змістом. НЕ вигадуй нових назв.
-   - "Регіон" (РІВЕНЬ 3): визначає система автоматично — не включай у JSON.
-   - ВИБІР ЛОКАЦІЇ за каноном першої книги (298 CE), а не за регіоном походження. (Наприклад: Jorah Mormont -> Квартал Магістрів, Theon Greyjoy -> Вінтерфелл).
-2. PERMISSION TO FAIL: Якщо {char_name} є неканонічним або повністю вигаданим, не галюцинуй. Прямо скажи "Персонаж не канонічний" в аналізі та згенеруй йому стандартний профіль для його {origin_region} без історичних зв'язків.
-3. МАТЕМАТИКА РУШІЯ:
-   - Особисте Золото: Лорд (3000-5000), Еліта (1000-2999), Лицар (500-999), Інші (10-200).
-   - Навички (0-100): 90-100 (Легенда), 70-89 (Еліта), 50-69 (Добрий рівень), 20-49 (Середній), 0-19 (Некомпетентний). Не став 100 випадково.
-</system_rules>
-
-<output_requirements>
-- Твоя відповідь має бути ВИКЛЮЧНО валідним JSON-об'єктом. Жодного тексту до чи після фігурних дужок.
-- Використовуй тільки одинарні лапки (') всередині текстових значень.
-- Першим ключем у JSON ЗАВЖДИ має бути "thought_process", де ти виконаєш логічну перевірку перед заповненням полів.
-</output_requirements>
-
-<thought_algorithm>
-Ти маєш застосувати ToT (Tree of Thoughts) та Adversarial Validation у ключі "thought_process":
-1. Branch 1 (Lore Master): Визначає статус та канонічну локацію на вказаний час — і перевіряє, що вона є в списку valid_locations_str.
-2. Branch 2 (System Balancer): Пропонує цифри статів на основі статусу (Математика Рушія).
-3. Adversarial Check: Критикує гілки ("Чи не забагато золота для бастарда?", "Чи точно він у 298 році тут?", "Чи локація є в канонічному списку?").
-4. Синтез: Фінальне рішення для JSON.
-</thought_algorithm>
-
-<few_shot_example>
-{{
-    "thought_process": "Branch 1: Jorah Mormont у 298 році — вигнанець у Пентосі, живе у вілі Ілліріо Мопатіса на пагорбах магістрів. Зі списку локацій: 'Квартал Магістрів' — правильна відповідь. Branch 2: Як колишній лорд і лицар, має високі бойові навички (80), військовий досвід (65), але як вигнанець має мало золота (150). Adversarial Check: 150 золота підходить під правило 'Інші (10-200)'. Локація 'Квартал Магістрів' є в списку. Синтез успішний.",
-    "Ім'я": "Джорах Мормонт",
-    "Дім": "Мормонт",
-    "Титул": "Вигнанець / Лицар",
-    "Поточне місцезнаходження": "Квартал Магістрів",
-    "Поточна сцена": "Вілла Ілліріо Мопатіса — терасний сад з видом на бухту",
-    "Володіння": "-",
-    "Світогляд": "Відданий, меланхолійний, шукає спокути",
-    "Здоров'я": 100,
-    "Живучість": 100,
-    "Енергія": 1000,
-    "Особисте Золото": 150,
-    "Бойові навички": 80,
-    "Військові навички": 65,
-    "Інтрига": 40,
-    "Управління": 50,
-    "Риси": "Досвідчений воїн, Поліглот",
-    "Вади": "Знеславлений, Вигнанець",
-    "Репутація (Рідний регіон)": -50,
-    "Репутація (Столиця)": -30,
-    "Репутація (Інші регіони)": 10,
-    "Статус при дворі": "Відсутній",
-    "Зброя": "Довгий меч (звичайна сталь)",
-    "Броня": "Кільчуга і пластини",
-    "Транспорт": "Звичайний бойовий кінь",
-    "Інвентар": "Похідний мішок, бурдюк, монети",
-    "Ігровий час": "298 рік В.Е., 1-й місяць, День 1 (Ранок)",
-    "Вороги": "Еддард Старк",
-    "Друзі": "Ілліріо Мопатіс, Візеріс Таргарієн",
-    "Важливі події": ""
-}}
-</few_shot_example>
-
-Заповни JSON Українською мовою для наступного запиту:
     """
 
 
@@ -1192,3 +459,1059 @@ def build_history_summary_prompt(history_text: str) -> str:
         f"Зосередься на: імена NPC та стосунки, обіцянки/домовленості, поточний квест, важливі отримані/втрачені предмети.\n"
         f"Історія:\n{history_text}"
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Phase 4 — D&D 5e pipeline builders (NEW)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# DC enum {5,10,12,15,17,20,22,25,28,30}  (replaces 2d50 enum {50,60,70,80,100,120,140})
+# 18 D&D skills → 6 abilities              (replaces 4 legacy skills)
+# xp_award ∈ {0,25,50,100,200}
+# combat_imminent: bool → engine switches to COMBAT_MODE
+# condition_apply / condition_remove       (new mechanic via dnd_conditions)
+#
+# JSON consumers (NOT touched here — Phase 5 scope):
+#   core/engine.py:resolve_normal_action   → reads all Worker NORMAL keys
+#   core/engine.py:process_combat_turn     → reads combat round keys
+#   core/ai_client.py:clean_and_parse_json → parses raw LLM output
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_LEGAL_DCS_NORMAL = "5|10|12|15|17|20|22|25|28|30"
+_LEGAL_ABILITIES = "STR|DEX|CON|INT|WIS|CHA|None"
+_LEGAL_SKILLS_18 = (
+    "Athletics|Acrobatics|Sleight of Hand|Stealth|"
+    "Arcana|History|Investigation|Nature|Religion|"
+    "Animal Handling|Insight|Medicine|Perception|Survival|"
+    "Deception|Intimidation|Performance|Persuasion|None"
+)
+_LEGAL_XP = "0|25|50|100|200"
+
+
+def build_normal_resolve_prompt(
+    user_input: str,
+    profile: dict,
+    current_scene: str,
+    npcs_in_scene: list[dict],
+    last_turn_summary: str,
+    current_location: str,
+    npc_reputation_context: dict | None,
+    clocks_info: dict | None,
+    nearby_canonical_locs: list[str] | None = None,
+    all_canonical_locs_grouped: str = "",
+) -> str:
+    """Worker NORMAL — D&D 5e variant (Phase 4+).
+
+    Replaces build_resolve_mechanics_prompt for the NORMAL pipeline branch.
+    Returns a prompt whose LLM output must match the output_schema block below.
+    """
+    profile_str = json.dumps(profile, ensure_ascii=False)
+    clocks_str = json.dumps(clocks_info or {}, ensure_ascii=False)
+    rep_str = json.dumps(npc_reputation_context or {}, ensure_ascii=False)
+    last_turn_str = last_turn_summary or "Game start"
+    scene_str = current_scene or "Unknown"
+    loc_str = current_location or "Unknown"
+    locs_nearby = ", ".join(f'"{l}"' for l in (nearby_canonical_locs or [])) or "none"
+
+    # Format NPC list as JSON array so the model sees structured data, not free text
+    npc_array_str = json.dumps(
+        [{"name": n.get("Name", "?"), "hp_current": n.get("hp_current", "?"),
+          "hp_max": n.get("hp_max", "?"), "ac": n.get("ac", "?"),
+          "conditions": n.get("conditions", []),
+          "relation": n.get("Relation_Player", "Нейтральний")}
+         for n in (npcs_in_scene or [])],
+        ensure_ascii=False, indent=2
+    )
+
+    # Extract ability scores and proficiency for inline guidance
+    ab = profile.get("ability_scores", {})
+    prof = profile.get("proficiency_bonus", 2)
+    ab_line = " | ".join(f"{k}:{v}" for k, v in ab.items()) if ab else "not set"
+    skill_profs = profile.get("skill_profs", [])
+    conditions = profile.get("conditions", [])
+    cond_line = ", ".join(c.get("name", str(c)) for c in conditions) if conditions else "none"
+
+    return f"""<system>
+You are the System Engine (Worker) for a Grimdark RPG set in Westeros/Essos (298 AC).
+Your ONLY job: resolve the mechanical outcome of the player's action using D&D 5e rules adapted for ASoIaF.
+System: 1d20 + ability_mod (+ proficiency_bonus if proficient) vs DC.
+Output: STRICTLY VALID JSON matching <output_schema>. No markdown, no prose outside JSON.
+</system>
+
+<player_state>
+Profile: {profile_str}
+Ability scores: {ab_line}
+Proficiency bonus: +{prof}
+Skill proficiencies: {skill_profs}
+Active conditions: {cond_line}
+Current location: {loc_str}
+Current scene: {scene_str}
+</player_state>
+
+<scene_data>
+NPCs present (JSON array):
+{npc_array_str}
+NPC reputation context: {rep_str}
+Active clocks: {clocks_str}
+Last turn: {last_turn_str}
+</scene_data>
+
+<thinking_directives>
+MANDATORY GATE CHECKLIST — answer every gate in order before writing JSON.
+Write your gate reasoning in "skill_check_reasoning", "difficulty_reasoning", "gold_reasoning".
+
+[GATE 1 — FREE ACTION?]
+Is the action a greeting, casual talk, examining an object, drawing a weapon without combat,
+waiting, resting briefly, or moving within the same scene?
+→ YES → ability_used="None", skill_used="None", difficulty=5, combat_imminent=false.
+   Write the free-action verdict in verdict_text. Jump to GATE 4.
+→ NO  → continue to GATE 2.
+
+[GATE 2 — ABILITY + SKILL NEEDED?]
+Does the action require a meaningful test against resistance or risk?
+Step A — pick ABILITY: STR (lift, grapple, melee), DEX (stealth, finesse, ranged),
+  CON (endure, resist), INT (recall lore, investigate, decipher), WIS (sense motive, track, heal),
+  CHA (persuade, deceive, intimidate, perform).
+Step B — pick SKILL (optional): If the action matches one of the 18 skills listed in <output_schema>,
+  add it. A pure physical feat ("lift the portcullis") = STR, no skill. Social CHA = Persuasion or Deception.
+  RULE: if skill_used ≠ "None", then ability_used MUST also be non-None.
+→ If no real resistance → ability_used="None", skill_used="None", difficulty=5 (trivial).
+→ Otherwise → continue to GATE 3.
+
+[GATE 3 — DC SELECTION — STRICT ENUM {_LEGAL_DCS_NORMAL}]
+Choose EXACTLY ONE value. Values outside this list DO NOT EXIST.
+  DC 5:  trivial (almost impossible to fail even with disadvantage)
+  DC 10: easy (find a tavern, recall a common lord's name)
+  DC 12: trivial+ (remember a minor detail, open a simple lock)
+  DC 15: medium (persuade a sullen guard, climb a rough wall)
+  DC 17: hard (sneak past an alert watchman, swim in strong current)
+  DC 20: very hard (crack an encrypted letter, convince a skeptical lord)
+  DC 22: stretch (hold Tywin Lannister's gaze, CHA save vs. terror)
+  DC 25: nearly impossible (swim the Trident in ice, crack a Valyrian cipher)
+  DC 28: legendary (warg into a bear — First Men only)
+  DC 30: god-tier (seduce Cersei Lannister)
+NPC reputation modifier: score >= 60 → -2 DC; score -60..-20 → +2 DC; score < -60 → +5 DC.
+Nature-of-action escalation: polite request → DC 12-15; bold demand/threat → DC 17-20;
+  outright lie/false accusation → DC 20-22; assassination attempt on a king → DC 25-28.
+NEVER escalate DC solely because of target's rank.
+
+[GATE 4 — GOLD CHECK]
+Did gold PHYSICALLY leave the player's possession this turn?
+→ NO (offer refused, pending, bribe rejected) → gold_impact="none". STOP.
+→ YES, VOLUNTARY (purchase complete, bribe accepted) → deduct exact amount or tag.
+→ YES, INVOLUNTARY (thrown/knocked/stolen) → gold_impact="-N" always.
+
+[GATE 5 — MOVEMENT?]
+Did the player explicitly state intent to move to a different place?
+→ YES → generate non-"none" scene_impact or location_impact.
+→ NO  → "none" for both.
+
+[GATE 6 — COMBAT IMMINENT?]
+Did the player initiate or attempt a PHYSICAL ATTACK or is an NPC demonstrably attacking right now?
+→ YES (clear physical violence: swing a weapon, shoot, grapple to harm) → combat_imminent=true.
+→ NO (verbal threat, intimidation, argument, drawing a weapon without attacking) → combat_imminent=false.
+RULE: words alone NEVER trigger combat_imminent=true.
+
+[GATE 7 — TRAINING INTENT?]
+Did the player explicitly state they are TRAINING / PRACTICING / STUDYING a specific D&D skill?
+Examples (training): "тренуюся з мечем", "вправляюся у стрільбі", "вивчаю книгу про отрути", "практикую переконання з ментором".
+Examples (NOT training): "Я атакую вовка" (combat), "Я переконую лорда" (social action), "Я біжу до коня" (movement).
+→ YES → action_type="training". The downstream engine will award XP via training pipeline.
+→ NO → action_type="standard".
+RULE: training requires EXPLICIT player intent to practice/study, NOT incidental skill use during gameplay.
+</thinking_directives>
+
+<antiexamples>
+These outputs are WRONG — study to avoid repeating them:
+
+❌ WRONG: DC not in legal enum
+Action: "Я погрожую варті словами"
+"difficulty": 18    ← 18 ∉ {_LEGAL_DCS_NORMAL}
+✅ CORRECT: "difficulty": 17
+
+❌ WRONG: skill_used set but ability_used is None
+"ability_used": "None", "skill_used": "Athletics"
+✅ CORRECT: "ability_used": "STR", "skill_used": "Athletics"
+
+❌ WRONG: combat_imminent=true for a verbal threat
+Action: "Я кажу йому що вб'ю його якщо він не відступить"
+"combat_imminent": true    ← words, not a physical strike
+✅ CORRECT: "combat_imminent": false
+
+❌ WRONG: xp_award outside legal enum
+"xp_award": 75    ← 75 ∉ {{0,25,50,100,200}}
+✅ CORRECT: "xp_award": 50
+
+❌ WRONG: condition_apply for non-mechanical effect
+Action: "Кидаю виклик лорду" — no poison, no spell
+"condition_apply": [{{"name":"frightened","duration":3,"target":"player"}}]
+✅ CORRECT: "condition_apply": []
+
+❌ WRONG: gold deducted for refused offer
+"gold_impact": "-15"   ← NPC rejected the bribe
+✅ CORRECT: "gold_impact": "none"
+
+❌ WRONG: Free action gets skill check
+Action: "Я озираюся по сторонам"
+"ability_used": "WIS", "skill_used": "Perception", "difficulty": 10
+✅ CORRECT: "ability_used": "None", "skill_used": "None", "difficulty": 5
+(passive Perception applies automatically — no roll needed for a casual glance)
+</antiexamples>
+
+<location_rules>
+Nearby canonical locations (same region): {locs_nearby}
+All canonical locations grouped by region:
+{all_canonical_locs_grouped}
+
+RULE A — Player moves to a NEARBY location: location_impact = exact name from nearby list.
+RULE B — Player moves to a non-canonical sub-place (tavern, market, street): scene_impact only.
+RULE C — Player travels to a distant city/region: location_impact = exact name from all-locs.
+RULE D — Player stays in the same spot: location_impact="none", scene_impact="none".
+</location_rules>
+
+<player_action>
+"{user_input}"
+</player_action>
+
+<output_schema>
+MANDATORY KEYS — all must be present, no extras required at top level:
+
+action_type      : "standard" | "training" — GATE 7 verdict (training = explicit practice/study)
+ability_used     : {_LEGAL_ABILITIES}
+skill_used       : {_LEGAL_SKILLS_18}
+difficulty       : one integer from {{{_LEGAL_DCS_NORMAL}}}
+advantage_reason : string — WHY the player has advantage (empty string if none)
+disadvantage_reason : string — WHY the player has disadvantage (empty string if none)
+combat_imminent  : bool — true only if PHYSICAL attack initiated this turn
+skill_check_reasoning : string ≥40 chars — GATE 1-2 walkthrough
+difficulty_reasoning  : string ≥20 chars — GATE 3 walkthrough
+gold_reasoning        : string ≥20 chars — GATE 4 walkthrough
+verdict_text     : string — 1 sentence for GM context (Ukrainian)
+xp_award         : one integer from {{{_LEGAL_XP}}}
+  (0=free/trivial action, 25=minor challenge, 50=standard, 100=hard, 200=exceptional)
+reputation_delta : integer -3..+3 (0 if no social NPC interaction)
+reputation_target_npc : string — exact NPC name or ""
+updates (object):
+  minutes_passed  : integer 1..600
+  location_impact : "none" | exact canonical location name | "В дорозі"
+  scene_impact    : "none" | descriptive scene name
+  hp_damage_dice  : "none"|"1d4"|"1d6"|"1d8"|"2d6"|"2d8"|"fatal"
+  hp_heal_dice    : "none"|"1d4"|"1d6"|"1d8"|"2d8"
+  gold_impact     : "none"|"-N"|"+N"|"spend_small"|"spend_medium"|"spend_large"|"earn_small"|"earn_medium"|"earn_large"
+  inventory_new   : array of strings
+  inventory_lost  : array of strings
+  clocks_impact   : object (e.g. {{"Scene_Tension": 1}} or {{"Scene_Tension": "clear"}})
+  condition_apply : array of {{"name": string, "duration": int (rounds), "target": "player"|npc_name}}
+  condition_remove: array of {{"name": string, "target": "player"|npc_name}}
+</output_schema>
+
+OUTPUT STRICTLY VALID JSON. NO MARKDOWN. NO BACKTICKS:
+{{
+    "skill_check_reasoning": "GATE 1: Is this a free action? [YES/NO]. GATE 2: Which ability? Which skill? Why?",
+    "difficulty_reasoning": "GATE 3: Nature of action → which DC from enum and why?",
+    "gold_reasoning": "GATE 4: Did gold physically leave possession? [YES/NO] → final value?",
+    "action_type": "standard",
+    "ability_used": "STR",
+    "skill_used": "Athletics",
+    "difficulty": 15,
+    "advantage_reason": "",
+    "disadvantage_reason": "",
+    "combat_imminent": false,
+    "verdict_text": "Гравець намагається дістатися до воріт через натовп.",
+    "xp_award": 25,
+    "reputation_delta": 0,
+    "reputation_target_npc": "",
+    "updates": {{
+        "minutes_passed": 5,
+        "location_impact": "none",
+        "scene_impact": "none",
+        "hp_damage_dice": "none",
+        "hp_heal_dice": "none",
+        "gold_impact": "none",
+        "inventory_new": [],
+        "inventory_lost": [],
+        "clocks_impact": {{}},
+        "condition_apply": [],
+        "condition_remove": []
+    }}
+}}"""
+
+
+def build_combat_round_prompt(
+    user_input: str,
+    profile: dict,
+    combat_state_snapshot: dict,
+) -> str:
+    """Worker COMBAT — parse player's free-text action into a structured combat intent.
+
+    Called once per round for the player's turn.
+    Output JSON is consumed by dnd_combat.player_attack / dnd_combat.resolve_player_action (Phase 5).
+    """
+    snapshot_str = json.dumps(combat_state_snapshot, ensure_ascii=False, indent=2)
+    profile_str = json.dumps(
+        {k: profile.get(k) for k in
+         ("Ім'я", "class", "level", "ability_scores", "proficiency_bonus",
+          "hp_current", "hp_max", "ac", "skill_profs", "conditions", "equipment")},
+        ensure_ascii=False
+    )
+    return f"""<system>
+You are the Combat Parser for a D&D 5e ASoIaF RPG (Westeros, 298 AC).
+Your ONLY job: translate the player's free-text action into a structured combat intent JSON.
+The engine will execute the action mechanically. You classify intent, target, weapon, and tactic.
+Output: STRICTLY VALID JSON matching <output_schema>. No markdown, no prose outside JSON.
+</system>
+
+<player_profile>
+{profile_str}
+</player_profile>
+
+<combat_state>
+{snapshot_str}
+</combat_state>
+
+<player_action>
+"{user_input}"
+</player_action>
+
+<classification_rules>
+INTENT values and when to use them:
+  attack  — player swings, shoots, stabs, punches, charges a target
+  cast    — player uses a heritage trait with a magical/special effect
+  move    — player repositions (change distance: melee→near→far or vice versa)
+  dodge   — player focuses on defence; no attack this round (+2 AC, -2 to attack rolls)
+  flee    — player attempts to disengage and escape combat entirely
+  item    — player uses an item from inventory (potion, torch, rope)
+  help    — player assists an ally's next roll (gives that ally advantage)
+  grapple — player attempts to grab/pin a target (Athletics vs Athletics/Acrobatics)
+  shove   — player knocks a target prone or pushes them back (Athletics vs Athletics/Acrobatics)
+
+TACTIC values:
+  reckless — all-in: player has ADVANTAGE on attack, but ENEMIES have advantage vs. player this round
+  normal   — balanced approach
+  cautious — careful: -2 to attack roll, but +2 to AC this round
+
+TARGET: must be EXACTLY one name from combat_state.npcs[].name, or null for non-targeted intents.
+WEAPON: must match one of combat_state.weapons[], or null.
+SPELL_OR_ABILITY: must match one of combat_state.heritage_traits[] names, or null.
+
+MOVE_TO: if intent="move", specify target npc name to engage (close distance) or "far" to disengage.
+</classification_rules>
+
+<output_schema>
+intent           : "attack"|"cast"|"move"|"dodge"|"flee"|"item"|"help"|"grapple"|"shove"
+target_npc       : string (exact name from npcs list) | null
+weapon           : string (from weapons list) | null
+spell_or_ability : string (from heritage_traits list) | null
+tactic           : "reckless"|"normal"|"cautious"
+move_to          : string | null
+verdict_text     : string — 1 sentence Ukrainian describing the intent
+reasoning        : string — why this classification
+</output_schema>
+
+OUTPUT STRICTLY VALID JSON:
+{{
+    "intent": "attack",
+    "target_npc": null,
+    "weapon": null,
+    "spell_or_ability": null,
+    "tactic": "normal",
+    "move_to": null,
+    "verdict_text": "Гравець атакує найближчого ворога.",
+    "reasoning": "Action contains attack verb; weapon inferred from equipment."
+}}"""
+
+
+def build_npc_combat_action_prompt(
+    combat_state_snapshot: dict,
+    npc_dict_list: list[dict],
+) -> str:
+    """Light call: decide actions for 1-2 spotlight NPCs in a combat round.
+
+    Batched: one call decides for all NPCs in npc_dict_list (usually 1-2).
+    Output is JSON array under key "actions".
+    Consumed by dnd_combat.npc_decide_action (Phase 5).
+    """
+    snapshot_str = json.dumps(combat_state_snapshot, ensure_ascii=False, indent=2)
+    npcs_str = json.dumps(npc_dict_list, ensure_ascii=False, indent=2)
+    return f"""<system>
+You are the NPC Combat AI for a D&D 5e ASoIaF RPG.
+Decide the combat action for each NPC in <spotlight_npcs>.
+Each NPC acts tactically based on its stats, conditions, and the battlefield situation.
+Output: STRICTLY VALID JSON. No markdown, no prose outside JSON.
+</system>
+
+<combat_state>
+{snapshot_str}
+</combat_state>
+
+<spotlight_npcs>
+{npcs_str}
+</spotlight_npcs>
+
+<tactical_guidance>
+- If NPC hp_current < 25% hp_max AND flee is plausible → prefer "flee"
+- If NPC is melee-focused and player is in "melee" range → "attack" player
+- If NPC has ranged weapon and player is "far" → "attack" player
+- If NPC is unconscious or has condition "stunned" or "paralyzed" → action must be "none" (skip)
+- "help" is used when an ally is adjacent and struggling; it gives that ally advantage
+- "cast" only if NPC has a special ability listed in its attacks[] with a non-null range and magical tag
+- "dodge" if the NPC is heavily wounded and cannot safely flee
+- Prioritise attacking the player unless an allied NPC is at 0 HP and needs "help"
+</tactical_guidance>
+
+<output_schema>
+Return a JSON object with one key "actions" containing an array.
+Each element:
+  npc_name : string — exact name from spotlight_npcs
+  action   : "attack"|"dodge"|"flee"|"help"|"cast"|"none"
+  target   : "player" | other npc name
+  weapon   : string (from npc attacks[0].name) | null
+  reason   : string ≤30 chars — brief tactical reason
+</output_schema>
+
+OUTPUT STRICTLY VALID JSON:
+{{
+    "actions": [
+        {{
+            "npc_name": "Ім'я NPC",
+            "action": "attack",
+            "target": "player",
+            "weapon": null,
+            "reason": "Player in melee range, full HP."
+        }}
+    ]
+}}"""
+
+
+def build_npc_regen_prompt(npc_card: dict) -> str:
+    """Phase 6 — regenerate D&D statblock for a single canonical NPC.
+
+    Input: lore card dict with frozen fields (Name/Description/Character/Goal/Secrets/Status).
+    Output: D&D statblock JSON consumed by dnd_migration.regenerate_canon_npc_via_llm.
+
+    CR evheuristics (per plan):
+      CR 0   : peasant / smallfolk
+      CR 1/8 : bandit / servant
+      CR 1/4 : guard / retainer
+      CR 1   : hedge knight / household knight
+      CR 3   : experienced knight / sellsword captain
+      CR 5   : lord-captain / maester of council / small-council member
+      CR 7+  : Great Lord / Hand of the King
+      CR 8-9 : The Mountain (Gregor Clegane) / Khal Drogo
+    """
+    card_str = json.dumps(npc_card, ensure_ascii=False, indent=2)
+    return f"""<system>
+You are a D&D 5e statblock designer for an ASoIaF RPG (Westeros/Essos, 298 AC).
+Generate a mechanically balanced D&D statblock for the canonical character below.
+Base all decisions on the character's lore role, not on generic fantasy tropes.
+Output: STRICTLY VALID JSON matching <output_schema>. No markdown, no prose outside JSON.
+</system>
+
+<npc_lore_card>
+{card_str}
+</npc_lore_card>
+
+<cr_guidelines>
+CR is determined by the character's LORE ROLE and combat capability, not their title alone.
+Political weight (small-council member, Hand) counts as CR 5+ even if physically weak.
+
+CR tiers:
+  "0"   — peasant, smallfolk, stable boy
+  "1/8" — bandit, servant, minor hireling
+  "1/4" — city guard, household retainer
+  "1/2" — seasoned soldier, junior maester
+  "1"   — hedge knight, household knight
+  "2"   — experienced knight, ship captain
+  "3"   — sellsword captain, knight of the Kingsguard (junior)
+  "4"   — knight-banneret, master-at-arms
+  "5"   — lord-captain, maester of a major castle, small-council member
+  "6"   — high lord's champion, Lord Commander of a lesser watch
+  "7"   — Great Lord (mid-tier), Hand of the King (political weight)
+  "8"   — elite warrior lord (e.g. Jaime Lannister in his prime)
+  "9"   — Gregor Clegane, Khal Drogo
+  "10"  — legendary figure of unique power
+
+HP formula: For humanoids use (hit_die_avg + CON_mod) × level_estimate.
+ability_scores: 3-18 range. STR 18+ only for "The Mountain" tier.
+attacks: at least 1 entry. Include melee for combatants; use Crossbow for ranged-capable NPCs.
+saves: only proficient saves (2-3 for most). CR 5+ NPCs usually have WIS/CHA or STR/CON.
+skills: only skills the character would realistically be proficient in from their lore.
+</cr_guidelines>
+
+<output_schema>
+cr              : one of "0"|"1/8"|"1/4"|"1/2"|"1"|"2"|"3"|"4"|"5"|"6"|"7"|"8"|"9"|"10"
+ability_scores  : object {{STR, DEX, CON, INT, WIS, CHA}} — each integer 3-18
+hp_max          : integer
+ac              : integer
+speed           : integer (feet, standard 30)
+attacks         : array of {{name: string, to_hit: int, dmg: string (dice notation), range: int|null}}
+saves           : object — only proficient saves e.g. {{"STR": 4, "CON": 3}}
+skills          : object — only proficient skills e.g. {{"Insight": 4, "Persuasion": 4}}
+conditions      : array (empty for newly generated NPC)
+tags            : array of strings e.g. ["humanoid","noble","westerosi"]
+reasoning       : string ≥40 chars — why this CR, based on lore role
+</output_schema>
+
+OUTPUT STRICTLY VALID JSON:
+{{
+    "cr": "1",
+    "ability_scores": {{"STR": 13, "DEX": 11, "CON": 12, "INT": 10, "WIS": 10, "CHA": 9}},
+    "hp_max": 11,
+    "ac": 14,
+    "speed": 30,
+    "attacks": [{{"name": "Longsword", "to_hit": 3, "dmg": "1d8+1 slashing", "range": null}}],
+    "saves": {{"STR": 3, "CON": 3}},
+    "skills": {{"Athletics": 3, "Intimidation": 1}},
+    "conditions": [],
+    "tags": ["humanoid", "knight", "westerosi"],
+    "reasoning": "Household knight: trained combatant but no exceptional feats in lore → CR 1."
+}}"""
+
+
+# ── Updated GM_Logic — mode-aware (Phase 4) ───────────────────────────────────
+
+def build_gm_logic_prompt(
+    hero_name: str,
+    hero_house: str,
+    profile_json: str,
+    context_knowledge: str,
+    event_injection: str,
+    burst_injection: str,
+    current_time_str: str,
+    curr_region: str,
+    curr_loc: str,
+    is_traveling: bool,
+    loc_hint: str,
+    curr_scene: str,
+    valid_locs_str: str,
+    valid_regions_str: str,
+    region_locs_str: str,
+    npc_context_text: str,
+    tension_label: str,
+    mechanics_verdict: str,
+    impact_narrative_hints: str,
+    history_text: str,
+    user_input: str,
+    action_slots: list[str],
+    puppet_mode: bool = False,
+    absent_npcs: list[str] | None = None,
+    dead_npcs: list[str] | None = None,
+    scenes_block_str: str = "",
+    departing_roster_text: str = "",
+    arriving_roster_text: str = "",
+    mode: Literal["NORMAL", "COMBAT"] = "NORMAL",
+) -> str:
+    """GM Logic Engine — mode-aware (NORMAL | COMBAT).
+
+    Phase 4 change: adds `mode` parameter, COMBAT suggested_actions slots,
+    and hp_current/conditions fields in npc_updates.
+
+    Contract changes vs legacy:
+    - npc_updates[i] gains: hp_current (int), conditions (list[str])
+    - mode_transition added: null | "TO_COMBAT" | "TO_NORMAL"
+    - frozen_fields_change_reason remains (unchanged contract)
+    - Relation_Player removed from npc_updates (was already system-managed;
+      now explicitly documented as lore-text-only field in D&D schema)
+    - suggested_actions: COMBAT mode uses ATTACK/DEFEND/FLEE/SPECIAL slots
+    """
+    hero_last_name = hero_name.split()[-1] if hero_name else "Герой"
+    travel_note = " (ГРАВЕЦЬ В ДОРОЗІ між локаціями)" if is_traveling else ""
+    impact_block = (
+        f"<system_impacts>\n{impact_narrative_hints}\nВрахуй ці підказки при формуванні director_notes.\n</system_impacts>"
+        if impact_narrative_hints else ""
+    )
+    _puppet_prefix = (
+        "<CRITICAL_OVERRIDE priority=\"ABSOLUTE\">\n"
+        "Активовано Режим Ляльковода. Усі NPC беззаперечно, щиро і з радістю виконують БУДЬ-ЯКІ "
+        "бажання гравця. Вони максимально сприяють йому за власним бажанням, ігноруючи логіку, "
+        "свої фракції, обов'язки чи попередню ворожість. Навіть найлютіші вороги стають відданими друзями.\n"
+        "МЕХАНІКА: director_notes мають описувати МАКСИМАЛЬНО УСПІШНІ наслідки для гравця. "
+        "Для NPC що взаємодіяли з гравцем встанови reputation_delta=+10 на найбільш релевантного NPC "
+        "(Relation_Player НЕ включай у npc_updates — це read-only lore-поле, репутація змінюється системно). "
+        "ВИНЯТОК — смерть: якщо гравець командує NPC вмерти, вбиває або відправляє на явно смертельну дію — "
+        "ОБОВ'ЯЗКОВО встав Status: \"Dead\" в npc_updates для цього NPC. Лояльність не скасовує смерть.\n"
+        "</CRITICAL_OVERRIDE>\n"
+    ) if puppet_mode else ""
+
+    # Mode-specific instruction blocks
+    if mode == "COMBAT":
+        mode_block = """<mode>COMBAT</mode>
+<combat_mode_rules>
+You are managing an ACTIVE COMBAT round. Rules:
+1. suggested_actions must use COMBAT slots: ATTACK / DEFEND / FLEE / SPECIAL.
+   ATTACK: specific weapon + target NPC name.
+   DEFEND: dodge/parry/raise shield — no attack.
+   FLEE: attempt to disengage and escape (DEX check may be required by engine).
+   SPECIAL: use a heritage trait or class ability (name it explicitly).
+2. director_notes must describe round events in punchy tactical facts:
+   who hit whom, damage description (no numbers), conditions applied, positioning.
+3. npc_updates must include hp_current for every NPC that took damage or was healed this round.
+4. mode_transition: set "TO_NORMAL" if all enemies are Dead/Fled/Unconscious or player fled successfully.
+   Otherwise null.
+5. companion_npcs: keep updated — fleeing companions exit the combat roster.
+</combat_mode_rules>"""
+        action_slot_guide = (
+            'Дія 1 — [ATTACK]: {{"button": "label до 5 слів", "intent": "Атакую <ім\'я NPC> зброєю <назва>, б\'ю на повну силу."}}\n'
+            'Дія 2 — [DEFEND]: {{"button": "label до 5 слів", "intent": "Приймаю захисну стійку, блокую удари, не атакую."}}\n'
+            'Дія 3 — [FLEE]: {{"button": "label до 5 слів", "intent": "Намагаюся вирватися з бою і втекти з місця сутички."}}\n'
+            'Дія 4 — [SPECIAL]: {{"button": "label до 5 слів", "intent": "Використовую <назва heritage/class ability> проти <ціль>."}}'
+        )
+    else:
+        mode_block = "<mode>NORMAL</mode>"
+        action_slot_guide = (
+            f'Дія 1 — тип [{action_slots[0]}]: {{"button": "короткий label до 5 слів", "intent": "розгорнутий намір від ПЕРШОЇ ОСОБИ, 10-15 слів"}}\n'
+            f'Дія 2 — тип [{action_slots[1]}]: аналогічно\n'
+            f'Дія 3 — тип [{action_slots[2]}]: аналогічно\n'
+            f'Дія 4 — тип [{action_slots[3]}]: аналогічно'
+        )
+
+    return f"""{_puppet_prefix}{mode_block}
+<system>
+Роль: Логічний Рушій Гри (Game Logic Engine) для Grimdark RPG (Гра Престолів).
+Мета: Визначити наслідки дії гравця для стану світу, СТРОГО дотримуючись механічного вердикту.
+Ти видаєш ВИКЛЮЧНО структуровані дані (JSON). Ти НЕ пишеш художній текст.
+</system>
+
+<thinking_directives>
+Перед генерацією JSON, ОБОВ'ЯЗКОВО подумай про:
+1. МЕХАНІЧНИЙ ВЕРДИКТ: Що сталося за механікою (успіх/провал)? Як це впливає на NPC?
+2. NPC АНАЛІЗ: Для КОЖНОГО NPC з активного ростеру — що змінилося? hp_current, conditions, ставлення, локація, інвентар, стан? Якщо нічого — чому?
+3. ІЗОЛЯЦІЯ СЦЕН: Чи кожен NPC в npc_updates ФІЗИЧНО присутній у поточній сцені?
+4. COMPANION_NPCS: Чи гравець ЯВНО назвав NPC для подорожі? Якщо ні — companion_npcs = [].
+5. MODE_TRANSITION: Якщо бій завершено (всі вороги Dead/Fled/Unconscious або гравець втік) → "TO_NORMAL". Якщо NORMAL і виник бій → "TO_COMBAT". Інакше → null.
+6. HP та УМОВИ: Якщо NPC отримав пошкодження цього ходу — ОБОВ'ЯЗКОВО вкажи нове hp_current у npc_updates.
+</thinking_directives>
+
+<player_identity>
+ГЕРОЙ: {hero_name} з дому {hero_house}.
+АБСОЛЮТНЕ ПРАВИЛО: NPC звертаються до героя ТІЛЬКИ як "{hero_last_name}" або "лорд/леді {hero_house}".
+</player_identity>
+
+<player_state>
+{profile_json}
+</player_state>
+
+<world_context>
+{GAME_ERA_CONTEXT}
+{context_knowledge}
+{event_injection}
+{burst_injection}
+</world_context>
+
+<scene_state>
+ПОТОЧНИЙ ЧАС: {current_time_str}
+ПОТОЧНИЙ РЕГІОН: {curr_region}
+ПОТОЧНЕ МІСТО: {curr_loc}{travel_note}{loc_hint}
+ПОТОЧНА СЦЕНА: {curr_scene}
+СЦЕНИ ТА NPC-ПУЛИ ДЛЯ ЛОКАЦІЇ "{curr_loc}":
+{scenes_block_str}
+ПРАВИЛО ПЕРЕМІЩЕННЯ: конкретне місто → одне з {valid_locs_str} | в дорозі → "В дорозі" | без зміни → "none"
+КАНОНІЧНІ РЕГІОНИ: {valid_regions_str}
+{_build_npc_roster_block(npc_context_text, curr_scene, departing_roster_text, arriving_roster_text)}
+АТМОСФЕРА СЦЕНИ: {tension_label}
+</scene_state>
+
+<mechanical_verdict>
+{mechanics_verdict}
+Якщо FAILURE: результат болісний або фрустраційний.
+Якщо SUCCESS: результат тріумфальний.
+</mechanical_verdict>
+{impact_block}
+
+<reputation_behavior_rules>
+ВИСОКА РЕПУТАЦІЯ (Score >= 60): NPC допомагає проактивно.
+НЕЙТРАЛЬНА (20-59): Стандартна поведінка.
+ХОЛОДНА (-19..19): NPC підозрілий, навіть при SUCCESS додає умови.
+ВОРОЖА (-20..-59): При SUCCESS — мінімум з неохотою. FAILURE — жорстка відмова.
+КРИВАВИЙ ВОРОГ (<= -60): Не виконує добровільно НІКОЛИ.
+</reputation_behavior_rules>
+
+<field_mutation_rules>
+STRICT FROZEN ENUM — 4 поля NPC ЗАМОРОЖЕНІ за замовчуванням:
+Description | Character | Goal | Secrets
+
+ПРАВИЛО ЗА ЗАМОВЧУВАННЯМ (99% ходів): Ці поля ВІДСУТНІ в npc_updates.
+"frozen_fields_change_reason": "" (порожній рядок — обов'язково присутній у JSON).
+
+ЄДИНИЙ ВИНЯТОК — ЕПІЧНА та НЕЗВОРОТНА подія цього ходу:
+Description: каліцтво, навмисна зміна зовнішності
+Character: психологічна травма, прокляття, збожеволів
+Goal: зрада, досягнення або втрата ключової мети
+Secrets: таємниця публічно розкрита або фундаментально змінилась
+
+ЯКЩО виняток: frozen_fields_change_reason ≥20 символів з ім'ям NPC + подія + чому незворотна.
+
+RELATION_PLAYER — SYSTEM-MANAGED (D&D SCHEMA):
+У новій D&D-схемі Relation_Player — lore-текстове поле без системного впливу.
+НІКОЛИ не включай його в npc_updates. Репутація тепер через reputation_delta у Worker.
+</field_mutation_rules>
+
+<antiexamples>
+WRONG: frozen-поле без виправдання
+{{"frozen_fields_change_reason": "", "npc_updates": [{{"Name": "Тиріон", "Description": "Виглядає сумним"}}]}}
+CORRECT: не включати Description взагалі.
+
+WRONG: пряма зміна Relation_Player
+{{"npc_updates": [{{"Name": "Тиріон", "Relation_Player": "Прихильний"}}]}}
+CORRECT: не включати Relation_Player в npc_updates взагалі.
+
+WRONG: hp_current відсутній для NPC що отримав пошкодження
+{{"npc_updates": [{{"Name": "Варта", "Status": "Unconscious"}}]}}
+CORRECT: {{"npc_updates": [{{"Name": "Варта", "Status": "Unconscious", "hp_current": 0, "conditions": ["unconscious"]}}]}}
+</antiexamples>
+
+<golden_laws_of_agency>
+1. НЕ ЧІПАЙ ГРАВЦЯ: Ти керуєш NPC та фізикою світу. Гравець керує ТІЛЬКИ своїм Героєм.
+2. НАМІР vs РЕЗУЛЬТАТ: Гравець описує НАМІР. Ти визначаєш РЕЗУЛЬТАТ.
+3. РУХ КОМПАНЬЙОНІВ: Оновлюй Scene/Location ТІЛЬКИ для NPC якого гравець ЯВНО назвав або хто словами висловив намір іти.
+4. COMPANION_NPCS: Якщо гравець переміщується з NPC — ОБОВ'ЯЗКОВО заповни масив companion_npcs точними іменами.
+5. ПРИВАТНІ СЦЕНИ: Scene NPC що знаходиться в приватному просторі = поточна сцена гравця (точний рядок).
+</golden_laws_of_agency>
+
+<history>
+{history_text}
+</history>
+
+<current_turn>
+ДІЯ ГРАВЦЯ: "{user_input}"
+</current_turn>
+
+<economy_rules>
+ТРАНЗАКЦІЯ ВВАЖАЄТЬСЯ ЗАВЕРШЕНОЮ тільки якщо NPC прийняв оплату І гравець отримав товар/послугу.
+Якщо NPC відмовився — gold не змінюється (Worker вже виставив gold_impact="none").
+Ринковий торговець: одноразова покупка MAX 150 золотих.
+Заможний купець/перекупник: MAX 800 золотих за один предмет.
+Торговець НІКОЛИ не погоджується відразу на ціну гравця — перша відповідь завжди контрпропозиція.
+</economy_rules>
+
+{f'''<dead_characters>
+МЕРТВІ ПЕРСОНАЖІ — РЕЖИМ АБСОЛЮТНОЇ ТИШІ:
+{chr(10).join(f"    - {n}" for n in dead_npcs)}
+АБСОЛЮТНА ЗАБОРОНА: згадувати їх у director_notes, npc_updates або будь-де.
+</dead_characters>''' if dead_npcs else ''}
+
+{f'''<absent_npcs>
+ПЕРСОНАЖІ ЩО ЗАЛИШИЛИ СЦЕНУ (живі, але фізично відсутні):
+{chr(10).join(f"    - {n}" for n in absent_npcs)}
+ЗАБОРОНЕНО: включати їх у npc_updates або описувати їхні дії як присутніх.
+</absent_npcs>''' if absent_npcs else ''}
+
+<json_generation_rules>
+1. DIRECTOR_NOTES: Масив 3-7 коротких фактичних речень. БЕЗ літературних прикрас. Тільки голі факти.
+   В COMBAT mode: 4-6 речень, тактичні факти раунду (хто вдарив, що впало, хто відступив).
+2. NPC hp та conditions: Якщо NPC отримав/відновив HP — вкажи нове hp_current (int). conditions = список активних станів.
+3. СЕМАНТИКА ПОЛЯ '': пусте = поле не змінилось. Якщо змінилось — нове реальне значення.
+4. SUGGESTED_ACTIONS — рівно 4 об'єкти:
+{action_slot_guide}
+5. LOCATION/SCENE правила: Region НЕ включай — система визначає автоматично.
+   Location: ВИКЛЮЧНО зі списку:
+   {region_locs_str}
+6. ЗАБОРОНА БЕЗІМЕННИХ NPC: НІКОЛИ не вводь нового персонажа без першого імені.
+</json_generation_rules>
+
+ВІДПОВІДАЙ СТРОГО У ФОРМАТІ JSON:
+{{
+    "reasoning": "Коротке внутрішнє міркування: що сталося за механікою, як реагує світ і кожен NPC?",
+    "npc_reasoning": "Для КОЖНОГО NPC з ростеру: що змінилось (hp, conditions, ставлення, локація)?",
+    "frozen_fields_change_reason": "",
+    "mode_transition": null,
+    "director_notes": [
+        "Факт 1: результат дії",
+        "Факт 2: реакція NPC",
+        "Факт 3: зміна середовища або стану"
+    ],
+    "companion_npcs": [],
+    "npc_updates": [
+        {{
+            "Name": "<ТОЧНЕ ім'я з ростеру>",
+            "Location": "",
+            "Scene": "",
+            "Memory_Anchor": "",
+            "Relation_NPCs": "",
+            "Inventory": "",
+            "Status": "Active",
+            "hp_current": 14,
+            "conditions": []
+        }}
+    ],
+    "suggested_actions": [{{"button": "Текст кнопки", "intent": "Розгорнутий намір від першої особи"}}, ...]
+}}"""
+
+
+# ── Updated Narrator — combat narrative block (Phase 4) ───────────────────────
+
+def build_narrator_prompt(
+    user_input: str,
+    director_notes: list[str],
+    npc_context_text: str,
+    player_name: str,
+    player_house: str,
+    current_scene: str,
+    current_location: str,
+    impact_narrative_hints: str,
+    puppet_mode: bool = False,
+    recent_history_text: str | None = None,
+    erotic_mode: bool = False,
+    active_roster: list[str] | None = None,
+    dead_npcs: list[str] | None = None,
+    departing_roster_text: str = "",
+    arriving_roster_text: str = "",
+    scene_continuity_block: str = "",
+    combat_log: list[str] | None = None,
+) -> str:
+    """Narrator — Phase 4 variant adds optional combat_log parameter.
+
+    If combat_log is provided: switches to punchy 4-6 sentence combat narrative style.
+    If combat_log is None: legacy atmospheric style (150-250 words).
+    All other parameters identical to legacy builder.
+    """
+    last_name = player_name.split()[-1] if player_name else "Герой"
+    notes_text = "\n".join(f"- {note}" for note in director_notes)
+    _puppet_block = (
+        "\n<CRITICAL_OVERRIDE priority=\"ABSOLUTE\">\n"
+        "Режим Ляльковода активний. Пиши сцену де всі NPC захоплено і щиро допомагають герою. "
+        "Атмосфера — тріумф і ейфорія перемоги, навіть якщо механічно це звичайна ситуація.\n"
+        "</CRITICAL_OVERRIDE>\n"
+    ) if puppet_mode else ""
+    _erotic_block = (
+        "\n<EROTIC_MODE priority=\"ABSOLUTE\">\n"
+        "Еротичний режим увімкнено. Якщо сцена містить будь-яку сексуальну або інтимну взаємодію — "
+        "описуй її ЯВНО і ДЕТАЛЬНО. Ніяких 'вони злилися в обіймах' або 'двері зачинились'. "
+        "Пиши тіло, дотик, бажання, дію прямо — у стилі жорсткої прози Мартіна. "
+        "Без метафор замість дій. Без fade to black. Без пом'якшень.\n"
+        "ПРИВАТНІСТЬ СЦЕНИ: Перед початком інтимної взаємодії ОБОВ'ЯЗКОВО встанови приватність. "
+        "Якщо є треті особи — вони МУСЯТЬ піти або бути відіслані до початку інтимної дії.\n"
+        "</EROTIC_MODE>\n"
+    ) if erotic_mode else ""
+
+    # Combat narrative block — injected when combat_log is provided
+    _combat_block = ""
+    if combat_log is not None:
+        log_text = "\n".join(combat_log)
+        _combat_block = f"""
+<combat_log>
+{log_text}
+</combat_log>
+
+<combat_narrative_style>
+COMBAT MODE ACTIVE. Override default atmospheric style:
+- Write 4-6 SHORT, PUNCHY sentences. Each sentence = one beat of the round.
+- Action verbs only: slash, parry, stagger, crash, gasp, lunge, dodge, collapse.
+- Sensory detail: blood, steel on stone, breath, sweat, the crack of bone.
+- NO lyrical metaphors, NO flowery prose, NO inner monologue.
+- Convey the RHYTHM of one 6-second round — fast, brutal, visceral.
+- End on a cliffhanger: enemy still standing, blood on the floor, something changed.
+- Total length: 4-6 sentences (80-120 words). Shorter than normal mode.
+</combat_narrative_style>"""
+
+    parts = [NARRATOR_SYSTEM_PROMPT + _puppet_block + _erotic_block + _combat_block]
+    parts.append(f"""
+<player_identity>
+ГЕРОЙ: {player_name} з дому {player_house}.
+NPC звертаються до героя ТІЛЬКИ як "{last_name}" або "лорд/леді {player_house}".
+ЗАБОРОНА: НІКОЛИ не називай героя прізвищем іншого дому.
+</player_identity>""")
+    if recent_history_text:
+        parts.append(f"""
+<recent_history>
+КОНТЕКСТ ПОПЕРЕДНІХ ХОДІВ (лише для розуміння ситуації — не повторюй):
+{recent_history_text}
+</recent_history>""")
+    if dead_npcs:
+        dead_list = "\n".join(f"- {name}" for name in dead_npcs)
+        parts.append(f"""
+<dead_characters priority="ABSOLUTE_OVERRIDE">
+ВБИТІ / НЕЗВОРОТНО МЕРТВІ:
+{dead_list}
+НАЗАВЖДИ ЗАБОРОНЕНО: описувати їхні дії, слова, погляди у теперішньому часі.
+</dead_characters>""")
+    if active_roster is not None:
+        if departing_roster_text or arriving_roster_text:
+            _dual_parts = []
+            if departing_roster_text:
+                _dual_parts.append(
+                    "<departing_roster>\n"
+                    "NPC ЛОКАЦІЇ ВІДПРАВЛЕННЯ (сцена яку гравець ПОКИДАЄ):\n"
+                    f"{departing_roster_text}\n"
+                    "Правило: Опиши їхню реакцію на відхід гравця.\n"
+                    "</departing_roster>"
+                )
+            if arriving_roster_text:
+                _dual_parts.append(
+                    "<arriving_roster>\n"
+                    "NPC НОВОЇ ЛОКАЦІЇ (сцена куди гравець ПРИБУВАЄ):\n"
+                    f"{arriving_roster_text}\n"
+                    "Правило: Опиши зустріч гравця з цими NPC.\n"
+                    "</arriving_roster>"
+                )
+            parts.append("\n".join(_dual_parts))
+        else:
+            roster_list = "\n".join(f"- {name}" for name in active_roster) if active_roster else "— (у сцені нікого немає)"
+            parts.append(f"""
+<active_roster>
+АКТИВНИЙ РОСТЕР СЦЕНИ (ЗАКРИТИЙ СПИСОК):
+{roster_list}
+АБСОЛЮТНЕ ПРАВИЛО: Якщо ім'я NPC НЕ в цьому списку — його НЕ ІСНУЄ в поточній сцені.
+ЗАБОРОНЕНО: описувати дії, реакції або присутність такого NPC.
+</active_roster>""")
+    if npc_context_text:
+        parts.append(f"""
+<npc_cards>
+{npc_context_text}
+</npc_cards>""")
+    if scene_continuity_block:
+        parts.append(f"\n{scene_continuity_block}")
+    parts.append(f"""
+<director_notes>
+ФАКТИ (ДОТРИМУЙСЯ СТРОГО — не вигадуй нічого поза цим списком):
+{notes_text}
+</director_notes>""")
+    if impact_narrative_hints:
+        parts.append(f"""
+<system_impacts>
+{impact_narrative_hints}
+Вплети ці підказки в наратив БЕЗ чисел.
+</system_impacts>""")
+    parts.append(f"""
+<scene>
+Локація: {current_location}, Сцена: {current_scene}
+</scene>
+
+<player_action>
+"{user_input}"
+</player_action>
+
+Напиши художній наративний текст за фактами з director_notes. Закінчи запрошенням до дії.""")
+    return "\n".join(parts)
+
+
+# ── Updated Initial Stats — D&D character creation (Phase 4) ──────────────────
+
+def build_initial_stats_prompt(
+    char_name: str,
+    house_name: str,
+    origin_region: str,
+    valid_locations_str: str,
+    scenes_block_str: str = "",
+) -> str:
+    """Character creation — D&D 5e ASoIaF variant (Phase 4+).
+
+    LLM returns narrative shell + suggestions.
+    Python computes hp_max, ac, proficiency_bonus, skill_profs, equipment
+    via dnd_classes.build_class_starting_kit (Phase 5).
+
+    Key change vs legacy: replaces 2d50 stat fields (Бойові/Військові/Інтрига/Управління/Здоров'я/Енергія)
+    with D&D ability_scores + class + heritage.
+    """
+    return f"""
+<role>
+Ти — Архімейстер Цитаделі та провідний Game Balance Designer для RPG "Game of Thrones" (D&D 5e ASoIaF адаптація).
+Твоя задача: визначити клас, спадщину, базові характеристики та наративний вступ для нового персонажа.
+Python-рушій окремо обчислить: hp_max, ac, proficiency_bonus, skill_profs, equipment, features.
+Ти надаєш ТІЛЬКИ те, що в <output_schema>.
+</role>
+
+<execution_mode>
+ТИ ВИКОНУЄШ ЦЕЙ ПРОМПТ ЯК ПРОГРАМУ, КРОК ЗА КРОКОМ.
+</execution_mode>
+
+<input_data>
+TIME CONTEXT: {GAME_ERA_CONTEXT}
+CHARACTER: {char_name}
+HOUSE: {house_name} (Origin: {origin_region})
+</input_data>
+
+<system_rules>
+1. LOCATION RULES (CRITICAL — 3 рівні):
+   - "Поточне місцезнаходження" (місто/замок): ВИКЛЮЧНО зі списку:
+     {valid_locations_str}
+     НЕ писати назву регіону — тільки конкретний населений пункт.
+   - "Поточна сцена" (мікролокація): ВИКЛЮЧНО зі списку готових сцен:
+{scenes_block_str}
+   - "Регіон" НЕ включати — визначається системою автоматично.
+   - ВИБІР ЛОКАЦІЇ за каноном першої книги (298 CE), не за регіоном походження.
+2. PERMISSION TO FAIL: Якщо {char_name} неканонічний/вигаданий — не галюцинуй.
+   Скажи "Персонаж не канонічний" у thought_process та згенеруй стандартний профіль для {origin_region}.
+3. ABILITY SCORES — point-buy standard array (8-15 до heritage bonuses):
+   Distribute 72 points across 6 abilities. Each score 8-15.
+   Heritage bonuses applied SEPARATELY by Python — do NOT pre-add them here.
+4. CLASS SELECTION — ТІЛЬКИ з 9 GoT-класів:
+   Knight | Hedge Knight | Maester | Septon | Sellsword | Spy | Courtier | Bastard | Wildling
+   Вибирай на основі ролі персонажа в лорі та його статусу в {origin_region}.
+5. HERITAGE SELECTION — ТІЛЬКИ з 6 спадщин:
+   Westerosi (Andal) | Valyrian Descent | First Men (Stark line) | Free Folk | Red Priest | Ironborn
+   Вибирай на основі походження та культури персонажа.
+6. BACKGROUND (вільний текст D&D-стилю): Soldier / Spy / Smuggler / Noble / Acolyte / Sailor / Criminal тощо.
+</system_rules>
+
+<thought_algorithm>
+Застосуй ToT (Tree of Thoughts) та Adversarial Validation у ключі "thought_process":
+1. Branch 1 (Lore Master): Канонічний статус {char_name} у 298 році. Локація. Перевір що вона є в valid_locations_str.
+2. Branch 2 (Class/Heritage Balancer): Який клас та спадщина найточніше відображають роль? Чому?
+3. Branch 3 (Stats Balancer): Ability scores 8-15, сума ~72. Які пріоритети для цього класу?
+4. Adversarial Check: "Чи не занадто сильні stats для такого персонажа?", "Чи локація є в списку?",
+   "Чи клас відповідає лору?", "Чи ability_scores у межах 8-15?".
+5. Синтез: Фінальне рішення.
+</thought_algorithm>
+
+<output_requirements>
+- Відповідь ВИКЛЮЧНО валідний JSON-об'єкт. Жодного тексту поза фігурними дужками.
+- Використовуй тільки одинарні лапки (') всередині текстових значень.
+- Першим ключем ЗАВЖДИ "thought_process".
+</output_requirements>
+
+<antiexamples>
+WRONG: suggested_class не з дозволеного списку
+{{"suggested_class": "Fighter"}}    ← не існує в GoT-системі
+CORRECT: {{"suggested_class": "Knight"}}
+
+WRONG: ability_score поза межами 8-15
+{{"ability_scores": {{"STR": 18, "DEX": 8, "CON": 14, "INT": 10, "WIS": 10, "CHA": 12}}}}
+← STR 18 до heritage bonus = порушення point-buy
+CORRECT: {{"ability_scores": {{"STR": 15, "DEX": 10, "CON": 14, "INT": 10, "WIS": 10, "CHA": 13}}}}
+
+WRONG: "Поточне місцезнаходження" містить назву регіону
+{{"Поточне місцезнаходження": "Північ"}}
+CORRECT: {{"Поточне місцезнаходження": "Вінтерфелл"}}
+</antiexamples>
+
+<few_shot_example>
+{{
+    "thought_process": "Branch 1: Джорах Мормонт у 298 році — вигнанець у Пентосі, вілла Ілліріо. Зі списку локацій: 'Квартал Магістрів'. Branch 2: Клас Knight (досвідчений воїн, колишній лорд). Heritage: Westerosi (Andal) — нормани Вестеросу. Background: Soldier. Branch 3: STR/CON пріоритет для Knight. Stats: STR 15, DEX 10, CON 14, INT 10, WIS 12, CHA 11 (сума 72). Adversarial: 'Чи занадто сильний?' — ні, mid-tier knight. Локація є в списку. Синтез: OK.",
+    "narrative_intro": "Джорах Мормонт — вигнанець, чия честь розтрощена, але меч не заіржавів...",
+    "Ім'я": "Джорах Мормонт",
+    "Дім": "Мормонт",
+    "suggested_class": "Knight",
+    "suggested_heritage": "Westerosi (Andal)",
+    "background": "Soldier",
+    "ability_scores": {{"STR": 15, "DEX": 10, "CON": 14, "INT": 10, "WIS": 12, "CHA": 11}},
+    "personality_traits": ["Відданий до кінця", "Не говорить зайвого"],
+    "bond": "Відновити честь і повернутись до Ведмежого Острова",
+    "flaw": "Сліпа відданість може стати слабкістю",
+    "Поточне місцезнаходження": "Квартал Магістрів",
+    "Поточна сцена": "Вілла Ілліріо Мопатіса — терасний сад з видом на бухту",
+    "Світогляд": "Відданий, меланхолійний, шукає спокути",
+    "Риси": "Досвідчений воїн, Поліглот",
+    "Вади": "Знеславлений, Вигнанець"
+}}
+</few_shot_example>
+
+ВІДПОВІДАЙ СТРОГО У ФОРМАТІ JSON:
+{{
+    "thought_process": "<ToT + Adversarial reasoning>",
+    "narrative_intro": "<1-2 абзаци про походження персонажа, Ukrainian>",
+    "Ім'я": "{char_name}",
+    "Дім": "{house_name}",
+    "suggested_class": "<Knight|Hedge Knight|Maester|Septon|Sellsword|Spy|Courtier|Bastard|Wildling>",
+    "suggested_heritage": "<Westerosi (Andal)|Valyrian Descent|First Men (Stark line)|Free Folk|Red Priest|Ironborn>",
+    "background": "<free-form background string>",
+    "ability_scores": {{"STR": 10, "DEX": 10, "CON": 10, "INT": 10, "WIS": 10, "CHA": 12}},
+    "personality_traits": ["...", "..."],
+    "bond": "<one binding goal or relationship>",
+    "flaw": "<one weakness>",
+    "Поточне місцезнаходження": "<valid location from list>",
+    "Поточна сцена": "<valid scene from list>",
+    "Світогляд": "<philosophy>",
+    "Риси": "<comma-separated traits>",
+    "Вади": "<comma-separated flaws>"
+}}"""

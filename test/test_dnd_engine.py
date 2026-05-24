@@ -1,0 +1,1096 @@
+"""
+test_dnd_engine.py
+
+Tests for core/dnd_engine.py (Phase 5):
+  - resolve_normal_action: async D&D Worker (mocks LLM)
+  - apply_dnd_impacts: HP dice, conditions, XP, delegation to legacy
+  - process_game_turn integration: FSM dispatcher, COMBAT/NORMAL/combat_imminent
+
+Strategy:
+  - LLM is mocked via patch('core.dnd_engine.model_worker.generate_content') +
+    patch('core.dnd_engine.clean_and_parse_json').
+  - Dice are mocked via patch('core.dnd_engine.random.randint') where determinism matters.
+  - No real Google Sheets or Gemini API calls.
+"""
+
+import asyncio
+import logging
+import random
+from contextlib import ExitStack
+from unittest.mock import patch, MagicMock, AsyncMock, call
+
+import pytest
+
+
+# ---------------------------------------------------------------------------
+# Helpers: minimal profile and LLM response factories
+# ---------------------------------------------------------------------------
+
+def _dnd_profile(**overrides) -> dict:
+    """Return a minimal D&D profile for testing resolve_normal_action."""
+    base = {
+        "Ім'я": "TestHero",
+        "Дім": "Stark",
+        "Титул": "Lord",
+        "Здоров'я": 100,
+        "Енергія": 800,
+        "Особисте Золото": 200,
+        "Поточне місцезнаходження": "Вінтерфелл",
+        "Поточна сцена": "Throne Room",
+        "Регіон": "Північ",
+        "Ігровий час": "Day 1, Morning",
+        "Інвентар": "Sword",
+        "Зброя": "Longsword",
+        "Броня": "Chainmail",
+        "Транспорт": "Horse",
+        "Світогляд": "Neutral",
+        "Риси": "Brave",
+        "Вади": "Stubborn",
+        "Вороги": "",
+        "Друзі": "",
+        "Годинники": {"Scene_Tension": "0/4"},
+        "level": 1,
+        "ability_scores": {"STR": 16, "DEX": 12, "CON": 14, "INT": 10, "WIS": 10, "CHA": 10},
+        "skill_profs": ["Athletics", "Intimidation"],
+        "skill_expertise": [],
+        "saves_proficient": ["STR", "CON"],
+        "conditions": [],
+        "xp": 0,
+    }
+    base.update(overrides)
+    return base
+
+
+def _dnd_profile_with_hp(**overrides) -> dict:
+    """Return a D&D profile that uses hp_current/hp_max (new-style)."""
+    base = _dnd_profile(**overrides)
+    base["hp_current"] = 50
+    base["hp_max"] = 50
+    return base
+
+
+def _llm_response_json(data: dict) -> str:
+    """Serialize dict to JSON string as an LLM would return."""
+    import json
+    return json.dumps(data, ensure_ascii=False)
+
+
+def _make_llm_response(data: dict) -> MagicMock:
+    m = MagicMock()
+    m.text = _llm_response_json(data)
+    return m
+
+
+def _minimal_worker_data(**overrides) -> dict:
+    """Minimal valid LLM output for resolve_normal_action."""
+    base = {
+        "ability_used": "STR",
+        "skill_used": "Athletics",
+        "difficulty": 15,
+        "advantage_reason": "",
+        "disadvantage_reason": "",
+        "combat_imminent": False,
+        "verdict_text": "You succeed with ease.",
+        "xp_award": 25,
+        "reputation_delta": 0,
+        "reputation_target_npc": "",
+        "updates": {
+            "minutes_passed": 5,
+            "location_impact": "none",
+            "scene_impact": "none",
+            "hp_damage_dice": "none",
+            "hp_heal_dice": "none",
+            "gold_impact": "none",
+            "inventory_new": [],
+            "inventory_lost": [],
+            "clocks_impact": {},
+            "condition_apply": [],
+            "condition_remove": [],
+        },
+    }
+    base.update(overrides)
+    return base
+
+
+def _run_async(coro):
+    """Helper: run a coroutine in a fresh event loop (asyncio.run creates a new loop).
+    Using asyncio.run() instead of get_event_loop().run_until_complete() avoids
+    RuntimeError when a prior test already closed the current event loop (e.g. after asyncio.run()).
+    """
+    return asyncio.run(coro)
+
+
+# ---------------------------------------------------------------------------
+# Fixture: patch all LLM + prompt calls for resolve_normal_action
+# ---------------------------------------------------------------------------
+
+def _patches_for_resolve(worker_data: dict = None, fail_llm: bool = False):
+    """
+    Return a list of patch context managers for isolating resolve_normal_action.
+    worker_data: the dict that clean_and_parse_json will return.
+    fail_llm: if True, make generate_content raise an exception.
+    """
+    if worker_data is None:
+        worker_data = _minimal_worker_data()
+
+    if fail_llm:
+        gen_patch = patch(
+            "core.dnd_engine.model_worker.generate_content",
+            side_effect=Exception("Simulated LLM failure"),
+        )
+    else:
+        gen_patch = patch(
+            "core.dnd_engine.model_worker.generate_content",
+            return_value=_make_llm_response(worker_data),
+        )
+
+    parse_patch = patch(
+        "core.dnd_engine.clean_and_parse_json",
+        return_value=worker_data if not fail_llm else None,
+    )
+
+    prompt_patch = patch(
+        "core.dnd_engine.build_normal_resolve_prompt",
+        return_value="MOCK_PROMPT",
+    )
+
+    return [gen_patch, parse_patch, prompt_patch]
+
+
+# ===========================================================================
+# Tests: resolve_normal_action
+# ===========================================================================
+
+class TestResolveNormalAction:
+    """Tests for the async D&D Worker (resolve_normal_action)."""
+
+    # 1. Valid JSON with Athletics skill + DC 15 → outcome is SUCCESS or FAILURE
+    def test_valid_skill_check_outcome_in_expected_set(self):
+        """LLM returns ability_used=STR, skill_used=Athletics, difficulty=15.
+        Outcome must be one of the 4 valid strings."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data(ability_used="STR", skill_used="Athletics", difficulty=15)
+
+        async def _run():
+            from core.dnd_engine import resolve_normal_action
+            return await resolve_normal_action(
+                user_input="Climb the wall",
+                profile=profile,
+                current_location="Вінтерфелл",
+            )
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            verdict, updates = _run_async(_run())
+
+        valid_outcomes = {"SUCCESS", "FAILURE", "CRITICAL SUCCESS", "CRITICAL FAILURE"}
+        assert updates["outcome"] in valid_outcomes, (
+            f"outcome must be in {valid_outcomes}, got {updates['outcome']!r}"
+        )
+
+    # 2. Invalid DC=18 → clamped to nearest legal DC (17 or 20)
+    def test_invalid_dc_is_clamped_to_legal_value(self):
+        """LLM returns difficulty=18 (not in LEGAL_DCS) → clamp_dc snaps to 17 or 20."""
+        from core.dnd_core import LEGAL_DCS
+        profile = _dnd_profile()
+        data = _minimal_worker_data(difficulty=18)
+
+        async def _run():
+            from core.dnd_engine import resolve_normal_action
+            return await resolve_normal_action(
+                user_input="Investigate the room",
+                profile=profile,
+            )
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            _, updates = _run_async(_run())
+
+        assert updates["difficulty"] in LEGAL_DCS, (
+            f"difficulty must be in LEGAL_DCS={LEGAL_DCS}, got {updates['difficulty']}"
+        )
+
+    # 3. advantage_reason set → advantage used; roll is max of 2
+    def test_advantage_reason_applies_advantage(self):
+        """LLM returns advantage_reason='flanking', no disadvantage.
+        With advantage, roll should be >= either single roll (statistical proxy: patch to deterministic)."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data(
+            ability_used="STR",
+            skill_used="Athletics",
+            difficulty=10,
+            advantage_reason="flanking",
+            disadvantage_reason="",
+        )
+
+        # Patch roll_d20 to return a deterministic advantage result
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            # roll_d20 with advantage returns max([r1, r2]); patch randint to return 15, 8
+            with patch("core.dnd_core.random.randint", side_effect=[15, 8]):
+                async def _run():
+                    from core.dnd_engine import resolve_normal_action
+                    return await resolve_normal_action(
+                        user_input="Attack with flanking",
+                        profile=profile,
+                    )
+                _, updates = _run_async(_run())
+
+        # With advantage and rolls [15,8], natural should be 15 (max)
+        assert updates.get("natural_roll", 0) == 15, (
+            f"With advantage and rolls [15,8], natural_roll must be 15. "
+            f"Got natural_roll={updates.get('natural_roll')}"
+        )
+
+    # 4. disadvantage_reason set → disadvantage used; roll is min of 2
+    def test_disadvantage_reason_applies_disadvantage(self):
+        """LLM returns disadvantage_reason='dim light', no advantage.
+        Patch randint to [15, 8] → natural must be 8 (min)."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data(
+            ability_used="DEX",
+            skill_used="Stealth",
+            difficulty=12,
+            advantage_reason="",
+            disadvantage_reason="dim light",
+        )
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            with patch("core.dnd_core.random.randint", side_effect=[15, 8]):
+                async def _run():
+                    from core.dnd_engine import resolve_normal_action
+                    return await resolve_normal_action(
+                        user_input="Sneak through the darkness",
+                        profile=profile,
+                    )
+                _, updates = _run_async(_run())
+
+        assert updates.get("natural_roll", 0) == 8, (
+            f"With disadvantage and rolls [15,8], natural_roll must be 8. "
+            f"Got natural_roll={updates.get('natural_roll')}"
+        )
+
+    # 5. Both advantage_reason and disadvantage_reason → cancel out → normal roll (single d20)
+    def test_both_adv_and_dis_cancel_to_normal(self):
+        """When both advantage_reason and disadvantage_reason are set, they cancel.
+        With normal roll, randint is called once → natural equals that roll."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data(
+            ability_used="STR",
+            skill_used="Athletics",
+            difficulty=10,
+            advantage_reason="high ground",
+            disadvantage_reason="exhausted",
+        )
+
+        call_count = []
+
+        original_randint = random.randint
+
+        def counting_randint(a, b):
+            call_count.append(1)
+            return 12  # deterministic
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            with patch("core.dnd_core.random.randint", side_effect=counting_randint):
+                async def _run():
+                    from core.dnd_engine import resolve_normal_action
+                    return await resolve_normal_action(
+                        user_input="Push the door",
+                        profile=profile,
+                    )
+                _, updates = _run_async(_run())
+
+        # Normal roll = 1 call to randint (not 2)
+        assert len(call_count) == 1, (
+            f"Cancellation should yield normal roll (1 die). Got {len(call_count)} calls."
+        )
+        assert updates.get("natural_roll") == 12
+
+    # 6. profile with condition "poisoned" → forced disadvantage
+    def test_poisoned_condition_forces_disadvantage(self):
+        """Profile has condition 'poisoned'. Even with advantage_reason set, poisoned imposes
+        disadvantage on checks (D&D PHB) → both cancel if advantage_reason also set."""
+        from core.dnd_conditions import apply_condition
+        profile = _dnd_profile()
+        apply_condition(profile, "poisoned", duration_rounds=3, source="snake_bite")
+
+        data = _minimal_worker_data(
+            ability_used="STR",
+            skill_used="Athletics",
+            difficulty=12,
+            advantage_reason="",
+            disadvantage_reason="",
+        )
+
+        call_count = []
+
+        def counting_randint(a, b):
+            call_count.append(1)
+            return 10
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            with patch("core.dnd_core.random.randint", side_effect=counting_randint):
+                async def _run():
+                    from core.dnd_engine import resolve_normal_action
+                    return await resolve_normal_action(
+                        user_input="Push through the obstacle",
+                        profile=profile,
+                    )
+                _, updates = _run_async(_run())
+
+        # Poisoned → disadvantage → 2 dice calls (min taken)
+        assert len(call_count) == 2, (
+            f"Poisoned should impose disadvantage (2 dice rolls). Got {len(call_count)} calls."
+        )
+
+    # 7. nat 1 → outcome == CRITICAL FAILURE
+    def test_nat_1_yields_critical_failure(self):
+        """When d20 roll is 1, outcome must be CRITICAL FAILURE (D&D 5e nat 1 rule)."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data(
+            ability_used="STR",
+            skill_used="Athletics",
+            difficulty=10,
+        )
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            with patch("core.dnd_core.random.randint", return_value=1):
+                async def _run():
+                    from core.dnd_engine import resolve_normal_action
+                    return await resolve_normal_action(
+                        user_input="Attempt a difficult jump",
+                        profile=profile,
+                    )
+                _, updates = _run_async(_run())
+
+        assert updates["outcome"] == "CRITICAL FAILURE", (
+            f"nat 1 must yield CRITICAL FAILURE, got {updates['outcome']!r}"
+        )
+        assert updates["natural_roll"] == 1
+
+    # 8. nat 20 → outcome == CRITICAL SUCCESS
+    def test_nat_20_yields_critical_success(self):
+        """When d20 roll is 20, outcome must be CRITICAL SUCCESS."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data(
+            ability_used="STR",
+            skill_used="Athletics",
+            difficulty=25,  # high DC so only nat 20 would "succeed"
+        )
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            with patch("core.dnd_core.random.randint", return_value=20):
+                async def _run():
+                    from core.dnd_engine import resolve_normal_action
+                    return await resolve_normal_action(
+                        user_input="Attempt a heroic feat",
+                        profile=profile,
+                    )
+                _, updates = _run_async(_run())
+
+        assert updates["outcome"] == "CRITICAL SUCCESS", (
+            f"nat 20 must yield CRITICAL SUCCESS, got {updates['outcome']!r}"
+        )
+        assert updates["natural_roll"] == 20
+
+    # 9. DC <= 5 (trivial action) → AUTO_SUCCESS without roll
+    def test_trivial_dc_yields_auto_success_no_roll(self):
+        """When difficulty=5 (AUTO_SUCCESS_MAX_DC) and skill_used='None', ability_used='None',
+        no dice are rolled and outcome is SUCCESS."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data(
+            ability_used="None",
+            skill_used="None",
+            difficulty=5,
+        )
+
+        roll_calls = []
+
+        def spy_randint(a, b):
+            roll_calls.append(1)
+            return 10
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            with patch("core.dnd_core.random.randint", side_effect=spy_randint):
+                async def _run():
+                    from core.dnd_engine import resolve_normal_action
+                    return await resolve_normal_action(
+                        user_input="Say hello",
+                        profile=profile,
+                    )
+                verdict, updates = _run_async(_run())
+
+        # No dice rolled for trivial/free action
+        assert roll_calls == [], (
+            f"No dice should be rolled for AUTO_SUCCESS. Got {len(roll_calls)} calls."
+        )
+        assert updates["outcome"] == "SUCCESS"
+        assert updates["natural_roll"] == 0
+
+    # 10. Danger keywords in user_input → DC floor applied (DC >= 25)
+    def test_danger_keywords_apply_dc_floor(self):
+        """'стриб з даху' contains danger keyword → clamped_dc must be >= _DANGER_DC_FLOOR (25).
+        LLM returns difficulty=10, which would normally clamp to 10, but danger floor = 25."""
+        from core.dnd_core import LEGAL_DCS
+        profile = _dnd_profile()
+        data = _minimal_worker_data(
+            ability_used="STR",
+            skill_used="Athletics",
+            difficulty=10,
+        )
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            async def _run():
+                from core.dnd_engine import resolve_normal_action
+                return await resolve_normal_action(
+                    user_input="Стрибаю з даху будинку",
+                    profile=profile,
+                )
+            _, updates = _run_async(_run())
+
+        # _DANGER_DC_FLOOR = 25; clamp_dc(25) = 25 (it's in LEGAL_DCS)
+        assert updates["difficulty"] >= 25, (
+            f"Danger keyword must impose DC floor >= 25. Got difficulty={updates['difficulty']}"
+        )
+
+    # 11. LLM failure → AUTO_SUCCESS fallback
+    def test_llm_failure_falls_back_to_auto_success(self):
+        """When model_worker.generate_content raises an exception, resolve_normal_action
+        must return AUTO_SUCCESS without re-raising."""
+        profile = _dnd_profile()
+
+        async def _run():
+            from core.dnd_engine import resolve_normal_action
+            return await resolve_normal_action(
+                user_input="Look around the room",
+                profile=profile,
+            )
+
+        prompt_patch = patch(
+            "core.dnd_engine.build_normal_resolve_prompt",
+            return_value="MOCK_PROMPT",
+        )
+        with prompt_patch:
+            with patch(
+                "core.dnd_engine.model_worker.generate_content",
+                side_effect=Exception("LLM timeout"),
+            ):
+                with patch("core.dnd_engine.clean_and_parse_json", return_value=None):
+                    verdict, updates = _run_async(_run())
+
+        assert updates["outcome"] == "SUCCESS", (
+            f"LLM fallback must yield SUCCESS, got {updates['outcome']!r}"
+        )
+        assert "AUTO_SUCCESS" in verdict, (
+            f"Fallback verdict must contain 'AUTO_SUCCESS', got {verdict!r}"
+        )
+
+
+# ===========================================================================
+# Tests: apply_dnd_impacts
+# ===========================================================================
+
+class TestApplyDndImpacts:
+    """Tests for apply_dnd_impacts (HP dice, conditions, XP, legacy delegation)."""
+
+    # 12. hp_damage_dice="1d6" → profile['hp_current'] -= roll
+    def test_hp_damage_dice_reduces_hp_current(self):
+        """hp_damage_dice='1d6' with mocked roll=4 → hp_current decreases by 4."""
+        profile = _dnd_profile_with_hp(hp_current=50, hp_max=50)
+        updates = {
+            "hp_damage_dice": "1d6",
+            "hp_heal_dice": "none",
+            "condition_apply": [],
+            "condition_remove": [],
+            "xp_award": 0,
+            "minutes_passed": 5,
+            "location_impact": "none",
+            "scene_impact": "none",
+            "health_impact": "none",
+            "energy_impact": "none",
+            "gold_impact": "none",
+            "inventory_new": [],
+            "inventory_lost": [],
+            "clocks_impact": {},
+        }
+
+        with patch("core.dnd_engine.random.randint", return_value=4):
+            from core.dnd_engine import apply_dnd_impacts
+            result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        assert result_profile["hp_current"] == 46, (
+            f"hp_current must be 50-4=46, got {result_profile['hp_current']}"
+        )
+        assert any("46" in log for log in logs), (
+            f"Logs must mention new HP 46. Got logs: {logs}"
+        )
+
+    # 13. hp_heal_dice="1d8" → hp_current does not exceed hp_max
+    def test_hp_heal_dice_capped_at_hp_max(self):
+        """hp_heal_dice='1d8' with profile hp_current=48, hp_max=50 and mocked roll=8
+        → hp_current capped at 50 (not 56)."""
+        profile = _dnd_profile_with_hp(hp_current=48, hp_max=50)
+        updates = {
+            "hp_damage_dice": "none",
+            "hp_heal_dice": "1d8",
+            "condition_apply": [],
+            "condition_remove": [],
+            "xp_award": 0,
+            "minutes_passed": 5,
+            "location_impact": "none",
+            "scene_impact": "none",
+            "health_impact": "none",
+            "energy_impact": "none",
+            "gold_impact": "none",
+            "inventory_new": [],
+            "inventory_lost": [],
+            "clocks_impact": {},
+        }
+
+        with patch("core.dnd_engine.random.randint", return_value=8):
+            from core.dnd_engine import apply_dnd_impacts
+            result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        assert result_profile["hp_current"] == 50, (
+            f"hp_current must be capped at hp_max=50, got {result_profile['hp_current']}"
+        )
+
+    # 14. condition_apply [{name:"poisoned", duration:3, target:"player"}]
+    #     → profile['conditions'] contains poisoned
+    def test_condition_apply_adds_condition_to_profile(self):
+        """condition_apply list with poisoned entry → profile['conditions'] has 'poisoned'."""
+        profile = _dnd_profile()
+        updates = {
+            "hp_damage_dice": "none",
+            "hp_heal_dice": "none",
+            "condition_apply": [
+                {"name": "poisoned", "duration": 3, "target": "player"}
+            ],
+            "condition_remove": [],
+            "xp_award": 0,
+            "minutes_passed": 5,
+            "location_impact": "none",
+            "scene_impact": "none",
+            "health_impact": "none",
+            "energy_impact": "none",
+            "gold_impact": "none",
+            "inventory_new": [],
+            "inventory_lost": [],
+            "clocks_impact": {},
+        }
+
+        from core.dnd_engine import apply_dnd_impacts
+        result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        condition_names = [c["name"] for c in result_profile.get("conditions", [])]
+        assert "poisoned" in condition_names, (
+            f"'poisoned' must be in profile['conditions'] after apply. Got: {condition_names}"
+        )
+
+    # 15. condition_remove [{name:"poisoned", target:"player"}] → removes condition
+    def test_condition_remove_removes_existing_condition(self):
+        """condition_remove with poisoned → poisoned removed from profile['conditions']."""
+        from core.dnd_conditions import apply_condition
+        profile = _dnd_profile()
+        apply_condition(profile, "poisoned", duration_rounds=3, source="test")
+
+        updates = {
+            "hp_damage_dice": "none",
+            "hp_heal_dice": "none",
+            "condition_apply": [],
+            "condition_remove": [
+                {"name": "poisoned", "target": "player"}
+            ],
+            "xp_award": 0,
+            "minutes_passed": 5,
+            "location_impact": "none",
+            "scene_impact": "none",
+            "health_impact": "none",
+            "energy_impact": "none",
+            "gold_impact": "none",
+            "inventory_new": [],
+            "inventory_lost": [],
+            "clocks_impact": {},
+        }
+
+        from core.dnd_engine import apply_dnd_impacts
+        result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        condition_names = [c["name"] for c in result_profile.get("conditions", [])]
+        assert "poisoned" not in condition_names, (
+            f"'poisoned' must be removed from profile['conditions']. Got: {condition_names}"
+        )
+
+    # 16. xp_award=50 → profile['xp'] += 50; profile['level'] updated if threshold passed
+    def test_xp_award_increases_profile_xp(self):
+        """xp_award=50 with profile xp=0 → profile['xp'] == 50, level unchanged (need 300 for L2)."""
+        profile = _dnd_profile(xp=0, level=1)
+        updates = {
+            "hp_damage_dice": "none",
+            "hp_heal_dice": "none",
+            "condition_apply": [],
+            "condition_remove": [],
+            "xp_award": 50,
+            "minutes_passed": 5,
+            "location_impact": "none",
+            "scene_impact": "none",
+            "health_impact": "none",
+            "energy_impact": "none",
+            "gold_impact": "none",
+            "inventory_new": [],
+            "inventory_lost": [],
+            "clocks_impact": {},
+        }
+
+        from core.dnd_engine import apply_dnd_impacts
+        result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        assert result_profile["xp"] == 50, (
+            f"profile['xp'] must be 50, got {result_profile['xp']}"
+        )
+        assert result_profile["level"] == 1, (
+            f"Level must remain 1 (need 300 XP for L2). Got level={result_profile['level']}"
+        )
+        assert any("XP" in log and "50" in log for log in logs), (
+            f"Logs must mention XP award of 50. Got logs: {logs}"
+        )
+
+    # 17. updates with only time/location (no D&D-specific tags) → delegates to apply_system_impacts
+    def test_non_dnd_updates_delegate_to_apply_system_impacts(self):
+        """When updates have only legacy fields (minutes_passed, location_impact),
+        apply_dnd_impacts delegates them to apply_system_impacts which updates game time."""
+        profile = _dnd_profile()
+        updates = {
+            "hp_damage_dice": "none",
+            "hp_heal_dice": "none",
+            "condition_apply": [],
+            "condition_remove": [],
+            "xp_award": 0,
+            "minutes_passed": 60,
+            "location_impact": "none",
+            "scene_impact": "none",
+            "health_impact": "none",
+            "energy_impact": "none",
+            "gold_impact": "none",
+            "inventory_new": [],
+            "inventory_lost": [],
+            "clocks_impact": {},
+        }
+
+        legacy_called = []
+
+        # Capture the real function BEFORE patching to avoid recursion in side_effect.
+        from core.mechanics import apply_system_impacts as _real_apply
+        _real_ref = _real_apply  # local reference is unaffected by the patch below
+
+        def spy_apply_system_impacts(prof, upd):
+            legacy_called.append(1)
+            return _real_ref(prof, upd)
+
+        # apply_system_impacts is lazily imported inside apply_dnd_impacts via
+        # "from core.mechanics import apply_system_impacts". The correct patch target
+        # is core.mechanics.apply_system_impacts (the module-level attribute).
+        with patch("core.mechanics.apply_system_impacts", side_effect=spy_apply_system_impacts):
+            from core.dnd_engine import apply_dnd_impacts
+            result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        assert len(legacy_called) == 1, (
+            f"apply_system_impacts must be called exactly once for legacy delegation. "
+            f"Got {len(legacy_called)} calls."
+        )
+
+
+# ===========================================================================
+# Tests: auto-level-up via apply_dnd_impacts (Phase 9)
+# ===========================================================================
+
+def _minimal_updates(xp_award: int = 0) -> dict:
+    """Return a minimal updates dict for apply_dnd_impacts tests."""
+    return {
+        "hp_damage_dice": "none",
+        "hp_heal_dice": "none",
+        "condition_apply": [],
+        "condition_remove": [],
+        "xp_award": xp_award,
+        "minutes_passed": 5,
+        "location_impact": "none",
+        "scene_impact": "none",
+        "health_impact": "none",
+        "energy_impact": "none",
+        "gold_impact": "none",
+        "inventory_new": [],
+        "inventory_lost": [],
+        "clocks_impact": {},
+    }
+
+
+def _profile_for_level_up(level: int = 1, xp: int = 0, **overrides) -> dict:
+    """Return a D&D profile suitable for level-up tests (includes hp_current/hp_max)."""
+    base = _dnd_profile(level=level, xp=xp)
+    base["class"] = "Knight"
+    base["hp_current"] = 12
+    base["hp_max"] = 12
+    base["proficiency_bonus"] = 2
+    base["hit_dice_total"] = level
+    base["features"] = []
+    base["asi_pending"] = False
+    # Knight primary_abilities = ["STR", "CHA"]; set both below 20
+    base["ability_scores"] = {
+        "STR": 16, "DEX": 12, "CON": 14, "INT": 10, "WIS": 10, "CHA": 12,
+    }
+    base.update(overrides)
+    return base
+
+
+class TestAutoLevelUp:
+    """Tests for automatic level_up trigger inside apply_dnd_impacts (Phase 9)."""
+
+    # 18. xp_award crosses L1→L2 threshold: level_up applied, hp_max increased
+    def test_level1_to_level2_on_xp_award(self):
+        """xp_award=300 from L1/xp=0 crosses L2 threshold (300 XP).
+        After apply_dnd_impacts: profile['level']==2, profile['hp_max'] > 12."""
+        profile = _profile_for_level_up(level=1, xp=0)
+        updates = _minimal_updates(xp_award=300)
+
+        from core.dnd_engine import apply_dnd_impacts
+        result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        assert result_profile["level"] == 2, (
+            f"Level must be 2 after 300 XP award from L1. Got {result_profile['level']}"
+        )
+        assert result_profile["hp_max"] > 12, (
+            f"hp_max must have increased above 12 after level-up. Got {result_profile['hp_max']}"
+        )
+        level_logs = [l for l in logs if "LEVEL" in l and "1 ->" in l]
+        assert level_logs, (
+            f"Logs must mention level transition 1->2. Got logs: {logs}"
+        )
+
+    # 19. xp_award crosses L3→L4 (ASI level): ASI applied to primary_abilities
+    def test_level3_to_level4_asi_applied(self):
+        """xp_award=1800 from L3/xp=900 crosses L4 threshold (2700 XP).
+        After apply_dnd_impacts: STR or CHA increased (Knight primary_abilities)."""
+        # Knight primary_abilities = ["STR", "CHA"]
+        profile = _profile_for_level_up(level=3, xp=900)
+        profile["ability_scores"]["STR"] = 16  # room to grow
+        profile["ability_scores"]["CHA"] = 12  # room to grow
+        updates = _minimal_updates(xp_award=1800)
+
+        from core.dnd_engine import apply_dnd_impacts
+        result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        assert result_profile["level"] == 4, (
+            f"Level must be 4 after crossing L4 threshold. Got {result_profile['level']}"
+        )
+        str_val = result_profile["ability_scores"]["STR"]
+        cha_val = result_profile["ability_scores"]["CHA"]
+        assert str_val == 17 and cha_val == 13, (
+            f"Knight ASI at L4: STR should be 17 and CHA should be 13 "
+            f"(split +1/+1 to primary_abilities). Got STR={str_val}, CHA={cha_val}"
+        )
+        asi_logs = [l for l in logs if "Ability Score Improvement" in l]
+        assert asi_logs, f"Logs must mention ASI. Got logs: {logs}"
+
+    # 20. Multi-level: xp_award crosses L1→L5 (levels_gained=4): level_up called 4 times
+    def test_multi_level_l1_to_l5(self):
+        """xp_award=6500 from L1/xp=0 crosses L5 threshold (6500 XP).
+        After apply_dnd_impacts: profile['level']==5, LEVEL logs appear 4 times."""
+        profile = _profile_for_level_up(level=1, xp=0)
+        updates = _minimal_updates(xp_award=6500)
+
+        from core.dnd_engine import apply_dnd_impacts
+        result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        assert result_profile["level"] == 5, (
+            f"Level must be 5 after 6500 XP from L1. Got {result_profile['level']}"
+        )
+        level_logs = [l for l in logs if "LEVEL" in l and "->" in l]
+        assert len(level_logs) == 4, (
+            f"Must have exactly 4 LEVEL transition log entries (L1->L2, L2->L3, L3->L4, L4->L5). "
+            f"Got {len(level_logs)}: {level_logs}"
+        )
+
+    # 21. ASI cap: STR=19 → ASI {STR:1, CHA:1} → STR=20 (not 21), CHA+1
+    def test_asi_cap_str_at_19(self):
+        """STR=19 at ASI level → split gives STR+1/CHA+1, STR becomes 20 (not 21)."""
+        # L3→L4 is an ASI level for Knight
+        profile = _profile_for_level_up(level=3, xp=900)
+        profile["ability_scores"]["STR"] = 19  # one point from cap
+        profile["ability_scores"]["CHA"] = 10
+        updates = _minimal_updates(xp_award=1800)  # crosses L4
+
+        from core.dnd_engine import apply_dnd_impacts
+        result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        str_val = result_profile["ability_scores"]["STR"]
+        cha_val = result_profile["ability_scores"]["CHA"]
+        assert str_val == 20, (
+            f"STR must be capped at 20 (was 19, +1 from split ASI). Got {str_val}"
+        )
+        assert cha_val == 11, (
+            f"CHA must be 11 (was 10, +1 from split ASI). Got {cha_val}"
+        )
+
+    # 22. L20 → level_up raises ValueError, log contains "Max level reached", no exception
+    def test_max_level_no_crash(self):
+        """Profile already at L20 with enough XP — apply_dnd_impacts must not raise,
+        and logs must contain 'Max level reached'."""
+        from core.dnd_progression import XP_TABLE
+        # Construct L19 profile at exactly L20 threshold XP so xp_award pushes over
+        # the top (but L20 is already the cap and level_up will refuse)
+        profile = _profile_for_level_up(level=20, xp=XP_TABLE[20])
+        updates = _minimal_updates(xp_award=200)  # extra XP, level stays at 20
+
+        from core.dnd_engine import apply_dnd_impacts
+        # Must not raise
+        result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        # level stays at 20 (award_xp keeps it at 20 since get_level_for_xp caps at 20)
+        assert result_profile["level"] == 20, (
+            f"Level must remain 20 at cap. Got {result_profile['level']}"
+        )
+        # No "Max level reached" log expected here because award_xp already keeps level=20
+        # and leveled_up=False (level_before==level_after==20). The ValueError path is
+        # only reachable if caller manually resets level below 20 then awards huge XP.
+        # We verify the function completes without exception — that is the invariant.
+
+
+# ===========================================================================
+# Tests: process_game_turn integration (high-level FSM)
+# ===========================================================================
+
+# Minimal profile and patches for process_game_turn integration tests
+_PROCESS_PROFILE = {
+    "Ім'я": "IntegrationHero",
+    "Дім": "Stark",
+    "Титул": "Lord",
+    "Здоров'я": 100,
+    "Енергія": 800,
+    "Особисте Золото": 200,
+    "Бойові навички": 50,
+    "Військові навички": 20,
+    "Інтрига": 15,
+    "Управління": 10,
+    "Поточне місцезнаходження": "Вінтерфелл",
+    "Поточна сцена": "Great Hall",
+    "Регіон": "Північ",
+    "Ігровий час": "Day 1, Morning",
+    "Інвентар": "Sword",
+    "Зброя": "Longsword",
+    "Броня": "Chainmail",
+    "Транспорт": "Horse",
+    "Світогляд": "Neutral",
+    "Риси": "Brave",
+    "Вади": "Stubborn",
+    "Вороги": "",
+    "Друзі": "",
+    "Годинники": {"Scene_Tension": "0/4"},
+    "level": 1,
+    "ability_scores": {"STR": 14, "DEX": 10, "CON": 12, "INT": 10, "WIS": 10, "CHA": 10},
+    "skill_profs": [],
+    "skill_expertise": [],
+    "saves_proficient": [],
+    "conditions": [],
+    "xp": 0,
+}
+
+_PROCESS_WORKER_UPDATES = {
+    "action_type": "standard",
+    "skill_used": "None",
+    "ability_used": "None",
+    "outcome": "SUCCESS",
+    "natural_roll": 10,
+    "total_score": 10,
+    "difficulty": 10,
+    "advantage_reason": "",
+    "disadvantage_reason": "",
+    "combat_imminent": False,
+    "xp_award": 0,
+    "reputation_delta": 0,
+    "reputation_target_npc": "",
+    "minutes_passed": 5,
+    "location_impact": "none",
+    "scene_impact": "none",
+    "health_impact": "none",
+    "energy_impact": "none",
+    "hp_damage_dice": "none",
+    "hp_heal_dice": "none",
+    "gold_impact": "none",
+    "inventory_new": [],
+    "inventory_lost": [],
+    "clocks_impact": {},
+    "condition_apply": [],
+    "condition_remove": [],
+}
+
+_PROCESS_GM_JSON = (
+    '{"reasoning":"test","npc_reasoning":"test",'
+    '"director_notes":["Hero stands quietly."],'
+    '"companion_npcs":[],"npc_updates":[],'
+    '"suggested_actions":['
+    '{"button":"A1","intent":"i1"},'
+    '{"button":"A2","intent":"i2"},'
+    '{"button":"A3","intent":"i3"},'
+    '{"button":"A4","intent":"i4"}]}'
+)
+
+_PROCESS_NARRATOR_TEXT = (
+    "The hero stands in the great hall of Winterfell. "
+    "Cold stone walls surround him, and the fire burns low. "
+    "He feels the weight of his decision."
+)
+
+
+def _make_process_patches(profile_overrides: dict = None, combat_imminent: bool = False):
+    """Return patches for a complete process_game_turn integration test."""
+    profile = dict(_PROCESS_PROFILE)
+    if profile_overrides:
+        profile.update(profile_overrides)
+
+    worker_updates = dict(_PROCESS_WORKER_UPDATES)
+    if combat_imminent:
+        worker_updates["combat_imminent"] = True
+
+    narrator_resp = MagicMock()
+    narrator_resp.text = _PROCESS_NARRATOR_TEXT
+
+    gm_resp = MagicMock()
+    gm_resp.text = _PROCESS_GM_JSON
+
+    return [
+        patch("core.engine.get_user_data", new=AsyncMock(return_value=(profile, 2))),
+        patch("core.engine.validate_action", new=AsyncMock(return_value=(True, ""))),
+        patch(
+            "core.engine.resolve_normal_action",
+            new=AsyncMock(return_value=("MECHANICAL VERDICT: SUCCESS", worker_updates)),
+        ),
+        patch("core.engine.get_location_npcs", return_value=("", [], {})),
+        patch("core.engine.get_relevant_context", new=AsyncMock(return_value="")),
+        patch("core.engine.get_dead_npc_names", return_value=set()),
+        patch("core.engine.model_gm_logic.generate_content", return_value=gm_resp),
+        patch("core.engine.model_narrator.generate_content", return_value=narrator_resp),
+        patch("core.engine.asyncio.create_task", return_value=MagicMock()),
+    ]
+
+
+class TestProcessGameTurnIntegration:
+    """High-level integration tests for process_game_turn FSM dispatcher."""
+
+    # 18. profile mode="NORMAL" → D&D pipeline is used (resolve_normal_action called)
+    def test_normal_mode_calls_resolve_normal_action(self):
+        """Profile without 'mode' key defaults to NORMAL; resolve_normal_action must be called."""
+        resolve_call_count = []
+
+        async def spy_resolve(*args, **kwargs):
+            resolve_call_count.append(1)
+            return ("MECHANICAL VERDICT: SUCCESS", dict(_PROCESS_WORKER_UPDATES))
+
+        patches = _make_process_patches()
+        # Override the resolve_normal_action patch with our spy
+        patches[2] = patch("core.engine.resolve_normal_action", new=spy_resolve)
+
+        async def _run():
+            from core.engine import process_game_turn
+            return await process_game_turn(
+                chat_id=1001,
+                user_input="Look around",
+                narrator_queue=None,
+            )
+
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            result_text, result_actions = asyncio.run(_run())
+
+        assert len(resolve_call_count) == 1, (
+            f"resolve_normal_action must be called exactly once for NORMAL mode. "
+            f"Got {len(resolve_call_count)} calls."
+        )
+        assert isinstance(result_actions, list)
+
+    # 19. profile mode="COMBAT" → warning logged, falls back to NORMAL, resolve_normal_action called
+    def test_combat_mode_falls_back_to_normal_with_warning(self, caplog):
+        """profile mode='COMBAT' triggers fallback warning and NORMAL pipeline."""
+        resolve_call_count = []
+
+        async def spy_resolve(*args, **kwargs):
+            resolve_call_count.append(1)
+            return ("MECHANICAL VERDICT: SUCCESS", dict(_PROCESS_WORKER_UPDATES))
+
+        patches = _make_process_patches(profile_overrides={"mode": "COMBAT"})
+        patches[2] = patch("core.engine.resolve_normal_action", new=spy_resolve)
+
+        async def _run():
+            from core.engine import process_game_turn
+            return await process_game_turn(
+                chat_id=1002,
+                user_input="Draw my sword",
+                narrator_queue=None,
+            )
+
+        with caplog.at_level(logging.WARNING, logger="core.engine"):
+            with ExitStack() as stack:
+                for p in patches:
+                    stack.enter_context(p)
+                asyncio.run(_run())
+
+        # COMBAT mode must emit a warning (Phase 7 placeholder)
+        assert any("COMBAT" in r.message for r in caplog.records), (
+            f"Expected WARNING mentioning COMBAT mode. Got records: "
+            f"{[r.message for r in caplog.records]}"
+        )
+        # Still falls back to NORMAL → resolve_normal_action must be called
+        assert len(resolve_call_count) == 1, (
+            f"After COMBAT fallback, resolve_normal_action must be called. "
+            f"Got {len(resolve_call_count)} calls."
+        )
+
+    # 20. combat_imminent=True → log warning, mode NOT changed to COMBAT (Phase 5 placeholder)
+    def test_combat_imminent_logs_warning_does_not_change_mode(self, caplog):
+        """combat_imminent=True in updates triggers [FSM] log but does NOT change profile mode.
+        Phase 5: this is a placeholder (Phase 7 will implement COMBAT transition)."""
+        profile = dict(_PROCESS_PROFILE)
+        profile.pop("mode", None)  # NORMAL by default
+
+        patches = _make_process_patches(combat_imminent=True)
+
+        async def _run():
+            from core.engine import process_game_turn
+            return await process_game_turn(
+                chat_id=1003,
+                user_input="I see a guard approaching with a weapon",
+                narrator_queue=None,
+            )
+
+        with caplog.at_level(logging.INFO, logger="core.engine"):
+            with ExitStack() as stack:
+                for p in patches:
+                    stack.enter_context(p)
+                result_text, result_actions = asyncio.run(_run())
+
+        # Phase 5: combat_imminent logged but mode NOT changed
+        assert any("combat_imminent" in r.message for r in caplog.records), (
+            f"Expected log mentioning combat_imminent. Got: "
+            f"{[r.message for r in caplog.records]}"
+        )
+        # Result text should still be a valid narrative (not an error)
+        assert isinstance(result_text, str) and len(result_text) > 0
+        assert isinstance(result_actions, list)

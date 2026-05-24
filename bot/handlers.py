@@ -304,14 +304,6 @@ async def show_profile_handler(message: Message, bot: Bot):
     profile, _ = await get_user_data(chat_id)
     if profile:
         char_name = profile.get("Ім'я", "Невідомий")
-        health_val = profile.get("Здоров'я", 100)
-        energy_val = profile.get("Енергія", 100)
-        combat = profile.get("Бойові навички", 0)
-        military = profile.get("Військові навички", 0)
-        intrigue = profile.get("Інтрига", 0)
-        manage = profile.get("Управління", 0)
-        rep = profile.get("Репутація (Рідний регіон)", 0)
-        enemies = profile.get("Вороги", "Немає")
         house = profile.get("Дім", "Невідомий")
         loc = profile.get("Поточне місцезнаходження", "Невідомо")
         time_val = profile.get("Ігровий час", "Невідомий час")
@@ -319,22 +311,97 @@ async def show_profile_handler(message: Message, bot: Bot):
         weapon = profile.get("Зброя", "-")
         armor = profile.get("Броня", "-")
         inv = profile.get("Інвентар", "Пусто")
+        enemies = profile.get("Вороги", "Немає")
+        rep = profile.get("Репутація (Рідний регіон)", 0)
 
-        text = (
-            f"👤 *{char_name}*\n"
-            f"🏠 Дім: {house}\n📍 {loc}\n"
-            f"📅 {time_val}\n━━━━━━━━━━━━━━━━━━\n"
-            f"❤️ Здоров'я: {health_val} | ⚡ Енергія: {energy_val}\n"
-            f"⚔️ Бойові: {combat} | 🛡️ Військові: {military}\n"
-            f"🍷 Інтрига: {intrigue} | ⚖️ Управління: {manage}\n"
-            f"━━━━━━━━━━━━━━━━━━\n🗣 Репутація: {rep}\n"
-            f"💀 Вороги: {enemies}\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"💰 *Золото:* {gold} драконів\n"
-            f"⚔️ *Зброя:* {weapon}\n"
-            f"🛡 *Броня:* {armor}\n"
-            f"📦 *Речі:* {inv}"
-        )
+        # Detect COMBAT mode — show D&D stats block
+        game_mode = profile.get("mode", "NORMAL")
+        if game_mode == "COMBAT":
+            hp_current = profile.get("hp_current", profile.get("Здоров'я", 100))
+            hp_max = profile.get("hp_max", 100)
+            ac = profile.get("ac", 10)
+            energy_val = profile.get("Енергія", 1000)
+            conditions_raw = profile.get("conditions", [])
+            # Format conditions list for display
+            if conditions_raw:
+                cond_labels = [
+                    (c.get("name", str(c)) if isinstance(c, dict) else str(c))
+                    for c in conditions_raw
+                ]
+                conditions_str = ", ".join(cond_labels)
+            else:
+                conditions_str = "Немає"
+
+            # HP bar (10-char ascii)
+            hp_pct = max(0, min(1.0, hp_current / hp_max)) if hp_max > 0 else 0
+            hp_filled = round(hp_pct * 10)
+            hp_bar = "█" * hp_filled + "░" * (10 - hp_filled)
+
+            # Combat roster from in-memory CombatState (if available)
+            combat_roster_lines = ""
+            try:
+                from core.combat_state import get_combat_state
+                cs = get_combat_state(chat_id)
+                if cs:
+                    initiative_display = []
+                    for ref in cs.initiative_order:
+                        if ref.kind == "npc":
+                            npc = cs.npcs.get(ref.name, {})
+                            npc_hp = npc.get("hp_current", "?")
+                            npc_hp_max = npc.get("hp_max", "?")
+                            status = npc.get("Status", "Active")
+                            status_icon = "💀" if status == "Dead" else ("🏃" if status == "Fled" else "⚔️")
+                            initiative_display.append(
+                                f"{status_icon} {ref.name} HP:{npc_hp}/{npc_hp_max} (init {ref.init_roll})"
+                            )
+                        else:
+                            initiative_display.append(
+                                f"👤 {ref.name} HP:{hp_current}/{hp_max} КЗ:{ac} (init {ref.init_roll})"
+                            )
+                    combat_roster_lines = "\n".join(initiative_display)
+                    round_label = f"Раунд {cs.round}"
+                else:
+                    combat_roster_lines = "(бойова сцена — стан у пам'яті не знайдено)"
+                    round_label = "Раунд ?"
+            except Exception:
+                combat_roster_lines = ""
+                round_label = "Бій"
+
+            text = (
+                f"⚔️ *{char_name}* — БОЙ ({round_label})\n"
+                f"🏠 {house} | 📍 {loc}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"❤️ HP: {hp_current}/{hp_max} [{hp_bar}]\n"
+                f"🛡 КЗ: {ac} | ⚡ Енергія: {energy_val}\n"
+                f"🌀 Стани: {conditions_str}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"⚔️ Ініціатива:\n{combat_roster_lines}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"💰 {gold} др. | ⚔️ {weapon} | 🛡 {armor}"
+            )
+        else:
+            # Standard NORMAL mode profile
+            health_val = profile.get("Здоров'я", 100)
+            energy_val = profile.get("Енергія", 1000)
+            combat = profile.get("Бойові навички", 0)
+            military = profile.get("Військові навички", 0)
+            intrigue = profile.get("Інтрига", 0)
+            manage = profile.get("Управління", 0)
+            text = (
+                f"👤 *{char_name}*\n"
+                f"🏠 Дім: {house}\n📍 {loc}\n"
+                f"📅 {time_val}\n━━━━━━━━━━━━━━━━━━\n"
+                f"❤️ Здоров'я: {health_val} | ⚡ Енергія: {energy_val}\n"
+                f"⚔️ Бойові: {combat} | 🛡️ Військові: {military}\n"
+                f"🍷 Інтрига: {intrigue} | ⚖️ Управління: {manage}\n"
+                f"━━━━━━━━━━━━━━━━━━\n🗣 Репутація: {rep}\n"
+                f"💀 Вороги: {enemies}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"💰 *Золото:* {gold} драконів\n"
+                f"⚔️ *Зброя:* {weapon}\n"
+                f"🛡 *Броня:* {armor}\n"
+                f"📦 *Речі:* {inv}"
+            )
         await send_safe_message(bot, chat_id, text)
     else:
         await send_safe_message(bot, chat_id, "Спершу почніть гру через /start")

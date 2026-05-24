@@ -9,7 +9,14 @@ logger = logging.getLogger(__name__)
 
 from core.ai_client import model_worker, model_gm_logic, model_narrator, clean_and_parse_json, clear_thoughts, record_thought
 from config import MODEL_NARRATOR_NAME
-from core.mechanics import apply_system_impacts, process_training_request, safe_int, resolve_action_mechanics, validate_action
+from core.mechanics import apply_system_impacts, process_training_request, safe_int, validate_action
+from core.dnd_engine import resolve_normal_action, apply_dnd_impacts
+from core.dnd_combat_engine import (
+    execute_combat_round,
+    cleanup_and_exit_combat,
+    format_combat_log_for_narrator,
+    initiate_combat_from_normal,
+)
 from core.prompts import (
     GAME_ERA_CONTEXT, build_summarize_turn_prompt, build_summarize_full_turn_prompt,
     build_narrator_prompt, build_gm_logic_prompt, build_history_summary_prompt,
@@ -263,7 +270,8 @@ def _build_narrator_prompt(user_input, director_notes, npc_context_text,
                            puppet_mode=False, recent_history_text=None,
                            erotic_mode=False, active_roster=None, dead_npcs=None,
                            departing_roster_text="", arriving_roster_text="",
-                           scene_continuity_block: str = ""):
+                           scene_continuity_block: str = "",
+                           combat_log=None):
     return build_narrator_prompt(
         user_input=user_input,
         director_notes=director_notes,
@@ -281,6 +289,7 @@ def _build_narrator_prompt(user_input, director_notes, npc_context_text,
         departing_roster_text=departing_roster_text,
         arriving_roster_text=arriving_roster_text,
         scene_continuity_block=scene_continuity_block,
+        combat_log=combat_log,
     )
 
 
@@ -396,11 +405,89 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
     if progress_callback:
         await progress_callback("⚔️ Кидаємо кубики...")
     last_turn = history[-1]["content"] if history else ""
-    mechanics_verdict, mechanical_updates = await resolve_action_mechanics(
-        user_input, profile, npc_reputation_context,
-        current_scene=curr_scene, npc_names=legal_npc_names, last_turn_summary=last_turn,
-        user_id=chat_id, current_location=curr_loc
-    )
+
+    # === FSM-ДИСПЕТЧЕР (Phase 7: COMBAT активний; NORMAL — основний pipeline) ===
+    _game_mode = profile.get("mode", "NORMAL")
+    mechanical_updates: dict = {}
+
+    if _game_mode == "COMBAT":
+        from core.combat_state import get_combat_state, get_or_create_lock
+
+        combat_lock = get_or_create_lock(chat_id)
+        async with combat_lock:
+            combat_state = get_combat_state(chat_id)
+            if not combat_state:
+                # State lost (server restart?) — fallback to NORMAL without crash
+                logger.warning(
+                    f"[FSM] COMBAT mode but no CombatState for chat_id={chat_id} "
+                    f"(server restart?) — falling back to NORMAL."
+                )
+                profile["mode"] = "NORMAL"
+                _game_mode = "NORMAL"
+            else:
+                try:
+                    combat_log, combat_updates, npc_actions = await execute_combat_round(
+                        chat_id, user_input, profile
+                    )
+
+                    # Refresh combat_state reference (execute_combat_round mutates it)
+                    combat_state = get_combat_state(chat_id)
+                    combat_phase = combat_updates.get("combat_phase", "ONGOING")
+
+                    # If combat ended — cleanup and merge updates
+                    if combat_phase != "ONGOING" and combat_state is not None:
+                        cleanup_updates = await cleanup_and_exit_combat(chat_id, profile)
+                        # Merge: cleanup_updates overrides combat_updates for hp/xp/status
+                        combat_updates.update(cleanup_updates)
+
+                    elif combat_state is None:
+                        # Combat ended inside execute_combat_round (e.g. player fled)
+                        cleanup_updates = await cleanup_and_exit_combat(chat_id, profile)
+                        combat_updates.update(cleanup_updates)
+
+                    mechanics_verdict = (
+                        f"COMBAT ROUND {combat_updates.get('combat_round', '?')}: "
+                        f"{combat_log[:500]}"
+                    )
+                    mechanical_updates = combat_updates
+
+                    # Build combat_log list for Narrator
+                    _combat_log_for_narrator = (
+                        format_combat_log_for_narrator(combat_state, npc_actions)
+                        if combat_state is not None
+                        else [combat_log]
+                    )
+
+                except Exception as combat_exc:
+                    # On crash — log but DO NOT re-raise to prevent deadlock
+                    # (async with auto-releases the lock)
+                    logger.error(
+                        f"[FSM] COMBAT pipeline crashed for chat_id={chat_id}: {combat_exc}",
+                        exc_info=True,
+                    )
+                    # Safe fallback: treat as NORMAL for this turn
+                    profile["mode"] = "NORMAL"
+                    _game_mode = "NORMAL"
+                    _combat_log_for_narrator = []
+
+    if _game_mode == "NORMAL":
+        _combat_log_for_narrator = []
+        mechanics_verdict, mechanical_updates = await resolve_normal_action(
+            user_input, profile, npc_reputation_context,
+            current_scene=curr_scene, npc_names=legal_npc_names, last_turn_summary=last_turn,
+            user_id=chat_id, current_location=curr_loc
+        )
+    elif _game_mode != "COMBAT":
+        # Unknown mode — force NORMAL (resolve_action_mechanics removed in Phase 9 cleanup)
+        logger.warning(f"[FSM] Unknown mode '{_game_mode}' — forcing NORMAL for chat_id={chat_id}")
+        profile["mode"] = "NORMAL"
+        _game_mode = "NORMAL"
+        _combat_log_for_narrator = []
+        mechanics_verdict, mechanical_updates = await resolve_normal_action(
+            user_input, profile, npc_reputation_context,
+            current_scene=curr_scene, npc_names=legal_npc_names, last_turn_summary=last_turn,
+            user_id=chat_id, current_location=curr_loc
+        )
 
     # === БЛОКУВАННЯ РЕПУТАЦІЄЮ: NPC відмовляє через кровну ворожнечу ===
     if mechanical_updates.get("reputation_block"):
@@ -415,43 +502,52 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
 
         if training_result:
             if "error" in training_result:
-                mechanics_verdict = f"SYSTEM: Player tried to train but FAILED. Reason: {training_result['error']}. Describe their disappointment."
+                mechanics_verdict = (
+                    f"SYSTEM: Player tried to train but it was impossible. "
+                    f"Reason: {training_result['error']}. Describe their disappointment briefly."
+                )
                 logs.append(f"❌ {training_result['error']}")
             else:
-                mechanics_verdict = training_result['story_prompt']
-                skill = training_result['skill']
-                gain = training_result['stat_gain']
-                days_spent = training_result['cost_time']
-                cost_gold = int(training_result['cost_gold'])
-                energy_cost = training_result.get('energy_cost', 40)
+                mechanics_verdict = training_result["story_prompt"]
+                skill = training_result["skill"]
+                xp_gained = training_result["xp_gained"]
+                cost_time_days = training_result["cost_time_days"]
+                cost_gold = int(training_result["cost_gold"])
+                energy_cost = training_result.get("energy_cost", 40)
+                hp_damage_dice = training_result.get("hp_damage_dice", "none")
 
                 logs.append(
-                    f"🏋️ Тренування: {skill} +{gain} (Витрачено: {days_spent} дн., {cost_gold} 🪙, {energy_cost} ⚡)")
+                    f"🏋️ Тренування: {skill} +{xp_gained} XP "
+                    f"(Витрачено: {cost_time_days} дн., {cost_gold} 🪙, {energy_cost} ⚡)"
+                )
 
-                if training_result.get("temp_debuff", 0) > 0:
-                    debuff_val = training_result["temp_debuff"]
-                    logs.append(f"🩸 Травма від перевтоми! Штраф -{debuff_val} до '{skill}'.")
-                    current_debuffs = profile.get("temp_debuffs", {})
-                    current_debuffs[skill] = debuff_val
-                    profile["temp_debuffs"] = current_debuffs
+                # Time advance
+                mechanical_updates["minutes_passed"] = cost_time_days * _MINUTES_PER_DAY
 
-                mechanical_updates["minutes_passed"] = days_spent * _MINUTES_PER_DAY
+                # Energy drain (clamped to 0, cap already enforced by apply_dnd_impacts)
                 current_energy = safe_int(profile.get("Енергія", 1000))
                 profile["Енергія"] = max(0, current_energy - energy_cost)
 
-                if "skill_impact" not in mechanical_updates:
-                    mechanical_updates["skill_impact"] = {}
-                mechanical_updates["skill_impact"][skill] = gain
-
-                current_gold = safe_int(profile.get("Особисте Золото", 0))
+                # Gold payment (mentor only, already checked inside process_training_request)
+                current_gold = safe_int(profile.get("Особисте Золото", profile.get("gold", 0)))
                 if cost_gold > 0:
-                    profile["Особисте Золото"] = max(0, current_gold - cost_gold)
-                    logs.append(f"💰 Золото: -{cost_gold} (Оплата вчителю)")
+                    if "hp_current" in profile:
+                        profile["gold"] = max(0, safe_int(profile.get("gold", 0)) - cost_gold)
+                    else:
+                        profile["Особисте Золото"] = max(0, current_gold - cost_gold)
+                    logs.append(f"💰 Золото: -{cost_gold} (Оплата наставнику)")
 
-                if "set_cooldown" in training_result:
-                    if "training_cooldowns" not in profile:
-                        profile["training_cooldowns"] = {}
-                    profile["training_cooldowns"][skill] = training_result["set_cooldown"]
+                # HP damage (failure path: 1d4 overexertion trauma)
+                if hp_damage_dice and hp_damage_dice != "none":
+                    mechanical_updates["hp_damage_dice"] = hp_damage_dice
+                    logs.append(f"🩸 Травма від виснаження ({hp_damage_dice} HP).")
+
+                # Level-up notification
+                if training_result.get("leveled_up"):
+                    logs.append(
+                        f"РІВЕНЬ {training_result['level_before']} → {training_result['level_after']}! "
+                        f"(Потрібна дія для level_up)"
+                    )
 
         mechanical_updates["skill_used"] = "None"
 
@@ -466,9 +562,28 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             print(f"⚠️ [SECURITY] Видалено нелегальну галюцинацію навичок від ШІ: {mechanical_updates['skill_impact']}")
             mechanical_updates.pop("skill_impact", None)
 
-    profile, impact_logs = apply_system_impacts(profile, mechanical_updates)
+    # apply_dnd_impacts handles D&D-specific tags (hp_damage_dice, conditions, xp, level_up)
+    # and delegates remainder to legacy apply_system_impacts (time, gold, location, clocks).
+    profile, impact_logs = apply_dnd_impacts(profile, mechanical_updates)
     logs.extend(impact_logs)
     impact_narrative_hints = _build_impact_hints(impact_logs)
+
+    # FSM transition: combat_imminent=True → initiate COMBAT mode for next turn
+    if mechanical_updates.get("combat_imminent") and profile.get("mode") != "COMBAT":
+        _scene_npcs_for_combat = [
+            {"Name": n, "Relation_Player": "Ворожий"}
+            for n in legal_npc_names
+        ]
+        if _scene_npcs_for_combat:
+            try:
+                from core.dnd_combat_engine import initiate_combat_from_normal
+                await initiate_combat_from_normal(chat_id, profile, _scene_npcs_for_combat)
+                logs.append("⚔️ БІЙ РОЗПОЧАТО! Наступний хід — бойовий режим.")
+                logger.info(f"[FSM] combat_imminent=true → CombatState initiated for chat_id={chat_id}")
+            except Exception as _ci_exc:
+                logger.error(f"[FSM] initiate_combat_from_normal failed: {_ci_exc}", exc_info=True)
+        else:
+            logger.info(f"[FSM] combat_imminent=true but no scene NPCs — staying NORMAL for chat_id={chat_id}")
 
     # === REFRESH: Перечитуємо loc/scene/region якщо apply_system_impacts їх змінила ===
     # Зберігаємо "ростер відправлення" ПЕРЕД rebuild (для dual roster промптів)
@@ -569,6 +684,10 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
     _puppet_mode = chat_id in PUPPET_USERS
     _erotic_mode = chat_id in EROTIC_USERS
     _scenes_block_str = format_scenes_for_prompt(curr_loc)
+    _gm_mode = "COMBAT" if profile.get("mode") == "COMBAT" else "NORMAL"
+    # For COMBAT mode, override action slots with combat buttons
+    if _gm_mode == "COMBAT":
+        _action_slots = ["АТАКУВАТИ", "ЗАХИСТИТИСЬ", "ВТЕКТИ", "СПЕЦДІЯ"]
     gm_logic_prompt = build_gm_logic_prompt(
         hero_name=profile.get("Ім'я", "Невідомий"),
         hero_house=profile.get("Дім", "Невідомий"),
@@ -598,6 +717,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         scenes_block_str=_scenes_block_str,
         departing_roster_text=departing_npc_context if location_or_scene_changed else "",
         arriving_roster_text=arriving_npc_context if location_or_scene_changed else "",
+        mode=_gm_mode,
     )
 
 
@@ -705,6 +825,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             departing_roster_text=departing_npc_context if location_or_scene_changed else "",
             arriving_roster_text=arriving_npc_context if location_or_scene_changed else "",
             scene_continuity_block=scene_continuity_block,
+            combat_log=_combat_log_for_narrator if _combat_log_for_narrator else None,
         )
 
         if narrator_queue is not None:
@@ -961,45 +1082,76 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         timing_details.append(f"✍️ Narrator: {duration_narrator:.2f}s")
 
         t_start = time.time()
-        npc_changes = ai_data.get("npc_updates", [])
+        npc_changes = ai_data.get("npc_updates", []) + mechanical_updates.get("npc_updates", [])
         companion_npcs = ai_data.get("companion_npcs", [])
         if companion_npcs:
             print(f"🤝 [COMPANIONS] NPC що рухаються з гравцем: {companion_npcs}")
         if not npc_changes and npc_context_text:
             print(f"[NPC_WARN] npc_updates=[] при наявних NPC у сцені.")
 
-        if safe_int(profile.get("Здоров'я", 100)) <= 0:
+        # Death check: support both legacy "Здоров'я" (0-100) and D&D "hp_current" fields
+        _is_dead = (
+            safe_int(profile.get("Здоров'я", 100)) <= 0
+            or ("hp_current" in profile and safe_int(profile.get("hp_current", 1)) <= 0)
+        )
+        if _is_dead:
             story += "\n\n💀 *ВАШ ДОЗОР ЗАКІНЧИВСЯ. Ви загинули.*"
             user_sessions.setdefault(chat_id, {})["action_intents"] = {}
             suggested_actions = ["🔄 Почати заново"]
 
-        if "skill_used" in mechanical_updates and mechanical_updates["skill_used"] not in ["None", "Немає"]:
+        if "skill_used" in mechanical_updates and mechanical_updates["skill_used"] not in ["None", "Немає", "none", ""]:
             skill = mechanical_updates["skill_used"]
+            ability_used = mechanical_updates.get("ability_used", "")
             roll_str = mechanical_updates.get("dice_roll", "0")
             skill_val = mechanical_updates.get("skill_val", 0)
             total_score = mechanical_updates.get("total_score", 0)
             outcome = mechanical_updates.get("outcome", "UNKNOWN")
-            circumstance = mechanical_updates.get("circumstance", "NORMAL")
 
-            circ_ua = " (Перевага)" if circumstance == "ADVANTAGE" else " (Недолік)" if circumstance == "DISADVANTAGE" else ""
+            # D&D: advantage/disadvantage замінює старий circumstance
+            adv_reason = mechanical_updates.get("advantage_reason", "")
+            dis_reason = mechanical_updates.get("disadvantage_reason", "")
+            circumstance = mechanical_updates.get("circumstance", "")  # legacy fallback
+            if adv_reason and not dis_reason:
+                circ_label = " (Перевага)"
+            elif dis_reason and not adv_reason:
+                circ_label = " (Недолік)"
+            elif circumstance == "ADVANTAGE":
+                circ_label = " (Перевага)"
+            elif circumstance == "DISADVANTAGE":
+                circ_label = " (Недолік)"
+            else:
+                circ_label = ""
+
+            # Ability label for d20 format display
+            ab_label = f" [{ability_used}]" if ability_used and ability_used not in ("None", "none", "") else ""
 
             if outcome == "CRITICAL SUCCESS":
                 icon, outcome_ua = "🔥", "КРИТИЧНИЙ УСПІХ"
-                logs.insert(1, f"✨ Осяяння! Навичка '{skill}' назавжди зросла на +1.")
+                logs.insert(1, f"✨ Крит! Навичка '{skill}' — видатне виконання.")
             elif outcome == "CRITICAL FAILURE":
                 icon, outcome_ua = "💀", "КРИТИЧНИЙ ПРОВАЛ"
-                temp_debuff = mechanical_updates.get("temp_debuff", {}).get(skill, 0)
-                logs.insert(1, f"🩸 Тяжкий наслідок! Отримано тимчасовий штраф -{temp_debuff} до навички '{skill}'.")
+                temp_debuff = (mechanical_updates.get("temp_debuff") or {}).get(skill, 0)
+                if temp_debuff:
+                    logs.insert(1, f"🩸 Тяжкий наслідок! Тимчасовий штраф -{temp_debuff} до '{skill}'.")
                 if mechanical_updates.get("permanent_scar"):
-                    logs.insert(2, f"☠️ Фатальна помилка! Навичка '{skill}' назавжди знижена на -1.")
+                    logs.insert(2, f"☠️ Фатальна помилка! Навичка '{skill}' назавжди знижена.")
             elif outcome == "SUCCESS":
                 icon, outcome_ua = "✅", "УСПІХ"
             else:
                 icon, outcome_ua = "❌", "ПРОВАЛ"
 
-            target_dc = mechanical_updates.get("difficulty", 100)
-            dice_log = f"{icon} {skill}{circ_ua}: Кидок {roll_str} + Навичка {skill_val} = {total_score} (Ціль: {target_dc}) -> {outcome_ua}"
+            target_dc = mechanical_updates.get("difficulty", 15)
+            # D&D format: "Skill [ABILITY](circ): roll_str = total vs DC X -> RESULT"
+            dice_log = (
+                f"{icon} {skill}{ab_label}{circ_label}: "
+                f"{roll_str} = {total_score} vs DC {target_dc} -> {outcome_ua}"
+            )
             logs.insert(0, dice_log)
+
+            # XP лог
+            xp_val = mechanical_updates.get("xp_award", 0)
+            if xp_val and xp_val > 0:
+                logs.append(f"XP +{xp_val}")
 
             # Reputation delta лог
             rep_delta = mechanical_updates.get("reputation_delta", 0)

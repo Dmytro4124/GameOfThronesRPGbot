@@ -8,8 +8,6 @@ import asyncio
 from core.ai_client import model_worker, clean_and_parse_json
 from core.prompts import (
     build_validate_action_prompt, build_training_request_prompt,
-    build_training_success_narrative, build_training_failure_narrative,
-    build_training_miracle_narrative, build_resolve_mechanics_prompt,
 )
 import difflib
 from core.world_constants import (
@@ -24,22 +22,6 @@ DEFAULT_ENERGY = 1000
 DAYS_IN_MONTH = 30
 MONTHS_IN_YEAR = 12
 
-# === КОНСТАНТИ НОВОЇ МОДЕЛІ РОЗВ'ЯЗКИ СКІЛ-ЧЕКІВ ===
-# DC < NO_SKILL_DC_THRESHOLD → AUTO_SUCCESS без 2d50
-NO_SKILL_DC_THRESHOLD = 80
-# DC ≥ 80 → детермінований базовий circumstance (Worker не вибирає)
-DC_TO_CIRCUMSTANCE = {
-    80: "ADVANTAGE",
-    100: "NORMAL",
-    120: "DISADVANTAGE",
-    140: "DISADVANTAGE",
-}
-# Соціальні скіли, на які впливає reputation override
-SOCIAL_SKILLS_FOR_REP_OVERRIDE = ("Інтрига", "Управління")
-# Порогові значення для overrides
-LOW_ENERGY_DIS_THRESHOLD = 200
-HIGH_REP_ADV_THRESHOLD = 80
-LOW_REP_DIS_THRESHOLD = -80
 
 
 def safe_int(value, default=0):
@@ -391,24 +373,76 @@ async def validate_action(user_input, profile):
         return True, ""
 
 
-async def process_training_request(user_input, profile, current_scene=None):
-    """
-    Асинхронний Worker (Тренування): Хардкорна система (+1 бал), Гібрид Енергії та Кулдаунів (Асиміляція).
-    """
-    current_energy = safe_int(profile.get("Енергія", DEFAULT_ENERGY), DEFAULT_ENERGY)
-    if current_energy <= 0:
-        return {
-            "error": "Ваша енергія на нулі. В очах темніє, ноги не тримають. Тренування абсолютно неможливе — вам терміново потрібен сон, інакше ви втратите свідомість на місці."
+# === D&D TRAINING CONSTANTS ===
+# Solo: free, slow (2 days), heavy energy drain, partial XP on exhaustion failure.
+SOLO_COSTS = {
+    "cost_gold": 0,
+    "cost_time_days": 2,
+    "energy_cost": 40,
+    "xp_gained_base": 1500,
+    "hp_damage_dice": "none",  # solo practice — no physical trauma
+}
+# Mentor: paid, fast (1 day), moderate energy, double XP.
+MENTOR_COSTS = {
+    "cost_gold": 50,
+    "cost_time_days": 1,
+    "energy_cost": 25,
+    "xp_gained_base": 3000,
+    "hp_damage_dice": "none",
+}
+# Failure path (low-energy solo): partial XP + 1d4 HP trauma from overexertion.
+_FAILURE_XP = 500
+_FAILURE_HP_DMG = "1d4"
+
+# Valid D&D skills for training (must match core/dnd_skills.py SKILLS dict).
+_VALID_DND_TRAINING_SKILLS = frozenset({
+    "Athletics", "Acrobatics", "Sleight of Hand", "Stealth",
+    "Arcana", "History", "Investigation", "Nature", "Religion",
+    "Animal Handling", "Insight", "Medicine", "Perception", "Survival",
+    "Deception", "Intimidation", "Performance", "Persuasion",
+})
+
+
+async def process_training_request(
+    user_input: str,
+    profile: dict,
+    current_scene: str | None = None,
+) -> dict | None:
+    """Detects training intent and awards XP toward specific D&D skill mastery.
+
+    Returns:
+        None                  — not a training action (is_training=False from LLM)
+        {"error": str}        — training declined (scene unsafe, insufficient gold, bad skill)
+        {                     — training succeeded
+            "story_prompt": str,
+            "skill": str,           one of 18 D&D skills
+            "xp_gained": int,
+            "method": "solo" | "mentor",
+            "cost_gold": int,
+            "cost_time_days": int,
+            "energy_cost": int,
+            "hp_damage_dice": str,  "1d4" or "none"
         }
+    """
+    from core.dnd_skills import is_valid_skill
+    from core.dnd_progression import award_xp
+
+    # --- Build skill modifier context for the prompt ---
+    skill_modifiers: dict = {}
+    try:
+        from core.dnd_skills import skill_modifier, SKILLS
+        for sk in SKILLS:
+            skill_modifiers[sk] = skill_modifier(profile, sk)
+    except Exception:
+        skill_modifiers = {}
+
+    user_gold = safe_int(profile.get("Особисте Золото", profile.get("gold", 0)), 0)
 
     prompt = build_training_request_prompt(
         user_input=user_input,
         current_scene=current_scene,
-        combat=profile.get("Бойові навички", 10),
-        military=profile.get("Військові навички", 10),
-        intrigue=profile.get("Інтрига", 10),
-        management=profile.get("Управління", 10),
-        gold=profile.get("Особисте Золото", 0),
+        skill_modifiers=skill_modifiers,
+        gold=user_gold,
     )
 
     resp = None
@@ -433,397 +467,81 @@ async def process_training_request(user_input, profile, current_scene=None):
             "error": f"Зараз неможливо розпочати тренування: {data.get('reason_if_failed', 'Небезпечна ситуація.')}"
         }
 
-    skill_target = data.get("skill")
-    method = data.get("method", "solo")
+    skill = str(data.get("skill", "")).strip()
+    method = str(data.get("method", "solo")).strip()
 
-    # === ПЕРЕВІРКА КУЛДАУНУ (АСИМІЛЯЦІЇ) ===
-    cooldowns = profile.get("training_cooldowns", {})
-    current_cooldown_mins = safe_int(cooldowns.get(skill_target, 0), 0)
-
-    if current_cooldown_mins > 0:
-        days_left = max(1, current_cooldown_mins // MINUTES_IN_DAY)
+    # --- Validate skill ---
+    if not skill or not is_valid_skill(skill):
         return {
-            "error": f"Ваше тіло та розум ще засвоюють попередні уроки з навички '{skill_target}'. Нервовій системі потрібен час на відновлення. Зачекайте ще приблизно {days_left} ігрових днів, перш ніж тренувати це знову."
+            "error": f"Невідомий скіл для тренування: '{skill}'. Оберіть один з 18 D&D навичок."
         }
 
-    current_val = safe_int(profile.get(f"{skill_target} навички", profile.get(skill_target, 10)), 10)
-    user_gold = safe_int(profile.get("Особисте Золото", 0), 0)
-
-    # Математика Часу та Золота
-    if method == "solo":
-        if current_val >= 50:
-            return {
-                "error": f"Навичка '{skill_target}' вже {current_val}. Межа самостійного навчання досягнута. Шукайте майстра."
-            }
-        cost_gold = 0
-        cost_time_days = 3 + (current_val // 10)
-    else:  # mentor
-        cost_gold = current_val * 2
-        cost_time_days = 2 + (current_val // 15)
-        if user_gold < cost_gold:
-            return {"error": f"Не вистачає золота. Потрібно {cost_gold} 🪙, а є {user_gold} 🪙."}
-
-    # Гібридна система Енергії та Перетренування
-    energy_cost = 40
-    stat_gain = 0
-    temp_debuff = 0
-
-    # Встановлюємо новий кулдаун: час самого тренування + 7 днів відпочинку (у хвилинах)
-    new_cooldown_mins = (cost_time_days + 7) * MINUTES_IN_DAY
-
-    if current_energy >= energy_cost:
-        stat_gain = 1
-        story_prompt = build_training_success_narrative(skill_target, cost_time_days, cost_gold, method)
+    # --- Resolve costs by method ---
+    if method == "mentor":
+        costs = dict(MENTOR_COSTS)
     else:
-        if random.random() < 0.75:  # 75% травма
-            temp_debuff = random.randint(15, 20)
-            new_cooldown_mins = 14 * MINUTES_IN_DAY  # 14 днів кулдауну через травму
-            story_prompt = build_training_failure_narrative(skill_target, temp_debuff)
-        else:  # 25% диво
-            stat_gain = 1
-            story_prompt = build_training_miracle_narrative(skill_target)
+        method = "solo"
+        costs = dict(SOLO_COSTS)
+
+    cost_gold = costs["cost_gold"]
+    cost_time_days = costs["cost_time_days"]
+    energy_cost = costs["energy_cost"]
+    xp_gained = costs["xp_gained_base"]
+    hp_damage_dice = costs["hp_damage_dice"]
+
+    # --- Gold check (mentor only) ---
+    if method == "mentor" and user_gold < cost_gold:
+        return {
+            "error": f"Не вистачає золота для наставника. Потрібно {cost_gold} 🪙, а є {user_gold} 🪙."
+        }
+
+    # --- Energy path: insufficient energy → failure path ---
+    current_energy = safe_int(profile.get("Енергія", DEFAULT_ENERGY), DEFAULT_ENERGY)
+    failure_path = (current_energy < energy_cost)
+
+    if failure_path:
+        xp_gained = _FAILURE_XP
+        hp_damage_dice = _FAILURE_HP_DMG
+        story_prompt = (
+            f"SYSTEM: Player tried to train '{skill}' ({method}) while dangerously exhausted. "
+            f"They pushed through cramps and dizziness but achieved only partial results. "
+            f"Award {xp_gained} XP (partial gain). They take 1d4 HP damage from overexertion. "
+            f"Describe the painful, messy training session — sloppy form, torn muscle, bruised pride."
+        )
+    elif method == "mentor":
+        story_prompt = (
+            f"SYSTEM: Player spends {cost_time_days} day(s) training '{skill}' under a mentor "
+            f"(cost: {cost_gold} gold, {energy_cost} energy). "
+            f"They gain {xp_gained} XP. Describe guided, efficient practice — correction of bad habits, "
+            f"expert drills, measurable improvement."
+        )
+    else:
+        story_prompt = (
+            f"SYSTEM: Player spends {cost_time_days} day(s) training '{skill}' solo "
+            f"(cost: {energy_cost} energy). "
+            f"They gain {xp_gained} XP. Describe self-directed, gruelling practice — repetition, "
+            f"improvised exercises, slow but steady improvement."
+        )
+
+    # --- Award XP now (inside process_training_request, not engine) ---
+    xp_result = award_xp(profile, xp_gained, reason=f"training: {skill}")
+    print(
+        f"[TRAINING] skill={skill} method={method} xp={xp_gained} "
+        f"level {xp_result.level_before}→{xp_result.level_after} "
+        f"failure_path={failure_path}"
+    )
 
     return {
-        "success": True,
-        "skill": skill_target,
+        "story_prompt": story_prompt,
+        "skill": skill,
+        "xp_gained": xp_gained,
+        "method": method,
         "cost_gold": cost_gold,
-        "cost_time": cost_time_days,
-        "stat_gain": stat_gain,
+        "cost_time_days": cost_time_days,
         "energy_cost": energy_cost,
-        "temp_debuff": temp_debuff,
-        "set_cooldown": new_cooldown_mins,
-        "story_prompt": story_prompt
+        "hp_damage_dice": hp_damage_dice,
+        "leveled_up": xp_result.leveled_up,
+        "level_before": xp_result.level_before,
+        "level_after": xp_result.level_after,
     }
 
-
-def get_npc_reputation_modifier(reputation_score):
-    """Детермінований модифікатор DC та обставин на основі числової репутації NPC.
-    Returns: (circumstance_override, dc_modifier, is_blocked)"""
-    score = safe_int(reputation_score, 0)
-    if score >= 80:
-        return "ADVANTAGE", -20, False
-    elif score >= 40:
-        return "NORMAL", -10, False
-    elif score <= -80:
-        return "BLOCK", 0, True
-    elif score <= -40:
-        return "DISADVANTAGE", 20, False
-    return "NORMAL", 0, False
-
-
-def get_reputation_delta(outcome):
-    """Повертає зміну репутації NPC залежно від результату перевірки Інтриги/Управління."""
-    deltas = {
-        "CRITICAL SUCCESS": 10,
-        "SUCCESS": 5,
-        "FAILURE": -3,
-        "CRITICAL FAILURE": -8,
-    }
-    return deltas.get(outcome, 0)
-
-
-async def resolve_action_mechanics(user_input, profile, npc_reputation_context=None,
-                                    current_scene=None, npc_names=None, last_turn_summary=None,
-                                    user_id=None, current_location=None):
-    """
-    Асинхронний Worker (4b): Оцінює складність дії та рахує всю механіку (Здоров'я, Час, Золото, Енергія, Годинники, Локація).
-    ІНТЕГРОВАНО: Система 2d50 (Roll-Over), Перевага/Недолік, Хардкорні Крити та Прокачка.
-    Не пише художній текст!
-    npc_reputation_context: dict {npc_name: reputation_score} для NPC у поточній сцені.
-    current_scene: str — назва поточної мікролокації.
-    npc_names: list — імена NPC присутніх у сцені.
-    last_turn_summary: str — короткий опис попереднього ходу для контексту.
-    """
-    def roll_2d50():
-        return random.randint(1, 50) + random.randint(1, 50)
-
-    clocks_info = profile.get("Годинники", {})
-    temp_debuffs = profile.get("temp_debuffs", {})
-
-    skills = {
-        "Бойові":     max(1, safe_int(profile.get("Бойові навички", 10), 10)     - safe_int(temp_debuffs.get("Бойові", 0), 0)),
-        "Військові":  max(1, safe_int(profile.get("Військові навички", 10), 10)  - safe_int(temp_debuffs.get("Військові", 0), 0)),
-        "Інтрига":    max(1, safe_int(profile.get("Інтрига", 10), 10)            - safe_int(temp_debuffs.get("Інтрига", 0), 0)),
-        "Управління": max(1, safe_int(profile.get("Управління", 10), 10)         - safe_int(temp_debuffs.get("Управління", 0), 0)),
-    }
-
-    # ЖОРСТКЕ ПЕРЕХОПЛЕННЯ (ВТРАТА СВІДОМОСТІ ДО ШІ)
-    current_energy = safe_int(profile.get("Енергія", DEFAULT_ENERGY), DEFAULT_ENERGY)
-    sleep_words = ["спл", "сон", "відпоч", "ляга", "sleep", "rest", "засин"]
-
-    if current_energy <= 0 and not any(w in user_input.lower() for w in sleep_words):
-        updates = {
-            "action_type": "standard",
-            "skill_used": "None",
-            "outcome": "CRITICAL FAILURE",
-            "circumstance": "DISADVANTAGE",
-            "minutes_passed": 480,
-            "energy_impact": "sleep",
-            "health_impact": "none",
-            "location_impact": "none",
-            "scene_impact": "none",
-            "clocks_impact": {"Scene_Tension": 1}
-        }
-        verdict = "MECHANICAL VERDICT: EXHAUSTION COLLAPSE! GM INFO: ABSOLUTE OVERRIDE. The player's energy is 0. Ignore their requested action. Describe how they suddenly lose consciousness and collapse on the spot from complete exhaustion. Fast forward 8 hours of them being passed out. Describe what happens to them while they are defenseless."
-        return verdict, updates
-
-    _curr_region = get_region_for_location(current_location or "")
-    nearby_locs = get_locations_for_region(_curr_region) if _curr_region else []
-
-    # Компактний формат: групуємо всі локації за регіонами
-    _region_groups = {}
-    for loc, reg in LOCATION_TO_REGION.items():
-        _region_groups.setdefault(reg, []).append(loc)
-    all_locs_grouped = "; ".join(
-        f"{reg}: {', '.join(_region_groups[reg])}"
-        for reg in VALID_REGIONS_ORDERED if reg in _region_groups
-    )
-
-    prompt = build_resolve_mechanics_prompt(
-        user_input=user_input,
-        skills=skills,
-        clocks_info=clocks_info,
-        npc_reputation_context=npc_reputation_context,
-        current_scene=current_scene,
-        npc_names=npc_names,
-        last_turn_summary=last_turn_summary,
-        current_location=current_location,
-        nearby_canonical_locs=nearby_locs,
-        all_canonical_locs_grouped=all_locs_grouped,
-    )
-
-    try:
-        def _sync_gen_mech():
-            return model_worker.generate_content(prompt + "\n\nВАЖЛИВО: Відповідай ТІЛЬКИ JSON.")
-        resp = await asyncio.to_thread(_sync_gen_mech)
-        data = clean_and_parse_json(resp.text)
-    except Exception as e:
-        print(f"⚠️ AI Worker Error: {e}")
-        data = None
-
-    if not data:
-        # Безпечний фолбек у разі падіння API ШІ
-        return "MECHANICAL VERDICT: AUTO_SUCCESS", {"minutes_passed": 5, "skill_used": "Немає", "outcome": "SUCCESS", "difficulty": 0}
-
-    print(f"🛠️ [WORKER RAW JSON]: {data}")
-
-    skill_used = data.get("skill_used", "None")
-    circumstance = data.get("circumstance", "NORMAL")
-    updates = data.get("updates", {})
-    updates["action_type"] = data.get("action_type", "standard")
-    difficulty = safe_int(data.get("difficulty", 100), 100)
-
-    # A09/A10 FIX: Post-hoc DC floor для фізично небезпечних дій
-    danger_keywords = ["стриб", "паді", "зістриб", "зіскоч", "стін", "вікн", "дах", "обрив", "прірв", "вогонь", "полум"]
-    action_lower = user_input.lower()
-    if any(kw in action_lower for kw in danger_keywords) and difficulty < 140:
-        difficulty = 140
-
-    # A09: DC ескалація — якщо Scene_Tension >= 3, мінімум DC=120
-    scene_tension_raw = clocks_info.get("Scene_Tension", "0/4")
-    scene_tension_val = int(str(scene_tension_raw).split("/")[0]) if isinstance(scene_tension_raw, str) else int(scene_tension_raw or 0)
-    if scene_tension_val >= 3 and skill_used not in ["None", "Немає", "none", ""] and difficulty < 120:
-        difficulty = 120
-
-    # POST-HOC: Scene_Tension clear дозволений ТІЛЬКИ при зміні сцени/локації
-    clocks_fix = updates.get("clocks_impact", {})
-    scene_changed = updates.get("scene_impact", "none") not in ["none", "None", "", None]
-    location_changed = updates.get("location_impact", "none") not in ["none", "None", "", None]
-    if isinstance(clocks_fix, dict) and clocks_fix.get("Scene_Tension") == "clear":
-        if not scene_changed and not location_changed:
-            # Гравець не змінив сцену — заборонити clear, замінити на +1
-            clocks_fix["Scene_Tension"] = 1
-            updates["clocks_impact"] = clocks_fix
-        # else: apply_system_impacts виконає поетапне зниження (не бінарний скид)
-
-    # A07c FIX: Втеча при ST>=3 + зміна локації → форсуємо "clear" для поетапного зниження
-    escape_keywords = ["тікаю", "біжу", "втікаю", "тікати", "рятуюсь", "ховаюсь", "тікаємо"]
-    if (any(kw in action_lower for kw in escape_keywords)
-            and scene_tension_val >= 3
-            and (scene_changed or location_changed)
-            and isinstance(clocks_fix, dict)
-            and clocks_fix.get("Scene_Tension") != "clear"):
-        clocks_fix["Scene_Tension"] = "clear"
-        updates["clocks_impact"] = clocks_fix
-
-    # A11 FIX: Мінімальний урон для падіння/стрибка з висоти
-    fall_keywords = ["стриб", "паді", "зістриб", "зіскоч", "впа"]
-    if any(kw in action_lower for kw in fall_keywords):
-        current_health_impact = updates.get("health_impact", "none")
-        if current_health_impact in ["none", "dmg_light"]:
-            updates["health_impact"] = "dmg_medium"
-
-    # A07 FIX: Якщо ST=3 і дія агресивна/провокативна — Worker часто не піднімає до 4. Форсуємо.
-    aggression_keywords = [
-        "вдар", "атак", "напа", "кричу", "крику", "звинува", "погрож", "вбив", "штовх", "кида",
-        "б'ю", "б'є", "бити", "вбию", "вбит", "кидаю", "кидає", "ламаю", "ріжу", "рубаю",
-        "стріляю", "душу", "хапаю", "погрожую", "ображаю", "ганьблю", "вимагаю", "звинувачую",
-    ]
-    if scene_tension_val >= 3 and isinstance(clocks_fix, dict):
-        st_delta = clocks_fix.get("Scene_Tension", 0)
-        if any(kw in action_lower for kw in aggression_keywords) and (st_delta == 0 or st_delta == "clear"):
-            clocks_fix["Scene_Tension"] = 1
-            updates["clocks_impact"] = clocks_fix
-
-    # -------------------------------------------------
-    # МАТЕМАТИКА 2d50 ТА КРИТІВ ВІДБУВАЄТЬСЯ ТУТ
-    # -------------------------------------------------
-
-    if skill_used in ["None", "Немає", "none", ""] or skill_used not in skills:
-        updates["skill_used"] = "Немає"
-        updates["outcome"] = "SUCCESS"
-        updates["dice_roll"] = "-"
-        updates["skill_val"] = 0
-        updates["total_score"] = 0
-        updates["difficulty"] = 0
-        return "MECHANICAL VERDICT: AUTO_SUCCESS! (No skill required).", updates
-
-    skill_val = skills[skill_used]
-
-    # --- ДЕТЕРМІНОВАНІ REPUTATION МОДИФІКАТОРИ (для соціальних навичок) ---
-    rep_dc_mod = 0
-    rep_blocked = False
-    rep_target_npc = None
-    if skill_used in ["Інтрига", "Управління"] and npc_reputation_context:
-        # Шукаємо цільового NPC у тексті дії
-        best_rep_score = None
-        for npc_name, rep_score in npc_reputation_context.items():
-            if npc_name.lower() in user_input.lower():
-                best_rep_score = rep_score
-                rep_target_npc = npc_name
-                break
-        # Якщо не знайшли точний збіг, але є лише один NPC — використовуємо його
-        if best_rep_score is None and len(npc_reputation_context) == 1:
-            rep_target_npc, best_rep_score = next(iter(npc_reputation_context.items()))
-
-        if best_rep_score is not None:
-            rep_circ, rep_dc_mod, rep_blocked = get_npc_reputation_modifier(best_rep_score)
-            if rep_blocked:
-                updates["skill_used"] = skill_used
-                updates["outcome"] = "BLOCKED"
-                updates["reputation_block"] = True
-                updates["reputation_target_npc"] = rep_target_npc
-                return f"MECHANICAL VERDICT: BLOCKED! NPC '{rep_target_npc}' (reputation {best_rep_score}) — соціальна дія заблокована кровною ворожнечею. GM INFO: Describe the NPC's absolute refusal, hatred, or hostility. The player CANNOT persuade this NPC through social means — only force, fear, or third-party intervention.", updates
-
-    # Застосовуємо DC-модифікатор від репутації
-    final_difficulty = max(40, difficulty + rep_dc_mod)
-
-    # -------------------------------------------------
-    # НОВА МОДЕЛЬ: AUTO_SUCCESS або детермінований circumstance
-    # -------------------------------------------------
-
-    # 1. AUTO_SUCCESS shortcut: DC < порогу → без 2d50, без skill_impact, без штрафу енергії
-    if final_difficulty < NO_SKILL_DC_THRESHOLD:
-        updates["skill_used"] = "Немає"
-        updates["difficulty"] = 0
-        updates["circumstance"] = "NORMAL"
-        updates["outcome"] = "SUCCESS"
-        updates["dice_roll"] = "-"
-        updates["skill_val"] = 0
-        updates["total_score"] = 0
-        verdict_str = f"MECHANICAL VERDICT: AUTO_SUCCESS (DC {final_difficulty} < {NO_SKILL_DC_THRESHOLD} threshold). GM INFO: {data.get('verdict_text')}"
-        return verdict_str, updates
-
-    # 2. Базовий circumstance детермінований з DC (без LLM-вибору)
-    base_circumstance = DC_TO_CIRCUMSTANCE.get(final_difficulty, "NORMAL")
-    circumstance = base_circumstance
-
-    # 3. Overrides поверх DC-базису
-    if current_energy < LOW_ENERGY_DIS_THRESHOLD:
-        # Фізіологічний override — завжди фінальний
-        circumstance = "DISADVANTAGE"
-        data["verdict_text"] = "[СИСТЕМНА ВТОМА: Гравець ледве тримається на ногах]. " + data.get("verdict_text", "")
-    else:
-        # Репутаційний override — тільки для соціальних скілів
-        if skill_used in SOCIAL_SKILLS_FOR_REP_OVERRIDE and rep_target_npc is not None:
-            rep_score_for_circ = npc_reputation_context.get(rep_target_npc)
-            if rep_score_for_circ is not None:
-                rep_score_int = safe_int(rep_score_for_circ, 0)
-                if rep_score_int >= HIGH_REP_ADV_THRESHOLD and circumstance != "DISADVANTAGE":
-                    circumstance = "ADVANTAGE"
-                elif rep_score_int <= LOW_REP_DIS_THRESHOLD:
-                    circumstance = "DISADVANTAGE"
-
-    # Зберігаємо фінальну складність у локальну змінну для звіту
-    difficulty = final_difficulty
-
-    from config import GODMODE_USERS
-    if user_id and user_id in GODMODE_USERS:
-        natural_roll = 100
-        roll_str = "💀 GODMODE"
-        total_score = 100
-        outcome = "CRITICAL SUCCESS"
-    else:
-        roll_1 = roll_2d50()
-        roll_2 = roll_2d50()
-
-        if circumstance == "ADVANTAGE":
-            natural_roll = max(roll_1, roll_2)
-            roll_str = f"[{roll_1}, {roll_2}] -> {natural_roll}"
-        elif circumstance == "DISADVANTAGE":
-            natural_roll = min(roll_1, roll_2)
-            roll_str = f"[{roll_1}, {roll_2}] -> {natural_roll}"
-        else:
-            natural_roll = roll_1
-            roll_str = f"{natural_roll}"
-
-        total_score = natural_roll + skill_val
-
-        if natural_roll >= 96:
-            outcome = "CRITICAL SUCCESS"
-        elif natural_roll <= 5:
-            outcome = "CRITICAL FAILURE"
-        elif total_score >= difficulty:
-            outcome = "SUCCESS"
-        else:
-            outcome = "FAILURE"
-
-    rep_info = f" [REP: {rep_dc_mod:+d} DC]" if rep_dc_mod else ""
-    verdict_str = f"MECHANICAL VERDICT: {outcome}! (Skill: {skill_used} [{skill_val}], Roll: {natural_roll}, Total: {total_score} vs DC {difficulty}{rep_info}). GM INFO: {data.get('verdict_text')}"
-
-    updates["skill_used"] = skill_used
-    updates["dice_roll"] = roll_str
-    updates["skill_val"] = skill_val
-    updates["total_score"] = total_score
-    updates["outcome"] = outcome
-    updates["circumstance"] = circumstance
-    updates["difficulty"] = difficulty
-
-    # Reputation delta для соціальних навичок.
-    # Пріоритет: Python-детекція імені NPC з тексту дії.
-    # Fallback: ім'я NPC від AI Worker (коли гравець не називає NPC явно).
-    if skill_used in ["Інтрига", "Управління"]:
-        final_rep_target = rep_target_npc or str(data.get("reputation_target_npc", "")).strip()
-        if final_rep_target:
-            updates["reputation_delta"] = get_reputation_delta(outcome)
-            updates["reputation_target_npc"] = final_rep_target
-
-    # --- ХАРДКОРНА СИСТЕМА ТРАВМ ТА ПРОКАЧКИ ---
-    if outcome == "CRITICAL SUCCESS":
-        if "skill_impact" not in updates:
-            updates["skill_impact"] = {}
-        updates["skill_impact"][skill_used] = 1
-
-    elif outcome == "CRITICAL FAILURE":
-        temp_penalty = random.randint(15, 20)
-        if "temp_debuff" not in updates:
-            updates["temp_debuff"] = {}
-        updates["temp_debuff"][skill_used] = temp_penalty
-
-        if random.random() < 0.50:
-            if "skill_impact" not in updates:
-                updates["skill_impact"] = {}
-            updates["skill_impact"][skill_used] = -1
-            updates["permanent_scar"] = True
-
-    # A07b FIX: Соціальний провал при ST>=2 → ескалація напруги
-    social_skills = ["Інтрига", "Управління"]
-    if (scene_tension_val >= 2
-            and skill_used in social_skills
-            and updates.get("outcome") in ["CRITICAL FAILURE", "FAILURE"]):
-        clocks_fix_b = updates.get("clocks_impact", {})
-        if isinstance(clocks_fix_b, dict) and clocks_fix_b.get("Scene_Tension") in [0, None]:
-            clocks_fix_b["Scene_Tension"] = 1
-            updates["clocks_impact"] = clocks_fix_b
-
-    return verdict_str, updates

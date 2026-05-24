@@ -134,7 +134,7 @@ def _build_patches(narrator_mock: MagicMock) -> list:
             new=AsyncMock(return_value=(True, "")),
         ),
         patch(
-            "core.engine.resolve_action_mechanics",
+            "core.engine.resolve_normal_action",
             new=AsyncMock(return_value=("MECHANICAL VERDICT: SUCCESS", _WORKER_UPDATES.copy())),
         ),
         patch("core.engine.get_location_npcs", return_value=("", [], {})),
@@ -435,22 +435,31 @@ def test_narrator_success_returns_story_plus_actions():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ТЕСТ 6 (ЗБЕРЕЖЕНО + ОНОВЛЕНО): Fallback НЕ скасовує state mutation
-# apply_system_impacts виконується ДО Narrator → при last-resort вже відпрацювала.
+# ТЕСТ 6 (ОНОВЛЕНО після Phase 5): Fallback НЕ скасовує state mutation
+# apply_dnd_impacts виконується ДО Narrator → при last-resort вже відпрацювала.
+#
+# Зміна після Phase 5: engine.py тепер кличе apply_dnd_impacts (з core.dnd_engine),
+# а не apply_system_impacts напряму. apply_dnd_impacts делегує до apply_system_impacts
+# всередині, але для перевірки інваріанту "state mutation before Narrator"
+# достатньо перехопити виклик apply_dnd_impacts на рівні core.engine.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_state_mutation_happens_before_narrator_failure():
     """
-    apply_system_impacts викликається ДО Narrator (by design).
+    apply_dnd_impacts викликається ДО Narrator (by design, Phase 5).
     При падінні всіх трьох спроб Narrator функція вже була викликана.
     Результат не містить "⚠️" — повертається детерміністичний текст.
+
+    ЗМІНА: після Phase 5 engine.py викликає apply_dnd_impacts (core.dnd_engine),
+    а не apply_system_impacts напряму. Інваріант "state mutation before Narrator"
+    перевіряється через перехоплення core.engine.apply_dnd_impacts.
     """
     apply_impacts_call_count = []
 
-    def capturing_apply(profile, impacts):
+    def capturing_apply_dnd(profile, updates):
         apply_impacts_call_count.append(1)
-        from core.mechanics import apply_system_impacts as _real
-        return _real(profile, impacts)
+        from core.dnd_engine import apply_dnd_impacts as _real
+        return _real(profile, updates)
 
     # Всі три виклики → порожньо → last-resort
     narrator_mock = MagicMock(
@@ -462,7 +471,7 @@ def test_state_mutation_happens_before_narrator_failure():
     )
 
     patches = _build_patches(narrator_mock) + [
-        patch("core.engine.apply_system_impacts", side_effect=capturing_apply),
+        patch("core.engine.apply_dnd_impacts", side_effect=capturing_apply_dnd),
     ]
 
     async def _run():
@@ -483,7 +492,7 @@ def test_state_mutation_happens_before_narrator_failure():
         f"Even on triple failure, result must not contain error emoji. Got: {result_text!r}"
     )
     assert len(apply_impacts_call_count) >= 1, (
-        "apply_system_impacts must be called before Narrator (state mutation by design)."
+        "apply_dnd_impacts must be called before Narrator (state mutation by design, Phase 5)."
     )
 
 

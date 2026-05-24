@@ -1,7 +1,7 @@
 import pytest
+import asyncio
+from unittest.mock import patch, MagicMock, AsyncMock
 from core.mechanics import safe_int, apply_system_impacts, process_training_request
-from unittest.mock import patch
-from core.mechanics import apply_system_impacts
 
 def test_safe_int():
     assert safe_int("100") == 100
@@ -98,104 +98,159 @@ def test_apply_system_impacts_skills():
     assert updated["Бойові навички"] == 100
 
 
-def test_process_training_request_insufficient_gold():
-    import asyncio
-    profile = {"Бойові навички": 50, "Особисте Золото": 10, "Енергія": 100}
-    user_input = "Я хочу потренуватися битися мечем у майстра"
+# ---------------------------------------------------------------------------
+# D&D Training tests (process_training_request — D&D XP-based)
+# ---------------------------------------------------------------------------
 
-    from unittest.mock import patch, MagicMock
+def _make_dnd_profile(gold=200, energy=1000):
+    """Minimal D&D profile for training tests."""
+    return {
+        "level": 1,
+        "xp": 0,
+        "ability_scores": {"STR": 14, "DEX": 12, "CON": 13, "INT": 10, "WIS": 11, "CHA": 15},
+        "proficiency_bonus": 2,
+        "hp_max": 11,
+        "hp_current": 11,
+        "skill_profs": ["Athletics"],
+        "skill_expertise": [],
+        "Особисте Золото": gold,
+        "gold": gold,
+        "Енергія": energy,
+    }
 
-    with patch('core.mechanics.model_worker.generate_content') as mock_gen:
-        mock_response = MagicMock()
-        # Додаємо is_possible та method: mentor, щоб тригернути перевірку золота
-        mock_response.text = '{"is_training": true, "is_possible": true, "method": "mentor", "skill": "Бойові"}'
-        mock_gen.return_value = mock_response
 
+def _llm_response(is_training=True, is_possible=True, skill="Athletics", method="solo", reason=""):
+    """Build a mock LLM JSON response for build_training_request_prompt."""
+    import json
+    data = {
+        "is_training": is_training,
+        "is_possible": is_possible,
+        "skill": skill,
+        "method": method,
+        "reason_if_failed": reason,
+    }
+    mock = MagicMock()
+    mock.text = json.dumps(data)
+    return mock
+
+
+def test_training_solo_success_xp_and_energy():
+    """Solo training: xp_gained=1500, energy_cost=40, cost_gold=0, cost_time_days=2."""
+    profile = _make_dnd_profile(gold=0, energy=1000)
+    user_input = "Я тренуюся з мечем самостійно"
+
+    with patch("core.mechanics.model_worker.generate_content",
+               return_value=_llm_response(skill="Athletics", method="solo")):
         result = asyncio.run(process_training_request(user_input, profile))
 
-        assert result is not None
-        assert "error" in result
-        assert "Не вистачає золота" in result["error"]
+    assert result is not None
+    assert "error" not in result
+    assert result["skill"] == "Athletics"
+    assert result["xp_gained"] == 1500
+    assert result["energy_cost"] == 40
+    assert result["cost_gold"] == 0
+    assert result["cost_time_days"] == 2
+    assert result["hp_damage_dice"] == "none"
+    assert result["method"] == "solo"
+    # XP was awarded inside process_training_request
+    assert profile["xp"] == 1500
 
 
-# test/test_mechanics.py
-import pytest
-from unittest.mock import patch, MagicMock
-from core.mechanics import resolve_action_mechanics
+def test_training_mentor_success_xp_and_cost():
+    """Mentor training: xp_gained=3000, cost_gold=50, energy_cost=25, cost_time_days=1."""
+    profile = _make_dnd_profile(gold=200, energy=1000)
+    user_input = "Я прошу майстра навчити мене красномовству"
+
+    with patch("core.mechanics.model_worker.generate_content",
+               return_value=_llm_response(skill="Persuasion", method="mentor")):
+        result = asyncio.run(process_training_request(user_input, profile))
+
+    assert result is not None
+    assert "error" not in result
+    assert result["skill"] == "Persuasion"
+    assert result["xp_gained"] == 3000
+    assert result["cost_gold"] == 50
+    assert result["energy_cost"] == 25
+    assert result["cost_time_days"] == 1
+    assert result["hp_damage_dice"] == "none"
+    assert result["method"] == "mentor"
+    assert profile["xp"] == 3000
 
 
-@pytest.fixture
-def sample_profile():
-    return {
-        "Бойові навички": 50,
-        "Військові навички": 10,
-        "Інтрига": 20,
-        "Управління": 5,
-        "Здоров'я": 100,
-        "Особисте Золото": 50,
-        "Годинники": {"Scene_Tension": "1/4"}
-    }
+def test_training_mentor_insufficient_gold():
+    """Mentor training declined when gold < 50."""
+    profile = _make_dnd_profile(gold=10, energy=1000)
+    user_input = "Наймаю вчителя стелсу"
+
+    with patch("core.mechanics.model_worker.generate_content",
+               return_value=_llm_response(skill="Stealth", method="mentor")):
+        result = asyncio.run(process_training_request(user_input, profile))
+
+    assert result is not None
+    assert "error" in result
+    assert "Не вистачає золота" in result["error"]
+    # No XP should have been awarded
+    assert profile.get("xp", 0) == 0
 
 
-@patch('core.mechanics.model_worker.generate_content')
-@patch('core.mechanics.random.randint')  # Мокаємо кубик для стабільності
-def test_resolve_action_mechanics_success(mock_randint, mock_generate):
-    sample_profile = {
-        'Інтрига': 20,
-        'Бойові навички': 50,
-        'Військові навички': 10,
-        'Годинники': {'Scene_Tension': '1/4'}
-    }
+def test_training_insufficient_energy_failure_path():
+    """Low energy → failure path: xp=500, hp_damage_dice='1d4'."""
+    # energy_cost for solo is 40; set energy below that
+    profile = _make_dnd_profile(gold=0, energy=10)
+    user_input = "Тренуюся попри виснаження"
 
-    # 1. Фіксуємо кидок кубика так, щоб 2d50 дав достатньо для успіху
-    # random.randint викликається 4 рази (по 2 рази для roll_1 і roll_2).
-    # Нехай завжди випадає 25. 25+25 = 50. Навичка 50. 50+50 = 100 (Успіх!)
-    mock_randint.return_value = 25
+    with patch("core.mechanics.model_worker.generate_content",
+               return_value=_llm_response(skill="Athletics", method="solo")):
+        result = asyncio.run(process_training_request(user_input, profile))
 
-    # 2. Імітуємо ідеальну відповідь від Worker'а (Новий JSON-формат)
-    mock_response = MagicMock()
-    mock_response.text = """
-        {
-            "action_type": "standard",
-            "skill_used": "Бойові",
-            "circumstance": "NORMAL",
-            "verdict_text": "Player successfully parried the attack.",
-            "updates": {
-                 "minutes_passed": 2,
-                 "health_impact": "none",
-                 "energy_impact": "spend_small",
-                 "gold_impact": "none",
-                 "inventory_new": [],
-                 "inventory_lost": [],
-                 "clocks_impact": {}
-            }
-        }
-        """
-    mock_generate.return_value = mock_response
-
-    # 3. Викликаємо функцію
-    import asyncio
-    user_input = "Я відбиваю удар мечем"
-    verdict_str, updates = asyncio.run(resolve_action_mechanics(user_input, sample_profile))
-
-    # 4. Перевіряємо, чи правильно сформувався текстовий вердикт
-    assert "MECHANICAL VERDICT: SUCCESS!" in verdict_str
-    assert updates.get("total_score") == 100
-    assert updates.get("action_type") == "standard"
+    assert result is not None
+    assert "error" not in result
+    assert result["xp_gained"] == 500
+    assert result["hp_damage_dice"] == "1d4"
+    assert profile["xp"] == 500
 
 
-@patch('core.mechanics.model_worker.generate_content')
-def test_resolve_action_mechanics_fallback(mock_generate, sample_profile):
-    """Тестуємо поведінку системи, якщо Worker AI падає з помилкою"""
-    # 1. Змушуємо API викинути виняток (імітуємо таймаут або 500 помилку сервера)
-    mock_generate.side_effect = Exception("Google API Error Timeout")
+def test_training_invalid_skill_returns_error():
+    """LLM returns invalid skill name → error dict returned."""
+    profile = _make_dnd_profile()
+    user_input = "Хочу прокачати Бойові"
 
-    # 2. Викликаємо функцію
-    import asyncio
-    user_input = "Я намагаюся вижити при падінні сервера"
-    verdict_str, updates = asyncio.run(resolve_action_mechanics(user_input, sample_profile))
+    # "Бойові" is NOT a D&D skill name
+    with patch("core.mechanics.model_worker.generate_content",
+               return_value=_llm_response(skill="Бойові", method="solo")):
+        result = asyncio.run(process_training_request(user_input, profile))
 
-    # 3. Перевіряємо спрацювання Fallback-логіки (щоб гравець не чекав вічно)
-    assert "MECHANICAL VERDICT: AUTO_SUCCESS" in verdict_str
-    assert isinstance(updates, dict)
-    assert updates["minutes_passed"] == 5
+    assert result is not None
+    assert "error" in result
+    assert "Невідомий скіл" in result["error"]
+
+
+def test_training_not_training_intent_returns_none():
+    """is_training=False from LLM → function returns None (not a training action)."""
+    profile = _make_dnd_profile()
+    user_input = "Я йду до таверни"
+
+    with patch("core.mechanics.model_worker.generate_content",
+               return_value=_llm_response(is_training=False, skill="Athletics", method="solo")):
+        result = asyncio.run(process_training_request(user_input, profile))
+
+    assert result is None
+
+
+def test_training_scene_not_safe_returns_error():
+    """is_possible=False from LLM → error dict with reason returned."""
+    profile = _make_dnd_profile()
+    user_input = "Тренуюся під час бою"
+
+    with patch("core.mechanics.model_worker.generate_content",
+               return_value=_llm_response(
+                   is_training=True, is_possible=False,
+                   skill="Athletics", method="solo",
+                   reason="Active combat in progress.")):
+        result = asyncio.run(process_training_request(user_input, profile))
+
+    assert result is not None
+    assert "error" in result
+    assert "Active combat" in result["error"]
+
+

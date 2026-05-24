@@ -38,10 +38,63 @@ async def get_canon_characters(house_name):
     return result if result else []
 
 
-async def generate_initial_stats(char_name, house_name, house_data):
-    """Асинхронно генерує стартовий профіль героя."""
+async def generate_initial_stats_legacy(char_name, house_name, house_data):
+    """Legacy 2d50-profile generator (збережено для rollback). Не використовується в Phase 5+."""
     origin_region = house_data.get('Регіон', 'Вестерос')
-    print(f"🎲 Генерую статистику для {char_name}...")
+    print(f"🎲 [LEGACY] Генерую статистику для {char_name}...")
+
+    valid_locations_str = ", ".join(f'"{loc}"' for loc in VALID_LOCATIONS_ORDERED)
+    _scenes_block = format_scenes_for_prompt(origin_region)
+
+    from core.prompts import build_initial_stats_prompt as _legacy_prompt
+    prompt = _legacy_prompt(char_name, house_name, origin_region, valid_locations_str, scenes_block_str=_scenes_block)
+
+    try:
+        def _sync_gen_profile():
+            return model_gm_logic.generate_content(prompt)
+
+        response = await asyncio.to_thread(_sync_gen_profile)
+        profile = clean_and_parse_json(response.text)
+    except Exception as e:
+        print(f"❌ [LEGACY] Помилка генерації профілю: {e}")
+        profile = None
+    if profile:
+        profile["Ім'я"] = char_name
+        profile["Дім"] = house_name
+        loc = profile.get("Поточне місцезнаходження", "")
+        if not is_valid_location(loc):
+            fallback_loc = VALID_LOCATIONS_ORDERED[0]
+            profile["Поточне місцезнаходження"] = fallback_loc
+            loc = fallback_loc
+        profile["Регіон"] = get_region_for_location(loc) or origin_region
+        curr_scene = profile.get("Поточна сцена", "")
+        if not curr_scene or curr_scene.strip().lower() in ("невідомо", "global", "unknown", ""):
+            loc_scenes = LOCATION_SCENES.get(loc, {})
+            hub_scenes = loc_scenes.get("hub", [])
+            if hub_scenes:
+                profile["Поточна сцена"] = hub_scenes[0]
+            else:
+                profile["Поточна сцена"] = loc
+        return profile
+    return None
+
+
+async def generate_initial_stats(char_name, house_name, house_data):
+    """Асинхронно генерує стартовий D&D профіль героя (Phase 5+).
+
+    Порядок:
+    1. LLM (build_initial_stats_prompt D&D) → suggested_class, suggested_heritage, ability_scores, etc.
+    2. Python детерміністично обчислює: level, xp, proficiency_bonus, hp_max, hp_current,
+       ac, skill_profs, saves_proficient, equipment, gold, features, conditions.
+    3. Застосовує heritage bonuses через dnd_heritages.apply_heritage_bonuses.
+    4. Зберігає legacy-сумісні ключі ("Здоров'я", "Енергія") поряд з D&D полями.
+    """
+    from core.dnd_classes import get_class, get_starting_hp, build_class_starting_kit, get_class_features_at_level
+    from core.dnd_heritages import apply_heritage_bonuses, get_heritage
+    from core.dnd_core import ability_modifier, proficiency_bonus
+
+    origin_region = house_data.get('Регіон', 'Вестерос')
+    print(f"🎲 [D&D] Генерую статистику для {char_name}...")
 
     valid_locations_str = ", ".join(f'"{loc}"' for loc in VALID_LOCATIONS_ORDERED)
     _scenes_block = format_scenes_for_prompt(origin_region)
@@ -54,34 +107,188 @@ async def generate_initial_stats(char_name, house_name, house_data):
             return model_gm_logic.generate_content(prompt)
 
         response = await asyncio.to_thread(_sync_gen_profile)
-        profile = clean_and_parse_json(response.text)
+        llm_data = clean_and_parse_json(response.text)
     except Exception as e:
-        print(f"❌ Помилка генерації профілю (Gemma 4): {e}")
-        profile = None
-    if profile:
-        profile["Ім'я"] = char_name
-        profile["Дім"] = house_name
-        # Validate Location — якщо ШІ написав назву регіону замість локації, ставимо першу валідну локацію регіону
-        loc = profile.get("Поточне місцезнаходження", "")
-        if not is_valid_location(loc):
-            fallback_loc = VALID_LOCATIONS_ORDERED[0]
-            print(f"⚠️ [INITIAL STATS] Невалідна локація '{loc}' → замінено на '{fallback_loc}'")
-            profile["Поточне місцезнаходження"] = fallback_loc
-            loc = fallback_loc
-        # Auto-derive регіон — перезаписуємо відповідь ШІ гарантованим значенням
-        profile["Регіон"] = get_region_for_location(loc) or origin_region
-        # Гарантуємо наявність сцени — блокуємо "Невідомо"/GLOBAL/порожні значення
-        curr_scene = profile.get("Поточна сцена", "")
-        if not curr_scene or curr_scene.strip().lower() in ("невідомо", "global", "unknown", ""):
-            loc_scenes = LOCATION_SCENES.get(loc, {})
-            hub_scenes = loc_scenes.get("hub", [])
-            if hub_scenes:
-                profile["Поточна сцена"] = hub_scenes[0]
-                print(f"⚠️ [SCENE FALLBACK] LLM did not provide scene for '{loc}'; using hub[0]='{hub_scenes[0]}'.")
+        print(f"❌ [D&D] Помилка генерації профілю (Gemma 4): {e}")
+        llm_data = None
+
+    if not llm_data:
+        print("⚠️ [D&D] LLM повернув None — fallback до legacy generator")
+        return await generate_initial_stats_legacy(char_name, house_name, house_data)
+
+    # --- Validate location and scene (same as legacy) ---
+    llm_data["Ім'я"] = char_name
+    llm_data["Дім"] = house_name
+    loc = llm_data.get("Поточне місцезнаходження", "")
+    if not is_valid_location(loc):
+        fallback_loc = VALID_LOCATIONS_ORDERED[0]
+        print(f"⚠️ [D&D] Невалідна локація '{loc}' → замінено на '{fallback_loc}'")
+        llm_data["Поточне місцезнаходження"] = fallback_loc
+        loc = fallback_loc
+    llm_data["Регіон"] = get_region_for_location(loc) or origin_region
+    curr_scene = llm_data.get("Поточна сцена", "")
+    if not curr_scene or curr_scene.strip().lower() in ("невідомо", "global", "unknown", ""):
+        loc_scenes = LOCATION_SCENES.get(loc, {})
+        hub_scenes = loc_scenes.get("hub", [])
+        if hub_scenes:
+            llm_data["Поточна сцена"] = hub_scenes[0]
+            print(f"⚠️ [D&D SCENE FALLBACK] LLM did not provide scene for '{loc}'; using hub[0]='{hub_scenes[0]}'.")
+        else:
+            llm_data["Поточна сцена"] = loc
+
+    # --- Resolve class and heritage ---
+    suggested_class: str = str(llm_data.get("suggested_class", "Hedge Knight")).strip()
+    suggested_heritage: str = str(llm_data.get("suggested_heritage", "Westerosi (Andal)")).strip()
+
+    # Graceful fallback for unknown class / heritage
+    from core.dnd_classes import GOT_CLASSES
+    from core.dnd_heritages import HERITAGES
+    if suggested_class not in GOT_CLASSES:
+        print(f"⚠️ [D&D] Unknown class '{suggested_class}' → fallback to 'Hedge Knight'")
+        suggested_class = "Hedge Knight"
+    if suggested_heritage not in HERITAGES:
+        print(f"⚠️ [D&D] Unknown heritage '{suggested_heritage}' → fallback to 'Westerosi (Andal)'")
+        suggested_heritage = "Westerosi (Andal)"
+
+    cls_def = get_class(suggested_class)
+
+    # --- Ability scores from LLM (should be 8-15 each; heritage bonuses applied by Python) ---
+    raw_scores: dict = llm_data.get("ability_scores", {})
+    _default_scores = {"STR": 10, "DEX": 10, "CON": 10, "INT": 10, "WIS": 10, "CHA": 10}
+    ability_scores: dict[str, int] = {}
+    for ab in ("STR", "DEX", "CON", "INT", "WIS", "CHA"):
+        raw_val = raw_scores.get(ab, _default_scores[ab])
+        # Clamp: LLM must stay 8-15; clamped here for safety before heritage
+        ability_scores[ab] = max(8, min(15, int(float(str(raw_val))) if str(raw_val).replace('.', '').isdigit() else 10))
+
+    llm_data["ability_scores"] = ability_scores
+
+    # Apply heritage bonuses (mutates ability_scores safely, caps at 20)
+    llm_data = apply_heritage_bonuses(
+        llm_data,
+        suggested_heritage,
+        ability_choices=None,  # Westerosi Andal: fallback to STR, DEX
+    )
+    final_scores: dict[str, int] = llm_data["ability_scores"]
+
+    # --- Level 1 D&D fields (deterministic) ---
+    level = 1
+    xp = 0
+    pb = proficiency_bonus(level)  # = 2 at L1
+    con_mod = ability_modifier(final_scores.get("CON", 10))
+    hp_max = get_starting_hp(suggested_class, con_mod)
+    hp_current = hp_max
+
+    # AC: 10 + DEX mod (unarmored), or armor-based if equipment has armor
+    kit = build_class_starting_kit(suggested_class)
+    armor_str: str = kit.get("armor") or ""
+    dex_mod = ability_modifier(final_scores.get("DEX", 10))
+    if armor_str:
+        # Simple armor AC parse: "Mail (AC 16)" → extract number
+        import re
+        ac_match = re.search(r'AC\s*(\d+)', armor_str)
+        if ac_match:
+            base_ac = int(ac_match.group(1))
+            # Studded Leather / Leather: AC base + DEX mod (up to +2 for medium)
+            if "DEX mod" in armor_str:
+                max_dex_bonus = 2 if ("medium" in armor_str.lower() or "hide" in armor_str.lower() or "studded" in armor_str.lower()) else 99
+                ac = base_ac + min(dex_mod, max_dex_bonus)
             else:
-                profile["Поточна сцена"] = loc  # legacy для локацій поза LOCATION_SCENES
-        return profile
-    return None
+                ac = base_ac
+        else:
+            ac = 10 + dex_mod
+    else:
+        ac = 10 + dex_mod
+
+    # Shield bonus if class has shield in starting kit
+    if kit.get("shield"):
+        ac += 2
+
+    # Skill proficiencies: choose first N from class skill_pool
+    skill_choices_count = cls_def.skill_choices
+    skill_profs: list[str] = list(cls_def.skill_pool[:skill_choices_count])
+
+    # Save proficiencies from class
+    saves_proficient: list[str] = list(cls_def.saves_proficient)
+
+    # L1 features
+    features: list[dict] = [
+        {"name": f.name, "desc": f.desc, "source": f.source}
+        for f in get_class_features_at_level(suggested_class, 1)
+    ]
+
+    # Equipment string for legacy "Інвентар" field
+    items_list: list[str] = list(kit.get("items", []))
+    if kit.get("weapon_main"):
+        items_list.insert(0, kit["weapon_main"])
+    if kit.get("weapon_off"):
+        items_list.insert(1, kit["weapon_off"])
+    inventory_str = ", ".join(items_list) if items_list else "Пусто"
+
+    gold_from_kit = int(kit.get("gold", 0))
+
+    # Heritage traits (languages etc already applied by apply_heritage_bonuses)
+    heritage_obj = get_heritage(suggested_heritage)
+    heritage_trait_names = ", ".join(t.name for t in heritage_obj.traits)
+
+    # --- Build final profile ---
+    profile: dict = {
+        # D&D core fields
+        "level": level,
+        "xp": xp,
+        "class": suggested_class,
+        "heritage": suggested_heritage,
+        "background": str(llm_data.get("background", "Soldier")).strip(),
+        "ability_scores": final_scores,
+        "proficiency_bonus": pb,
+        "hp_max": hp_max,
+        "hp_current": hp_current,
+        "hit_dice_total": 1,
+        "ac": ac,
+        "skill_profs": skill_profs,
+        "skill_expertise": [],
+        "saves_proficient": saves_proficient,
+        "features": features,
+        "conditions": [],
+        "mode": "NORMAL",
+        "combat_state_ref": None,
+        "asi_pending": False,
+        "languages": llm_data.get("languages", ["Common Tongue"]),
+
+        # Narrative / character fields
+        "Ім'я": char_name,
+        "Дім": house_name,
+        "Поточне місцезнаходження": llm_data.get("Поточне місцезнаходження", VALID_LOCATIONS_ORDERED[0]),
+        "Поточна сцена": llm_data.get("Поточна сцена", ""),
+        "Регіон": llm_data.get("Регіон", origin_region),
+        "Світогляд": str(llm_data.get("Світогляд", "")).strip(),
+        "Риси": str(llm_data.get("Риси", heritage_trait_names)).strip(),
+        "Вади": str(llm_data.get("Вади", "")).strip(),
+        "Особисті риси": llm_data.get("personality_traits", []),
+        "Зв'язок": str(llm_data.get("bond", "")).strip(),
+        "Вада персонажа": str(llm_data.get("flaw", "")).strip(),
+        "Вороги": "",
+        "Друзі": "",
+
+        # Legacy compatibility fields (engine.py and mechanics.py read these)
+        "Здоров'я": hp_current,   # mirrors hp_current; updated by apply_dnd_impacts
+        "Енергія": 1000,          # legacy energy scale 0-1000; Phase 5 keeps it active
+        "Інвентар": inventory_str,
+        "Особисте Золото": gold_from_kit,
+        "Зброя": kit.get("weapon_main", "-"),
+        "Броня": armor_str or "Без броні",
+        "Транспорт": "None",
+        "Ігровий час": "298 рік В.Е., 1-й місяць, День 1, 08:00",
+        "Час_хвилини": 8 * 60,
+        "Годинники": {},
+        "Репутація (Рідний регіон)": 0,
+        "temp_debuffs": {},
+        "training_cooldowns": {},
+        "reputation": {"regions": {}, "factions": {}},
+    }
+
+    print(f"✅ [D&D] Профіль створено: {char_name} | {suggested_class} L{level} | {suggested_heritage} | HP {hp_current}/{hp_max} | AC {ac}")
+    return profile
 
 
 async def get_narrative_intro(profile):

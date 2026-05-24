@@ -354,7 +354,7 @@ def _build_base_patches(narrator_mock: MagicMock, profile_override: dict = None)
         patch("core.engine.get_user_data", new=AsyncMock(return_value=(prof, 2))),
         patch("core.engine.validate_action", new=AsyncMock(return_value=(True, ""))),
         patch(
-            "core.engine.resolve_action_mechanics",
+            "core.engine.resolve_normal_action",
             new=AsyncMock(return_value=("MECHANICAL VERDICT: SUCCESS", {
                 "action_type": "standard",
                 "skill_used": "None",
@@ -451,8 +451,9 @@ def test_engine_new_scene_passes_scene_continuity_new_to_narrator():
     patches = [
         patch("core.engine.get_user_data", new=AsyncMock(return_value=(profile_before, 2))),
         patch("core.engine.validate_action", new=AsyncMock(return_value=(True, ""))),
+        # Engine routes NORMAL mode through resolve_normal_action (core.dnd_engine).
         patch(
-            "core.engine.resolve_action_mechanics",
+            "core.engine.resolve_normal_action",
             new=AsyncMock(return_value=("MECHANICAL VERDICT: SUCCESS", worker_updates_scene_change)),
         ),
         patch("core.engine.get_location_npcs", return_value=("", [], {})),
@@ -541,7 +542,7 @@ def test_engine_same_scene_passes_scene_continuity_continuing_to_narrator():
         patch("core.engine.get_user_data", new=AsyncMock(return_value=(profile_same_scene, 2))),
         patch("core.engine.validate_action", new=AsyncMock(return_value=(True, ""))),
         patch(
-            "core.engine.resolve_action_mechanics",
+            "core.engine.resolve_normal_action",
             new=AsyncMock(return_value=("MECHANICAL VERDICT: SUCCESS", worker_updates_same_scene)),
         ),
         patch("core.engine.get_location_npcs", return_value=("", [], {})),
