@@ -54,10 +54,11 @@ async def on_startup(bot: Bot):
         await bot.delete_webhook(drop_pending_updates=True)
 
     # 2. КРИТИЧНО: Відправляємо векторизацію лору у ФОНОВУ задачу!
-    # Інакше aiohttp сервер зависне на 5 хвилин і Telegram відкине вебхук.
+    # Інакше aiohttp сервер зависне на 5 хвилин і Render/Telegram вб'ють процес.
     # NPC-бази per-player більше не ініціалізуються глобально —
     # refresh_npc_database(user_id) викликається lazy через world.py для кожного гравця окремо.
-    await asyncio.create_task(load_lore_data())
+    # NB: НЕ використовувати await — task має жити у фоні, on_startup має повернутись миттєво.
+    asyncio.create_task(load_lore_data())
 
     logger.info("✅ Сервер готовий приймати повідомлення! (Векторизація лору триває у фоні)")
 
