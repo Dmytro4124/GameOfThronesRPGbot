@@ -291,6 +291,38 @@ async def generate_initial_stats(char_name, house_name, house_data):
     return profile
 
 
+def build_fallback_intro(profile: dict) -> str:
+    """Deterministic Ukrainian intro narrative when LLM is unavailable.
+
+    Uses profile fields (Ім'я, Дім, class, heritage, Поточне місцезнаходження)
+    to assemble a 2-3 sentence intro. Always succeeds.
+    """
+    name = profile.get("Ім'я", "Безіменний")
+    house = profile.get("Дім", "невідомого дому")
+    cls = profile.get("class", "Knight")
+    heritage = profile.get("heritage", "Westerosi (Andal)")
+    location = profile.get("Поточне місцезнаходження", "Вестерос")
+
+    cls_intro = {
+        "Knight": "лицар, чий герб уже знають у тренувальному дворі",
+        "Hedge Knight": "мандрівний лицар без землі, що шукає роботу мечем",
+        "Maester": "вчений Цитаделі з ланцюгом знань на шиї",
+        "Septon": "слуга Семи Богів, що несе слово віри",
+        "Sellsword": "найманець, готовий битися за того, хто більше заплатить",
+        "Spy": "шпигун у тіні, чиї маленькі пташки літають усюди",
+        "Courtier": "придворний інтриган, чия посмішка ховає кинджал",
+        "Bastard": "незаконнонароджений нащадок, без спадку але з гострим мечем",
+        "Wildling": "вільний з-за Стіни, що не схиляє коліна",
+    }.get(cls, "герой Вестеросу")
+
+    return (
+        f"{name} з дому {house} — {cls_intro}. "
+        f"Кров {heritage.lower()} тече у ваших жилах. "
+        f"Зараз ви у локації «{location}», і ваша історія тільки починається. "
+        f"Що зробите першим, мілорде?"
+    )
+
+
 async def get_narrative_intro(profile):
     """Асинхронно генерує атмосферний вступ на основі локації та профілю гравця.
     Повертає dict: {narrative_text, action_prompt, suggested_actions}."""

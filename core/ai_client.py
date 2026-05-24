@@ -1,5 +1,7 @@
 import json
 import re
+import time
+import random
 import asyncio
 from google import genai
 from core.prompts import JSON_ONLY_INSTRUCTION
@@ -9,6 +11,30 @@ from config import (GEMINI_API_KEY, MODEL_MAIN_NAME, MODEL_WORKER_NAME, MODEL_MA
 
 # Ініціалізація клієнта
 client = genai.Client(api_key=GEMINI_API_KEY)
+
+# ─── Circuit Breaker (module-level, per-model) ───────────────────────────────
+# Навмисний mutable global: single-process asyncio — race-safe.
+# Для multi-instance prod потрібен Redis (deferred).
+_CIRCUIT_STATE: dict = {}  # {model_name: {"consecutive_failures": int, "cooldown_until": float}}
+
+DEFAULT_MAX_RETRIES = 6
+TRANSIENT_HTTP_CODES = (500, 502, 503, 504)
+RATE_LIMIT_CODES = (429,)
+PERMANENT_HTTP_CODES = (400, 401, 403, 404)
+CIRCUIT_BREAKER_THRESHOLD = 5   # consecutive failures → open
+CIRCUIT_BREAKER_COOLDOWN = 60   # seconds
+
+
+def get_circuit_breaker_status(model_name: str) -> dict:
+    """Повертає поточний стан circuit breaker для вказаної моделі. Для адмін-діагностики."""
+    cb = _CIRCUIT_STATE.get(model_name, {})
+    now = time.time()
+    return {
+        "model": model_name,
+        "consecutive_failures": cb.get("consecutive_failures", 0),
+        "cooldown_remaining": max(0.0, cb.get("cooldown_until", 0.0) - now),
+        "is_open": cb.get("cooldown_until", 0.0) > now,
+    }
 
 
 class AIWrapper:
@@ -51,11 +77,21 @@ class AIWrapper:
             config_args["system_instruction"] = self.system_instruction
         return types.GenerateContentConfig(**config_args)
 
-    def generate_content(self, prompt, max_retries=3):
-        import time
-        delay = 2
-        last_error = None
+    def generate_content(self, prompt, max_retries=DEFAULT_MAX_RETRIES):
+        # ── 1. Circuit breaker check ──────────────────────────────────────────
+        cb = _CIRCUIT_STATE.setdefault(
+            self.model_name,
+            {"consecutive_failures": 0, "cooldown_until": 0.0}
+        )
+        now = time.time()
+        if cb["cooldown_until"] > now:
+            wait = cb["cooldown_until"] - now
+            print(f"[CIRCUIT BREAKER] {self.model_name} in cooldown for {wait:.1f}s more — fast fail")
+            raise RuntimeError(f"AIWrapper circuit breaker open for {self.model_name}")
+
         config = self._build_config()
+        last_error = None
+
         for attempt in range(1, max_retries + 1):
             try:
                 raw = client.models.generate_content(
@@ -63,23 +99,78 @@ class AIWrapper:
                     contents=prompt,
                     config=config
                 )
+                # SUCCESS — reset circuit breaker
+                cb["consecutive_failures"] = 0
+                cb["cooldown_until"] = 0.0
                 if self.include_thoughts:
                     thoughts, content = split_thoughts(raw)
                     if thoughts:
                         _thoughts_log.append({"model": self.model_name, "thought": thoughts})
                     return _AIResponse(content)
                 return raw
+
             except Exception as e:
                 last_error = e
-                if attempt == max_retries:
-                    raise
                 err_str = str(e)
-                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                    delay = min(delay * 3, 60)
+
+                # ── 2. Classify error ─────────────────────────────────────────
+                is_transient = (
+                    any(str(code) in err_str for code in TRANSIENT_HTTP_CODES)
+                    or "INTERNAL" in err_str
+                    or "UNAVAILABLE" in err_str
+                )
+                is_rate_limit = (
+                    any(str(code) in err_str for code in RATE_LIMIT_CODES)
+                    or "RESOURCE_EXHAUSTED" in err_str
+                )
+                is_permanent = (
+                    any(str(code) in err_str for code in PERMANENT_HTTP_CODES)
+                    or "INVALID_ARGUMENT" in err_str
+                    or "PERMISSION_DENIED" in err_str
+                )
+
+                # Permanent errors — fail immediately, no retry
+                if is_permanent:
+                    print(f"[AIWrapper {self.model_name}] PERMANENT error: {err_str[:120]} — no retry")
+                    raise
+
+                # Last attempt — bump circuit breaker counter, then raise
+                if attempt == max_retries:
+                    cb["consecutive_failures"] += 1
+                    if cb["consecutive_failures"] >= CIRCUIT_BREAKER_THRESHOLD:
+                        cb["cooldown_until"] = time.time() + CIRCUIT_BREAKER_COOLDOWN
+                        print(
+                            f"[CIRCUIT BREAKER OPEN] {self.model_name}: "
+                            f"{cb['consecutive_failures']} consecutive failures "
+                            f"-> cooldown {CIRCUIT_BREAKER_COOLDOWN}s"
+                        )
+                    raise
+
+                # ── 3. Compute backoff ────────────────────────────────────────
+                if is_rate_limit:
+                    # 429 / RESOURCE_EXHAUSTED — long backoff: 30, 60, 120 capped
+                    base_delay = min(30 * (2 ** (attempt - 1)), 120)
+                elif is_transient:
+                    # 500/502/503/504 — exponential: 5, 10, 20, 40, 60 capped
+                    base_delay = min(5 * (2 ** (attempt - 1)), 60)
                 else:
-                    delay += 2
-                print(f"⚠️ AIWrapper retry {attempt}/{max_retries}: {err_str[:80]}... (sleep {delay}s)")
+                    # Unknown — moderate linear backoff
+                    base_delay = min(3 * attempt, 30)
+
+                # Jitter ±20% to avoid thundering herd
+                jitter = base_delay * 0.2 * (2 * random.random() - 1)
+                delay = max(1.0, base_delay + jitter)
+
+                err_class = (
+                    "transient 5xx" if is_transient
+                    else ("rate limit" if is_rate_limit else "unknown")
+                )
+                print(
+                    f"[AIWrapper {self.model_name}] retry {attempt}/{max_retries} "
+                    f"({err_class}): {err_str[:100]} — sleep {delay:.1f}s"
+                )
                 time.sleep(delay)
+
         raise last_error
 
     def generate_content_stream(self, prompt):

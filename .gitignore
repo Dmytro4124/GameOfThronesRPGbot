@@ -17,3 +17,7 @@ benchmark_models.py
 benchmark_turn.py
 run_night_tests.py
 qa_logs/
+
+# Intro narrative cache (persisted on disk, not tracked in git)
+intro_cache.json
+intro_cache.tmp

@@ -581,9 +581,16 @@ def test_handlers_logger_initialized():
         for name in [
             "get_canon_characters", "generate_initial_stats", "get_narrative_intro",
             "background_canon_generation", "populate_contextual_npcs",
+            "build_fallback_intro",
         ]:
             setattr(fake_world, name, MagicMock())
         sys.modules["core.world"] = fake_world
+
+        # Підміна core.intro_cache (імпортується у handlers.py)
+        fake_intro_cache = types.ModuleType("core.intro_cache")
+        fake_intro_cache.get_cached_intro = MagicMock(return_value=None)
+        fake_intro_cache.set_cached_intro = MagicMock()
+        sys.modules["core.intro_cache"] = fake_intro_cache
 
         # Видаляємо кешований handlers щоб він перезавантажився
         sys.modules.pop("bot.handlers", None)
@@ -609,6 +616,7 @@ def test_handlers_logger_initialized():
             sys.modules["core.world"] = _orig_world
         else:
             sys.modules.pop("core.world", None)
+        sys.modules.pop("core.intro_cache", None)
         if _orig_handlers is not None:
             sys.modules["bot.handlers"] = _orig_handlers
         else:

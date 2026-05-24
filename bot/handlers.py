@@ -18,8 +18,9 @@ from database.operations import (
 )
 from core.world import (
     get_canon_characters, generate_initial_stats, get_narrative_intro,
-    background_canon_generation, populate_contextual_npcs
+    background_canon_generation, populate_contextual_npcs, build_fallback_intro
 )
+from core.intro_cache import get_cached_intro, set_cached_intro
 from core.world_constants import format_player_map
 from core.engine import process_game_turn, user_sessions
 from config import ADMIN_TELEGRAM_IDS, EROTIC_USERS, BOT_VERSION, MODEL_MAIN_NAME
@@ -240,19 +241,27 @@ async def start_game_with_character(bot: Bot, chat_id: int, char_name: str):
 
             start_loc = full_profile.get("Поточне місцезнаходження", "Вестерос")
             hero_name = full_profile.get("Ім'я", char_name)
+            profile_region = full_profile.get("Регіон", "")
+            profile_class = full_profile.get("class", "")
+            profile_heritage = full_profile.get("heritage", "")
 
+            # Фоновий запуск world setup (канонічні NPC + локальні NPC).
+            # Стан INITIALIZING залишається до завершення — гравець бачить intro
+            # але game loop заблокований (handle_general_messages перевіряє state).
             async def initial_world_setup(loc, p_name):
-                await background_canon_generation(user_id, excluded_name=p_name)
-                await populate_contextual_npcs(user_id, loc, "Start of the game. Normal daily routine.", excluded_name=p_name)
-                # Розблокуємо ПІСЛЯ повної готовності світу
-                if chat_id in user_sessions:
-                    user_sessions[chat_id]['state'] = "GAME_ACTIVE"
+                try:
+                    await background_canon_generation(user_id, excluded_name=p_name)
+                    await populate_contextual_npcs(user_id, loc, "Start of the game. Normal daily routine.", excluded_name=p_name)
+                finally:
+                    # Розблокуємо гравця у будь-якому разі
+                    if chat_id in user_sessions:
+                        user_sessions[chat_id]['state'] = "GAME_ACTIVE"
 
             task = asyncio.create_task(initial_world_setup(start_loc, char_name))
 
             def _on_world_setup_done(t):
                 if t.exception():
-                    print(f"❌ [WORLD SETUP FAILED] {t.exception()}")
+                    print(f"[WORLD SETUP FAILED] {t.exception()}")
                     if chat_id in user_sessions:
                         user_sessions[chat_id]['state'] = "GAME_ACTIVE"
 
@@ -261,150 +270,330 @@ async def start_game_with_character(bot: Bot, chat_id: int, char_name: str):
             stats_msg = f"✅ *Персонажа створено!*\n👤 **{hero_name}**\n📍 Локація: _{start_loc}_"
             await bot.send_message(chat_id, stats_msg, parse_mode='Markdown')
 
-            await bot.send_chat_action(chat_id, action='typing')
-            intro_data = await get_narrative_intro(full_profile)
+            # --- Intro: cache hit → миттєво; cache miss → fallback + фоновий LLM ---
+            cached_intro_text = get_cached_intro(profile_class, profile_heritage, profile_region)
 
-            narrative = intro_data.get("narrative_text", "")
-            action_prompt = intro_data.get("action_prompt", "")
-            raw_suggested = intro_data.get("suggested_actions", [])
+            if cached_intro_text:
+                # Cache HIT — надсилаємо одразу
+                await send_safe_message(bot, chat_id, cached_intro_text, reply_markup=get_main_menu())
+                user_sessions.setdefault(chat_id, {})["action_intents"] = {}
+                user_sessions[chat_id]['history'].append({"role": "GM", "content": cached_intro_text})
+            else:
+                # Cache MISS — показуємо детерміністичний fallback одразу,
+                # надсилаємо через bot.send_message щоб отримати Message-об'єкт для edit_text
+                fallback_text = build_fallback_intro(full_profile)
+                placeholder_msg = await bot.send_message(
+                    chat_id,
+                    fallback_text + "\n\n_Готую персоналізований вступ..._",
+                    reply_markup=get_main_menu(),
+                    parse_mode='Markdown',
+                )
+                user_sessions.setdefault(chat_id, {})["action_intents"] = {}
+                user_sessions[chat_id]['history'].append({"role": "GM", "content": fallback_text})
 
-            button_texts = []
-            intents_map = {}
-            for item in raw_suggested:
-                if isinstance(item, dict):
-                    btn = str(item.get("button", "...")).strip()[:40]
-                    intent = str(item.get("intent", btn)).strip()
-                else:
-                    btn = str(item).strip()[:40]
-                    intent = btn
-                button_texts.append(btn)
-                intents_map[btn] = intent
+                # Фоновий LLM-intro — оновить повідомлення і закешує результат
+                async def _bg_intro_task():
+                    try:
+                        intro_data = await get_narrative_intro(full_profile)
+                        narrative = intro_data.get("narrative_text", "")
+                        action_prompt = intro_data.get("action_prompt", "")
+                        raw_suggested = intro_data.get("suggested_actions", [])
 
-            user_sessions.setdefault(chat_id, {})["action_intents"] = intents_map
+                        button_texts = []
+                        intents_map = {}
+                        for item in raw_suggested:
+                            if isinstance(item, dict):
+                                btn = str(item.get("button", "...")).strip()[:40]
+                                intent = str(item.get("intent", btn)).strip()
+                            else:
+                                btn = str(item).strip()[:40]
+                                intent = btn
+                            button_texts.append(btn)
+                            intents_map[btn] = intent
 
-            display_text = narrative
-            if action_prompt:
-                display_text += f"\n\n_{action_prompt}_"
+                        display_text = narrative
+                        if action_prompt:
+                            display_text += f"\n\n_{action_prompt}_"
 
-            markup = get_dynamic_menu(button_texts) if button_texts else get_main_menu()
-            await send_safe_message(bot, chat_id, display_text, reply_markup=markup)
+                        if display_text:
+                            # Кешуємо для майбутніх гравців з тією ж комбінацією
+                            await set_cached_intro(profile_class, profile_heritage, profile_region, display_text)
+                            # Оновлюємо placeholder повним інтро
+                            try:
+                                markup = get_dynamic_menu(button_texts) if button_texts else get_main_menu()
+                                await placeholder_msg.edit_text(display_text, reply_markup=markup, parse_mode=None)
+                                if chat_id in user_sessions:
+                                    user_sessions[chat_id]["action_intents"] = intents_map
+                                    if user_sessions[chat_id].get('history'):
+                                        user_sessions[chat_id]['history'][-1] = {"role": "GM", "content": display_text}
+                            except Exception as e_edit:
+                                print(f"[bg intro] edit_text failed: {e_edit}")
+                    except Exception as e:
+                        print(f"[bg intro] Failed (using fallback): {e}")
+                        # Прибираємо спінер із fallback-повідомлення
+                        try:
+                            await placeholder_msg.edit_text(fallback_text, reply_markup=get_main_menu(), parse_mode=None)
+                        except Exception:
+                            pass
+
+                asyncio.create_task(_bg_intro_task())
+
             await bot.send_message(chat_id, "⚔️ Ваш шлях починається...")
-
-            user_sessions[chat_id]['history'].append({"role": "GM", "content": display_text})
         else:
             await bot.send_message(chat_id, "❌ Помилка запису в базу даних.")
     else:
         await bot.send_message(chat_id, "❌ Помилка генерації профілю.")
 
 
+def _build_dnd_profile_text(profile: dict, chat_id: int) -> str:
+    """Build D&D 5e profile display text from a full D&D profile dict."""
+    from core.dnd_core import ability_modifier, proficiency_bonus as pb_func
+    from core.dnd_skills import SKILLS, skill_modifier
+    from core.dnd_progression import XP_TABLE
+
+    char_name = profile.get("Ім'я", "Невідомий")
+    house = profile.get("Дім", "Невідомий")
+    title = profile.get("Титул", "")
+    alignment = profile.get("Світогляд", "")
+    loc = profile.get("Поточне місцезнаходження", "Невідомо")
+    region = profile.get("Регіон", "")
+    scene = profile.get("Поточна сцена", "")
+    time_val = profile.get("Ігровий час", "")
+    gold = profile.get("Особисте Золото", 0)
+    weapon = profile.get("Зброя", "-")
+    armor = profile.get("Броня", "-")
+    inv_raw = profile.get("Інвентар", "")
+
+    char_class = profile.get("class", "")
+    heritage = profile.get("heritage", "")
+    level = profile.get("level", 1)
+    xp = profile.get("xp", 0)
+    hp_current = profile.get("hp_current", profile.get("Здоров'я", 100))
+    hp_max = profile.get("hp_max", 100)
+    ac = profile.get("ac", 10)
+    prof_bonus = profile.get("proficiency_bonus", pb_func(level))
+    ability_scores = profile.get("ability_scores", {})
+    saves_proficient = profile.get("saves_proficient", [])
+    skill_profs = profile.get("skill_profs", [])
+    skill_expertise = profile.get("skill_expertise", [])
+    features_raw = profile.get("features", [])
+    conditions_raw = profile.get("conditions", [])
+    game_mode = profile.get("mode", "NORMAL")
+
+    # next level XP
+    if level >= 20:
+        next_xp_str = "MAX"
+    else:
+        next_xp_str = str(XP_TABLE.get(level + 1, "?"))
+
+    def _score(ab: str) -> int:
+        return ability_scores.get(ab, 10)
+
+    def _mod_str(ab: str) -> str:
+        m = ability_modifier(_score(ab))
+        return f"{m:+d}"
+
+    # header
+    header_parts = []
+    if title:
+        header_parts.append(title)
+    if alignment:
+        header_parts.append(alignment)
+    header_line = " • ".join(header_parts) if header_parts else ""
+
+    lines = []
+    lines.append(f"🎭 *{char_name}* | *{house}*")
+    if header_line:
+        lines.append(f"📜 {header_line}")
+    lines.append("")
+    lines.append(f"🛡 *Клас:* {char_class} (L{level})")
+    lines.append(f"🩸 *Походження:* {heritage}")
+    lines.append(f"⚡ *XP:* {xp} / {next_xp_str}")
+    lines.append("")
+    lines.append(f"❤️ *HP:* {hp_current}/{hp_max}  |  🛡 *AC:* {ac}")
+    lines.append(f"⚔️ *Proficiency:* +{prof_bonus}  |  💰 *Gold:* {gold} 🪙")
+    lines.append("")
+    lines.append("💪 *Здібності:*")
+    lines.append(
+        f"  STR {_score('STR')} ({_mod_str('STR')})    "
+        f"DEX {_score('DEX')} ({_mod_str('DEX')})    "
+        f"CON {_score('CON')} ({_mod_str('CON')})"
+    )
+    lines.append(
+        f"  INT {_score('INT')} ({_mod_str('INT')})    "
+        f"WIS {_score('WIS')} ({_mod_str('WIS')})    "
+        f"CHA {_score('CHA')} ({_mod_str('CHA')})"
+    )
+
+    # saves
+    if saves_proficient:
+        lines.append("")
+        lines.append(f"🎯 *Saves proficient:* {', '.join(saves_proficient)}")
+
+    # skill profs (only proficient/expertise skills)
+    displayed_skills = []
+    for sk_name in SKILLS:
+        if sk_name in skill_profs or sk_name in skill_expertise:
+            mod = skill_modifier(profile, sk_name)
+            suffix = " (exp)" if sk_name in skill_expertise else ""
+            displayed_skills.append(f"{sk_name} {mod:+d}{suffix}")
+    if displayed_skills:
+        lines.append("")
+        lines.append("🎓 *Skill profs:*")
+        lines.append("  " + ", ".join(displayed_skills))
+
+    # features (max 5)
+    if features_raw:
+        lines.append("")
+        lines.append(f"🌟 *Features (L{level}):*")
+        shown = 0
+        for feat in features_raw:
+            if shown >= 5:
+                lines.append("  ... та інше")
+                break
+            if isinstance(feat, dict):
+                fname = feat.get("name", "")
+                fdesc = feat.get("desc", "")
+            else:
+                fname = str(feat)
+                fdesc = ""
+            desc_short = fdesc[:60] + "..." if len(fdesc) > 60 else fdesc
+            lines.append(f"  • {fname} — {desc_short}")
+            shown += 1
+
+    # equipment
+    inv_str = str(inv_raw).strip() if inv_raw else "Нічого"
+    if len(inv_str) > 80:
+        inv_str = inv_str[:77] + "..."
+    lines.append("")
+    lines.append("⚔️ *Спорядження:*")
+    lines.append(f"  Зброя: {weapon}")
+    lines.append(f"  Броня: {armor}")
+    lines.append(f"  Інвентар: {inv_str}")
+
+    # location / time
+    loc_str = f"{loc} ({region})" if region else loc
+    lines.append("")
+    lines.append(f"📍 *Локація:* {loc_str}")
+    if scene:
+        lines.append(f"🎬 *Сцена:* {scene}")
+    if time_val:
+        lines.append(f"⏱ *Ігровий час:* {time_val}")
+
+    # conditions block
+    if conditions_raw:
+        lines.append("")
+        lines.append("⚠️ *Стани:*")
+        for cond in conditions_raw:
+            if isinstance(cond, dict):
+                cname = cond.get("name", str(cond))
+                dur = cond.get("duration", "")
+                src = cond.get("source", "")
+                cond_line = f"  • {cname}"
+                if dur:
+                    cond_line += f" ({dur})"
+                if src:
+                    cond_line += f" — {src}"
+            else:
+                cond_line = f"  • {cond}"
+            lines.append(cond_line)
+
+    # combat block
+    if game_mode == "COMBAT":
+        combat_roster_lines = ""
+        round_label = "Раунд ?"
+        try:
+            from core.combat_state import get_combat_state
+            cs = get_combat_state(chat_id)
+            if cs:
+                initiative_display = []
+                for ref in cs.initiative_order:
+                    if ref.kind == "npc":
+                        npc = cs.npcs.get(ref.name, {})
+                        npc_hp = npc.get("hp_current", "?")
+                        npc_hp_max = npc.get("hp_max", "?")
+                        status = npc.get("Status", "Active")
+                        status_icon = "💀" if status == "Dead" else ("🏃" if status == "Fled" else "⚔️")
+                        initiative_display.append(
+                            f"  {status_icon} {ref.name}: {npc_hp}/{npc_hp_max} HP (init {ref.init_roll})"
+                        )
+                    else:
+                        initiative_display.append(
+                            f"  👤 {ref.name}: {hp_current}/{hp_max} HP, AC {ac} (init {ref.init_roll})"
+                        )
+                combat_roster_lines = "\n".join(initiative_display)
+                round_label = f"Раунд {cs.round}"
+            else:
+                combat_roster_lines = "  (стан у пам'яті не знайдено)"
+        except Exception:
+            combat_roster_lines = ""
+        lines.append("")
+        lines.append("⚔️ *АКТИВНИЙ БІЙ* ⚔️")
+        lines.append(round_label)
+        lines.append("Ініціатива:")
+        if combat_roster_lines:
+            lines.append(combat_roster_lines)
+
+    # reputation
+    rep = profile.get("Репутація (Рідний регіон)", None)
+    if rep is not None:
+        lines.append("")
+        lines.append(f"📊 *Репутація (регіон):* {rep}")
+
+    return "\n".join(lines)
+
+
+def _build_legacy_profile_text(profile: dict) -> str:
+    """Fallback display for pre-D&D profiles (no ability_scores key)."""
+    char_name = profile.get("Ім'я", "Невідомий")
+    house = profile.get("Дім", "Невідомий")
+    loc = profile.get("Поточне місцезнаходження", "Невідомо")
+    time_val = profile.get("Ігровий час", "Невідомий час")
+    gold = profile.get("Особисте Золото", 0)
+    weapon = profile.get("Зброя", "-")
+    armor = profile.get("Броня", "-")
+    inv = profile.get("Інвентар", "Пусто")
+    rep = profile.get("Репутація (Рідний регіон)", 0)
+    health_val = profile.get("Здоров'я", 100)
+    energy_val = profile.get("Енергія", 1000)
+    combat = profile.get("Бойові навички", 0)
+    military = profile.get("Військові навички", 0)
+    intrigue = profile.get("Інтрига", 0)
+    manage = profile.get("Управління", 0)
+    return (
+        f"👤 *{char_name}*\n"
+        f"🏠 Дім: {house}\n📍 {loc}\n"
+        f"📅 {time_val}\n━━━━━━━━━━━━━━━━━━\n"
+        f"❤️ Здоров'я: {health_val} | ⚡ Енергія: {energy_val}\n"
+        f"⚔️ Бойові: {combat} | 🛡️ Військові: {military}\n"
+        f"🍷 Інтрига: {intrigue} | ⚖️ Управління: {manage}\n"
+        f"━━━━━━━━━━━━━━━━━━\n🗣 Репутація: {rep}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"💰 *Золото:* {gold} драконів\n"
+        f"⚔️ *Зброя:* {weapon}\n"
+        f"🛡 *Броня:* {armor}\n"
+        f"📦 *Речі:* {inv}"
+    )
+
+
+@router.message(Command("profile"))
 @router.message(F.text == "📜 Профіль")
 async def show_profile_handler(message: Message, bot: Bot):
     chat_id = message.chat.id
 
     profile, _ = await get_user_data(chat_id)
-    if profile:
-        char_name = profile.get("Ім'я", "Невідомий")
-        house = profile.get("Дім", "Невідомий")
-        loc = profile.get("Поточне місцезнаходження", "Невідомо")
-        time_val = profile.get("Ігровий час", "Невідомий час")
-        gold = profile.get("Особисте Золото", 0)
-        weapon = profile.get("Зброя", "-")
-        armor = profile.get("Броня", "-")
-        inv = profile.get("Інвентар", "Пусто")
-        enemies = profile.get("Вороги", "Немає")
-        rep = profile.get("Репутація (Рідний регіон)", 0)
-
-        # Detect COMBAT mode — show D&D stats block
-        game_mode = profile.get("mode", "NORMAL")
-        if game_mode == "COMBAT":
-            hp_current = profile.get("hp_current", profile.get("Здоров'я", 100))
-            hp_max = profile.get("hp_max", 100)
-            ac = profile.get("ac", 10)
-            energy_val = profile.get("Енергія", 1000)
-            conditions_raw = profile.get("conditions", [])
-            # Format conditions list for display
-            if conditions_raw:
-                cond_labels = [
-                    (c.get("name", str(c)) if isinstance(c, dict) else str(c))
-                    for c in conditions_raw
-                ]
-                conditions_str = ", ".join(cond_labels)
-            else:
-                conditions_str = "Немає"
-
-            # HP bar (10-char ascii)
-            hp_pct = max(0, min(1.0, hp_current / hp_max)) if hp_max > 0 else 0
-            hp_filled = round(hp_pct * 10)
-            hp_bar = "█" * hp_filled + "░" * (10 - hp_filled)
-
-            # Combat roster from in-memory CombatState (if available)
-            combat_roster_lines = ""
-            try:
-                from core.combat_state import get_combat_state
-                cs = get_combat_state(chat_id)
-                if cs:
-                    initiative_display = []
-                    for ref in cs.initiative_order:
-                        if ref.kind == "npc":
-                            npc = cs.npcs.get(ref.name, {})
-                            npc_hp = npc.get("hp_current", "?")
-                            npc_hp_max = npc.get("hp_max", "?")
-                            status = npc.get("Status", "Active")
-                            status_icon = "💀" if status == "Dead" else ("🏃" if status == "Fled" else "⚔️")
-                            initiative_display.append(
-                                f"{status_icon} {ref.name} HP:{npc_hp}/{npc_hp_max} (init {ref.init_roll})"
-                            )
-                        else:
-                            initiative_display.append(
-                                f"👤 {ref.name} HP:{hp_current}/{hp_max} КЗ:{ac} (init {ref.init_roll})"
-                            )
-                    combat_roster_lines = "\n".join(initiative_display)
-                    round_label = f"Раунд {cs.round}"
-                else:
-                    combat_roster_lines = "(бойова сцена — стан у пам'яті не знайдено)"
-                    round_label = "Раунд ?"
-            except Exception:
-                combat_roster_lines = ""
-                round_label = "Бій"
-
-            text = (
-                f"⚔️ *{char_name}* — БОЙ ({round_label})\n"
-                f"🏠 {house} | 📍 {loc}\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"❤️ HP: {hp_current}/{hp_max} [{hp_bar}]\n"
-                f"🛡 КЗ: {ac} | ⚡ Енергія: {energy_val}\n"
-                f"🌀 Стани: {conditions_str}\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"⚔️ Ініціатива:\n{combat_roster_lines}\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"💰 {gold} др. | ⚔️ {weapon} | 🛡 {armor}"
-            )
-        else:
-            # Standard NORMAL mode profile
-            health_val = profile.get("Здоров'я", 100)
-            energy_val = profile.get("Енергія", 1000)
-            combat = profile.get("Бойові навички", 0)
-            military = profile.get("Військові навички", 0)
-            intrigue = profile.get("Інтрига", 0)
-            manage = profile.get("Управління", 0)
-            text = (
-                f"👤 *{char_name}*\n"
-                f"🏠 Дім: {house}\n📍 {loc}\n"
-                f"📅 {time_val}\n━━━━━━━━━━━━━━━━━━\n"
-                f"❤️ Здоров'я: {health_val} | ⚡ Енергія: {energy_val}\n"
-                f"⚔️ Бойові: {combat} | 🛡️ Військові: {military}\n"
-                f"🍷 Інтрига: {intrigue} | ⚖️ Управління: {manage}\n"
-                f"━━━━━━━━━━━━━━━━━━\n🗣 Репутація: {rep}\n"
-                f"💀 Вороги: {enemies}\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"💰 *Золото:* {gold} драконів\n"
-                f"⚔️ *Зброя:* {weapon}\n"
-                f"🛡 *Броня:* {armor}\n"
-                f"📦 *Речі:* {inv}"
-            )
-        await send_safe_message(bot, chat_id, text)
-    else:
+    if not profile:
         await send_safe_message(bot, chat_id, "Спершу почніть гру через /start")
+        return
+
+    # D&D profile detection: ability_scores key is present in Phase 9+ profiles
+    if profile.get("ability_scores"):
+        text = _build_dnd_profile_text(profile, chat_id)
+    else:
+        # Legacy pre-D&D profile — graceful fallback with migration hint
+        text = _build_legacy_profile_text(profile)
+
+    await send_safe_message(bot, chat_id, text)
 
 
 @router.message(F.text == "🔄 Рестарт")
