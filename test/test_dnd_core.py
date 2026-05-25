@@ -123,7 +123,7 @@ def test_proficiency_bonus_does_not_raise_for_negative():
 # clamp_dc
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("value", [5, 10, 12, 15, 17, 20, 22, 25, 28, 30])
+@pytest.mark.parametrize("value", LEGAL_DCS)
 def test_clamp_dc_legal_values_returned_unchanged(value):
     assert clamp_dc(value) == value
 
@@ -132,8 +132,8 @@ def test_clamp_dc_below_minimum_returns_five():
     assert clamp_dc(3) == 5
 
 
-def test_clamp_dc_above_maximum_returns_thirty():
-    assert clamp_dc(50) == 30
+def test_clamp_dc_above_maximum_returns_twentytwo():
+    assert clamp_dc(50) == 22
 
 
 def test_clamp_dc_thirteen_returns_twelve_nearest_lower():
@@ -408,3 +408,21 @@ def test_is_valid_skill_returns_false_for_unknown_skill():
 def test_get_ability_for_skill_raises_key_error_for_invalid():
     with pytest.raises(KeyError):
         get_ability_for_skill("Cooking")
+
+
+# ---------------------------------------------------------------------------
+# Regression guards: DC downgrade (25/28/30 removed, max = 22)
+# ---------------------------------------------------------------------------
+
+def test_legal_dcs_no_longer_contains_25_28_30():
+    """Guard: тестовий зниження складності — DC 25/28/30 повинні бути недосяжні."""
+    for dc in (25, 28, 30):
+        assert dc not in LEGAL_DCS
+    assert max(LEGAL_DCS) == 22
+
+
+def test_clamp_dc_25_now_returns_22():
+    """clamp_dc(25) перш повертав 25 (legal), тепер 22 (новий max)."""
+    assert clamp_dc(25) == 22
+    assert clamp_dc(28) == 22
+    assert clamp_dc(30) == 22

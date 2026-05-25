@@ -180,7 +180,7 @@ def test_normal_resolve_contains_all_18_dnd_skills(minimal_profile, skill):
     assert skill in result, f"Expected D&D skill '{skill}' in prompt, not found."
 
 
-@pytest.mark.parametrize("dc_value", ["5", "10", "12", "15", "17", "20", "22", "25", "28", "30"])
+@pytest.mark.parametrize("dc_value", [str(dc) for dc in __import__("core.dnd_core", fromlist=["LEGAL_DCS"]).LEGAL_DCS])
 def test_normal_resolve_contains_all_legal_dcs(minimal_profile, dc_value):
     result = build_normal_resolve_prompt(
         user_input="Намагаюся переконати стражника",

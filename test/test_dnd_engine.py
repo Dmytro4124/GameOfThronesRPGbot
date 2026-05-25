@@ -158,6 +158,16 @@ def _patches_for_resolve(worker_data: dict = None, fail_llm: bool = False):
 
 
 # ===========================================================================
+# Regression guard: _DANGER_DC_FLOOR constant downgrade
+# ===========================================================================
+
+def test_danger_floor_is_fifteen():
+    """Тестовий downgrade: _DANGER_DC_FLOOR = 15 (раніше 25, потім 17)."""
+    from core.dnd_engine import _DANGER_DC_FLOOR
+    assert _DANGER_DC_FLOOR == 15
+
+
+# ===========================================================================
 # Tests: resolve_normal_action
 # ===========================================================================
 
@@ -443,11 +453,12 @@ class TestResolveNormalAction:
         assert updates["outcome"] == "SUCCESS"
         assert updates["natural_roll"] == 0
 
-    # 10. Danger keywords in user_input → DC floor applied (DC >= 25)
+    # 10. Danger keywords in user_input → DC floor applied (DC >= _DANGER_DC_FLOOR)
     def test_danger_keywords_apply_dc_floor(self):
-        """'стриб з даху' contains danger keyword → clamped_dc must be >= _DANGER_DC_FLOOR (25).
-        LLM returns difficulty=10, which would normally clamp to 10, but danger floor = 25."""
+        """'стриб з даху' contains danger keyword → clamped_dc must be >= _DANGER_DC_FLOOR (15).
+        LLM returns difficulty=10, which would normally clamp to 10, but danger floor = 15."""
         from core.dnd_core import LEGAL_DCS
+        from core.dnd_engine import _DANGER_DC_FLOOR
         profile = _dnd_profile()
         data = _minimal_worker_data(
             ability_used="STR",
@@ -466,9 +477,9 @@ class TestResolveNormalAction:
                 )
             _, updates = _run_async(_run())
 
-        # _DANGER_DC_FLOOR = 25; clamp_dc(25) = 25 (it's in LEGAL_DCS)
-        assert updates["difficulty"] >= 25, (
-            f"Danger keyword must impose DC floor >= 25. Got difficulty={updates['difficulty']}"
+        # _DANGER_DC_FLOOR = 15; clamp_dc(15) = 15 (it's in LEGAL_DCS)
+        assert updates["difficulty"] >= _DANGER_DC_FLOOR, (
+            f"Danger keyword must impose DC floor >= {_DANGER_DC_FLOOR}. Got difficulty={updates['difficulty']}"
         )
 
     # 11. LLM failure → AUTO_SUCCESS fallback
@@ -1401,4 +1412,198 @@ class TestCriticalSuccessAppliesUpdates:
         )
         assert result_profile["Особисте Золото"] > initial_gold, (
             f"Gold must increase. Before={initial_gold}, After={result_profile['Особисте Золото']}"
+        )
+
+
+# ===========================================================================
+# Tests: Guard rail — hp_damage_dice suppressed on attack actions (Layer 2)
+# ===========================================================================
+
+class TestGuardRailAttackHpDamageDice:
+    """Guard rail in resolve_normal_action: when user_input contains attack keywords,
+    hp_damage_dice must be suppressed to 'none' and combat_imminent forced to True.
+
+    Architectural invariant: hp_damage_dice in NORMAL pipeline = player self-damage only
+    (environmental, falls, poison). Player attacks on NPCs must use COMBAT mode.
+    This is Layer 2 defense-in-depth (Layer 1 = Worker prompt, Layer 3 = Narrator).
+    """
+
+    def test_guard_suppresses_hp_damage_dice_on_attack_action(self):
+        """Guard: якщо user_input містить attack keyword, hp_damage_dice форсується до none,
+        щоб гравець не отримав self-damage за помилковою класифікацією LLM."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data(
+            ability_used="None",
+            skill_used="None",
+            difficulty=10,
+            combat_imminent=False,
+        )
+        data["updates"]["hp_damage_dice"] = "1d8"  # LLM помилково встановив
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+
+            async def _run():
+                from core.dnd_engine import resolve_normal_action
+                return await resolve_normal_action(
+                    user_input="Я атакую слугу рапірою",
+                    profile=profile,
+                )
+            verdict, updates = _run_async(_run())
+
+        assert updates.get("hp_damage_dice") in ("none", "None", ""), (
+            f"hp_damage_dice must be suppressed to 'none' for attack action. "
+            f"Got {updates.get('hp_damage_dice')!r}"
+        )
+        assert updates.get("combat_imminent") is True, (
+            f"combat_imminent must be forced to True when LLM forgot to set it. "
+            f"Got {updates.get('combat_imminent')!r}"
+        )
+
+    def test_guard_does_not_suppress_environmental_damage(self):
+        """Guard must NOT suppress hp_damage_dice when user_input has no attack keywords.
+        Environmental damage (falling, poison) is legitimate player self-damage."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data(
+            ability_used="DEX",
+            skill_used="Acrobatics",
+            difficulty=15,
+            combat_imminent=False,
+        )
+        data["updates"]["hp_damage_dice"] = "1d6"  # legitimate fall damage
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+
+            async def _run():
+                from core.dnd_engine import resolve_normal_action
+                return await resolve_normal_action(
+                    user_input="Стрибаю з даху будинку",
+                    profile=profile,
+                )
+            verdict, updates = _run_async(_run())
+
+        assert updates.get("hp_damage_dice") == "1d6", (
+            f"Environmental hp_damage_dice='1d6' must NOT be suppressed for non-attack action. "
+            f"Got {updates.get('hp_damage_dice')!r}"
+        )
+
+    def test_guard_preserves_combat_imminent_true_when_already_set(self):
+        """If LLM correctly set combat_imminent=True alongside hp_damage_dice on attack,
+        guard must suppress hp_damage_dice but keep combat_imminent=True (no double-flip)."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data(
+            ability_used="STR",
+            skill_used="Athletics",
+            difficulty=15,
+            combat_imminent=True,  # LLM correctly set this
+        )
+        data["updates"]["hp_damage_dice"] = "1d8"  # LLM incorrectly set this too
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+
+            async def _run():
+                from core.dnd_engine import resolve_normal_action
+                return await resolve_normal_action(
+                    user_input="Вдаряю стражника мечем",
+                    profile=profile,
+                )
+            verdict, updates = _run_async(_run())
+
+        assert updates.get("hp_damage_dice") in ("none", "None", ""), (
+            f"hp_damage_dice must be suppressed even when combat_imminent was already True. "
+            f"Got {updates.get('hp_damage_dice')!r}"
+        )
+        assert updates.get("combat_imminent") is True, (
+            f"combat_imminent must remain True. Got {updates.get('combat_imminent')!r}"
+        )
+
+    def test_guard_no_suppression_when_hp_damage_dice_is_none(self):
+        """Guard must not alter hp_damage_dice when it is already 'none'
+        (attack action that LLM correctly left damage-free)."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data(
+            ability_used="STR",
+            skill_used="Athletics",
+            difficulty=15,
+            combat_imminent=True,  # LLM correctly set combat_imminent
+        )
+        # hp_damage_dice is already 'none' — correct LLM behaviour
+        data["updates"]["hp_damage_dice"] = "none"
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+
+            async def _run():
+                from core.dnd_engine import resolve_normal_action
+                return await resolve_normal_action(
+                    user_input="Рубаю ворога мечем",
+                    profile=profile,
+                )
+            verdict, updates = _run_async(_run())
+
+        # Guard condition: _hp_dmg_dice in ("none", "None", "") → no suppression triggered
+        assert updates.get("hp_damage_dice") in ("none", "None", ""), (
+            f"hp_damage_dice must remain 'none'. Got {updates.get('hp_damage_dice')!r}"
+        )
+        assert updates.get("combat_imminent") is True, (
+            f"combat_imminent must remain True. Got {updates.get('combat_imminent')!r}"
+        )
+
+    def test_user_bug_scenario_attack_npc_no_self_damage(self):
+        """User-reported bug: 'Я вихоплюю рапіру і атакую слугу' з рапірою (1d8)
+        в інвентарі. Worker помилково повернув hp_damage_dice='1d8' + combat_imminent=False.
+        Guard має суприм damage до none і форсувати combat_imminent=true.
+
+        Відтворює саме той сценарій, що описав користувач:
+        - зброя Рапіра (1d8) є в інвентарі
+        - LLM повернув hp_damage_dice='1d8' (помилка: damage гравця, не NPC)
+        - LLM повернув combat_imminent=False (помилка: бій не розпочато)
+        Guard rail (Layer 2) має виправити обидві помилки.
+        """
+        profile = _dnd_profile_with_hp()
+        profile["Інвентар"] = "Рапіра (1d8 колота, фінесс), Вишукані шати, Перстень"
+        profile["Зброя"] = "Рапіра"
+
+        data = _minimal_worker_data(
+            ability_used="DEX",
+            skill_used="None",
+            difficulty=10,
+            combat_imminent=False,  # LLM помилка: не виставив флаг
+        )
+        data["updates"]["hp_damage_dice"] = "1d8"  # LLM помилка: damage замість "none"
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+
+            async def _run():
+                from core.dnd_engine import resolve_normal_action
+                return await resolve_normal_action(
+                    user_input="Я вихоплюю рапіру і атакую слугу",
+                    profile=profile,
+                )
+            verdict, updates = _run_async(_run())
+
+        # Guard має спрацювати — hp_damage_dice суприм до none
+        assert updates.get("hp_damage_dice") in ("none", "None", ""), (
+            f"Guard must suppress hp_damage_dice='1d8' for rapier attack on NPC. "
+            f"Got {updates.get('hp_damage_dice')!r}"
+        )
+        # Guard має форсувати combat_imminent=True (LLM помилково не виставив)
+        assert updates.get("combat_imminent") is True, (
+            f"Guard must force combat_imminent=True when LLM returned False for attack action. "
+            f"Got {updates.get('combat_imminent')!r}"
+        )
+        # HP гравця не змінено — profile повертається з resolve_normal_action без
+        # apply_dnd_impacts, але guard не застосовує dice, отже hp_current лишається 50.
+        # Перевіряємо непрямо через hp_damage_dice='none' → apply_dnd_impacts нічого не зробить.
+        assert profile.get("hp_current") == 50, (
+            f"Player hp_current must remain 50 (guard suppressed 1d8 dice). "
+            f"Got {profile.get('hp_current')!r}"
         )

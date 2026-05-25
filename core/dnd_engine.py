@@ -44,8 +44,26 @@ _DANGER_KEYWORDS = [
     "стриб", "паді", "зістриб", "зіскоч", "стін", "вікн", "дха",
     "обрив", "прірв", "вогонь", "полум",
 ]
-# DC floor for clearly dangerous physical actions (DC 25 = nearly impossible per prompt schema)
-_DANGER_DC_FLOOR: int = 25
+# DC floor for clearly dangerous physical actions.
+# Lowered to 15 (testing): was 25, which was unreachable for L1 chars (max roll ~25).
+_DANGER_DC_FLOOR: int = 15
+
+# Attack keywords for Layer 2 guard rail (defense-in-depth).
+# Suppresses hp_damage_dice when player attacks NPC (which must use COMBAT pipeline).
+# Memory `feedback_no_keyword_matching` permits this narrow safety-critical use.
+_ATTACK_KEYWORDS = (
+    "атак",    # атакую, атака, атакувати
+    "удар",    # удар, ударом, ударити
+    "бий",     # бий, б'ю, бійся
+    "ріж",     # ріжу, різати
+    "стріля",  # стріляю, стріляти, вистрілив
+    "кида",    # кидаю, кидати (метальна зброя)
+    "поран",   # поранити, пораню, пораниш, поранивши (не false-positive: "пора йти")
+    "вдар",    # вдаряю, вдарити, вдари
+    "руба",    # рубаю, рубати, рубонув
+    "колот",   # колоти, колеш
+    "штрика",  # штрикаю, штрикнути
+)
 
 # Dice roll map for hp_damage_dice / hp_heal_dice tags
 _DICE_MAP: dict[str, tuple[int, int]] = {
@@ -399,6 +417,30 @@ async def resolve_normal_action(
         if "temp_debuff" not in updates:
             updates["temp_debuff"] = {}
         updates["temp_debuff"][skill_used] = temp_penalty
+
+    # --- GUARD RAIL: suppress hp_damage_dice when user action is an attack on NPC.
+    # Architectural invariant: hp_damage_dice in NORMAL pipeline = player self-damage
+    # (falls, poison, environmental hazards). Player attacks on NPCs must route through
+    # COMBAT mode (combat_imminent=True) and be resolved by the COMBAT FSM.
+    # This guard is defense-in-depth: Layer 1 (Worker prompt) teaches the LLM;
+    # this Layer 2 catches cases where the LLM ignores the prompt instruction.
+    _user_lower = (user_input or "").lower()
+    _has_attack_kw = any(kw in _user_lower for kw in _ATTACK_KEYWORDS)
+    _hp_dmg_dice = updates.get("hp_damage_dice", "none")
+
+    if _has_attack_kw and _hp_dmg_dice not in ("none", "None", ""):
+        logger.warning(
+            "[GUARD] Suppressed hp_damage_dice=%r for attack action "
+            "(user_input=%r). Player attacks must use COMBAT mode.",
+            _hp_dmg_dice,
+            user_input[:80],
+        )
+        updates["hp_damage_dice"] = "none"
+        # If LLM also forgot to set combat_imminent — force it so the FSM
+        # transitions to COMBAT on the next turn.
+        if not updates.get("combat_imminent"):
+            updates["combat_imminent"] = True
+            logger.info("[GUARD] Forced combat_imminent=True for attack action.")
 
     return verdict_str, updates
 

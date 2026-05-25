@@ -4,8 +4,8 @@ import random
 from dataclasses import dataclass
 from typing import Literal
 
-# Legal DC values for the ASoIaF-calibrated d20 system.
-LEGAL_DCS: tuple[int, ...] = (5, 10, 12, 15, 17, 20, 22, 25, 28, 30)
+# Legal DC values for the ASoIaF-calibrated d20 system (max 22; see CLAUDE.md §5.2).
+LEGAL_DCS: tuple[int, ...] = (5, 10, 12, 15, 17, 20, 22)
 
 _ABILITY_KEYS = ("STR", "DEX", "CON", "INT", "WIS", "CHA")
 
@@ -44,7 +44,7 @@ def proficiency_bonus(level: int) -> int:
 
 
 def clamp_dc(value: int) -> int:
-    """Snap value to nearest legal ASoIaF DC in (5,10,12,15,17,20,22,25,28,30)."""
+    """Snap value to nearest legal ASoIaF DC in (5,10,12,15,17,20,22)."""
     if value <= LEGAL_DCS[0]:
         return LEGAL_DCS[0]
     if value >= LEGAL_DCS[-1]:

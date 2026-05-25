@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 from typing import Literal
+from core.dnd_core import LEGAL_DCS
 
 GAME_ERA_CONTEXT = """
 === ХРОНОЛОГІЯ: 298 рік від Завоювання (Кінець Довгого Літа) ===
@@ -90,6 +91,17 @@ NARRATOR_SYSTEM_PROMPT = """<system>
    Якщо там NEW_SCENE — обов'язково додай короткий атмосферний абзац (1–3 речення):
    запахи, звуки, освітлення або одна ключова деталь, що встановлює місце.
    Цей блок має ПРІОРИТЕТ над звичним інстинктом моделі описувати оточення.
+
+ПРАВИЛО ФІЗИЧНОГО КОНФЛІКТУ (PHYSICAL CONFLICT RULE):
+Якщо дія гравця описує фізичну атаку на NPC (атак*, удар*, бий*, ріж*, стріля*, кидає зброю) —
+ПЕРЕВІР director_notes: чи є там ЯВНИЙ ФАКТ пошкодження NPC?
+  • Прийнятні формулювання факту: "NPC ранено", "NPC hp_current: X → Y", "NPC вбито/знепритомніло".
+  • ЯКЩО такого факту НЕМАЄ — НЕ описуй успішне нанесення ран, крові, болю NPC.
+    Замість цього описуй ПОЧАТОК сутички: гравець вихоплює зброю, NPC реагує, напруга зростає.
+    Бій буде вирішено наступним ходом у COMBAT mode.
+  • ЯКЩО факт пошкодження NPC ПРИСУТНІЙ у director_notes — описуй його точно та літературно.
+ОБГРУНТУВАННЯ: director_notes — єдине джерело правди. Вигадувати успішну атаку без фактичної бази
+означає описувати стан гри, якого немає в профілі — це руйнує узгодженість механіки та наративу.
 
 ФОРМАТ ВІДПОВІДІ: Чистий художній текст. БЕЗ JSON, БЕЗ маркдауну, БЕЗ заголовків.
 </system>"""
@@ -485,7 +497,7 @@ def build_history_summary_prompt(history_text: str) -> str:
 # Phase 4 — D&D 5e pipeline builders (NEW)
 # ═══════════════════════════════════════════════════════════════════════════════
 #
-# DC enum {5,10,12,15,17,20,22,25,28,30}  (replaces 2d50 enum {50,60,70,80,100,120,140})
+# DC enum {5,10,12,15,17,20,22}            (replaces 2d50 enum {50,60,70,80,100,120,140})
 # 18 D&D skills → 6 abilities              (replaces 4 legacy skills)
 # xp_award ∈ {0,25,50,100,200}
 # combat_imminent: bool → engine switches to COMBAT_MODE
@@ -497,7 +509,7 @@ def build_history_summary_prompt(history_text: str) -> str:
 #   core/ai_client.py:clean_and_parse_json → parses raw LLM output
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_LEGAL_DCS_NORMAL = "5|10|12|15|17|20|22|25|28|30"
+_LEGAL_DCS_NORMAL = "|".join(str(dc) for dc in LEGAL_DCS)
 _LEGAL_ABILITIES = "STR|DEX|CON|INT|WIS|CHA|None"
 _LEGAL_SKILLS_18 = (
     "Athletics|Acrobatics|Sleight of Hand|Stealth|"
@@ -591,8 +603,8 @@ Pick SKILL (optional, from <output_schema> list). RULE: skill_used≠"None" → 
 No real resistance → ability_used="None", skill_used="None", difficulty=5.
 
 [GATE 3 — DC — STRICT ENUM {_LEGAL_DCS_NORMAL}]
-5=trivial | 10=easy | 12=trivial+ | 15=medium | 17=hard | 20=very hard | 22=stretch | 25=near-impossible | 28=legendary | 30=god-tier.
-Rep modifier: score≥60→-2DC; score≤-60→+5DC. Escalation: request→12-15; threat→17-20; assassination→25-28.
+5=trivial | 10=easy | 12=moderate | 15=hard | 17=very hard | 20=epic | 22=legendary (max).
+Rep modifier: score≥60→-2DC; score≤-60→+5DC. Escalation: request→12-15; threat→17-20; assassination→20-22.
 
 [GATE 4 — GOLD]
 Gold physically left player? NO→gold_impact="none". YES voluntary→exact tag. YES involuntary→"-N".
@@ -604,6 +616,17 @@ Explicit move to different place? YES→non-"none" scene/location_impact. NO→b
 Physical attack initiated NOW? YES→combat_imminent=true. Verbal threat/drawing weapon→false.
 RULE: words NEVER trigger combat_imminent=true.
 
+CRITICAL — ATTACK ON NPC:
+If player_action is a physical attack TARGETING an NPC (атак*, удар*, бий*, ріж*, коло*, стріля*, кида* зброю):
+  → ALWAYS combat_imminent=true, REGARDLESS of likely outcome.
+  → ALWAYS set hp_damage_dice="none" — NPC damage resolves in the COMBAT pipeline next turn.
+  → Do NOT use hp_damage_dice to represent damage dealt BY the player TO an NPC.
+
+hp_damage_dice PURPOSE — PLAYER SELF-DAMAGE ONLY:
+  hp_damage_dice is ONLY for damage received BY the PLAYER (falling, poison, starvation, trap, environmental).
+  Examples where hp_damage_dice IS valid: falling from height, drinking poison, trap trigger, severe cold.
+  Examples where hp_damage_dice is FORBIDDEN: "я атакую слугу", "я вдарю варту", "я стріляю в ворога".
+
 [GATE 7 — TRAINING?]
 Explicit TRAIN/PRACTICE/STUDY intent? YES→action_type="training". Incidental skill use→"standard".
 </thinking_directives>
@@ -612,7 +635,32 @@ Explicit TRAIN/PRACTICE/STUDY intent? YES→action_type="training". Incidental s
 ❌ difficulty=18 (18∉enum) → ✅ difficulty=17
 ❌ ability_used="None", skill_used="Athletics" → ✅ ability_used="STR", skill_used="Athletics"
 ❌ combat_imminent=true for verbal "Я кажу що вб'ю його" → ✅ false
+❌ player_action="Я атакую слугу рапірою" → combat_imminent=false, hp_damage_dice="1d8"
+  (WRONG: combat not started, damage applied to player instead of NPC — game-breaking)
+  → ✅ combat_imminent=true, hp_damage_dice="none"
 </antiexamples>
+
+<few_shot_examples>
+EXAMPLE A — Player attacks NPC:
+  player_action: "Я атакую слугу рапірою"
+  skill_check_reasoning: "GATE 1: NO — this is a physical attack on an NPC, not a free action. GATE 2: player initiates melee combat — combat_imminent=true, no skill roll needed in NORMAL turn."
+  ability_used: "None"
+  skill_used: "None"
+  difficulty: 5
+  combat_imminent: true          ← MANDATORY for any physical attack on NPC
+  hp_damage_dice: "none"         ← NEVER use for NPC damage; COMBAT pipeline resolves it next turn
+  verdict_text: "Гравець виймає рапіру і кидається на слугу — сутичка неминуча."
+
+EXAMPLE B — Environmental self-damage (valid hp_damage_dice use):
+  player_action: "Я стрибаю з вікна другого поверху"
+  skill_check_reasoning: "GATE 1: NO — risky physical action with consequence for player. GATE 2: DEX/Acrobatics to reduce fall damage."
+  ability_used: "DEX"
+  skill_used: "Acrobatics"
+  difficulty: 12
+  combat_imminent: false
+  hp_damage_dice: "1d6"          ← VALID: environmental damage to player, not NPC attack
+  verdict_text: "Стрибок з висоти — гравець ризикує отримати травму."
+</few_shot_examples>
 
 <location_rules>
 Nearby: {locs_nearby} | All by region: {all_canonical_locs_grouped}
@@ -650,6 +698,9 @@ updates (object):
   location_impact : "none" | exact canonical location name | "В дорозі"
   scene_impact    : "none" | descriptive scene name
   hp_damage_dice  : "none"|"1d4"|"1d6"|"1d8"|"2d6"|"2d8"|"fatal"
+                    !! PLAYER SELF-DAMAGE ONLY (fall/poison/trap/environmental) !!
+                    NEVER use for damage dealt BY player TO an NPC.
+                    If combat_imminent=true → hp_damage_dice MUST be "none".
   hp_heal_dice    : "none"|"1d4"|"1d6"|"1d8"|"2d8"
   gold_impact     : "none"|"-N"|"+N"|"spend_small"|"spend_medium"|"spend_large"|"earn_small"|"earn_medium"|"earn_large"
   inventory_new   : array of strings

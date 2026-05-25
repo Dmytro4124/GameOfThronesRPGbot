@@ -204,7 +204,7 @@ TelegramGameOfThronesBot/
 ### 5.2. Шкали і константи
 
 - **Кубики: 1d20 + ability_mod + proficiency_bonus** vs DC. Попередня система 2d50 видалена. Advantage/Disadvantage = roll 2d20, take high/low.
-- **DC — STRICT enum:** `{5, 10, 12, 15, 17, 20, 22, 25, 28, 30}`. Будь-яке інше число — **баг**. `clamp_dc()` у `core/dnd_core.py` обрізає до найближчого валідного значення.
+- **DC — STRICT enum:** `{5, 10, 12, 15, 17, 20, 22}`. Будь-яке інше число — **баг**. `clamp_dc()` у `core/dnd_core.py` обрізає до найближчого валідного значення. (Знижено з `{...,25,28,30}` під час тестування — див. §7 технічний борг.)
 - **Ability scores:** 6 характеристик (STR/DEX/CON/INT/WIS/CHA), діапазон 1–20. Modifier = `floor((score - 10) / 2)`.
 - **Proficiency bonus:** L1–4 = +2, L5–8 = +3, L9–12 = +4, L13–16 = +5, L17–20 = +6.
 - **Skills:** 18 D&D 5e скілів, прив'язані до abilities (Athletics→STR, Insight→WIS, Deception→CHA тощо). Повний список — `core/dnd_skills.py:SKILLS`.
@@ -230,7 +230,7 @@ Pipeline складається з 4 ролей. Перші три поверт�
 - `skill_check_reasoning`, `difficulty_reasoning`, `gold_reasoning` — внутрішнє міркування (потрібні для діагностики поведінки моделі)
 - `ability_used` (`"STR"` | `"DEX"` | `"CON"` | `"INT"` | `"WIS"` | `"CHA"` | `"None"`)
 - `skill_used` (один з 18 D&D skills або `"None"`)
-- `difficulty` — STRICT enum `{5, 10, 12, 15, 17, 20, 22, 25, 28, 30}` (div. 5.2)
+- `difficulty` — STRICT enum `{5, 10, 12, 15, 17, 20, 22}` (div. 5.2)
 - `advantage_reason`, `disadvantage_reason` (рядки; порожні = no modifier)
 - `combat_imminent` (bool) — якщо true, engine ініціює COMBAT_MODE наступним ходом
 - `verdict_text`, `xp_award` ∈ {0|25|50|100|200}, `reputation_delta` (-3..+3), `reputation_target_npc`
@@ -335,6 +335,7 @@ ENV-змінні: `TELEGRAM_TOKEN`, `GEMINI_API_KEY` (+ `GEMINI_API_KEY_TEST_*` 
 - Feats — deferred (наразі лише ASI при level-up).
 - Multiclassing — deferred.
 - Exhaustion levels 1–6 — deferred (зараз energy 0–1000 legacy).
+- DC enum знижено до max 22 під час тестового релізу (тестувальник скаржився на недосяжні DC для L1). Розширення до повного 5e enum `{5,10,12,15,17,20,22,25,28,30}` — окрема задача після калібрування з більш сильними персонажами (L3+).
 
 ---
 
