@@ -286,11 +286,8 @@ async def summarize_turn(gm_response):
         def _sync_gen():
             return model_worker.generate_content(prompt)
 
-        resp = await asyncio.wait_for(asyncio.to_thread(_sync_gen), timeout=45.0)
+        resp = await asyncio.to_thread(_sync_gen)
         return resp.text.strip()
-    except asyncio.TimeoutError:
-        logger.warning("[summarize_turn] LLM timed out after 45s — using fallback")
-        return "Гравець діє."
     except Exception:
         return "Гравець діє."
 
@@ -302,11 +299,8 @@ async def summarize_full_turn(user_input, gm_response):
         def _sync_gen():
             return model_worker.generate_content(prompt)
 
-        resp = await asyncio.wait_for(asyncio.to_thread(_sync_gen), timeout=45.0)
+        resp = await asyncio.to_thread(_sync_gen)
         return resp.text.strip()
-    except asyncio.TimeoutError:
-        logger.warning("[summarize_full_turn] LLM timed out after 45s — using fallback")
-        return f"{user_input[:100]} → ..."
     except Exception:
         return f"{user_input[:100]} → ..."
 
@@ -837,7 +831,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                     return model_gm_logic.generate_content(gm_logic_prompt)
                 raise
 
-        gm_logic_response = await asyncio.wait_for(asyncio.to_thread(_sync_gen_gm_logic), timeout=45.0)
+        gm_logic_response = await asyncio.to_thread(_sync_gen_gm_logic)
         gm_logic_raw = gm_logic_response.text.strip()
         ai_data = clean_and_parse_json(gm_logic_raw)
 
@@ -1322,10 +1316,10 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                                 return model_worker.generate_content(
                                     f'Describe atmosphere in "{new_loc}" (Year 298) in 1 sentence.')
 
-                            situation_resp = await asyncio.wait_for(asyncio.to_thread(_sync_gen_travel), timeout=45.0)
+                            situation_resp = await asyncio.to_thread(_sync_gen_travel)
                             situation = situation_resp.text.strip()
                             _atmosphere_cache[new_loc] = situation
-                        except (Exception, asyncio.TimeoutError):
+                        except Exception:
                             situation = "A tense day in Westeros."
                     await populate_contextual_npcs(chat_id, new_loc, situation, excluded_name=char_name,
                                                    excluded_dead_names=get_dead_npc_names(chat_id))
@@ -1388,11 +1382,11 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                             def _sync_gen_sum():
                                 return model_worker.generate_content(summary_prompt)
 
-                            summary_resp = await asyncio.wait_for(asyncio.to_thread(_sync_gen_sum), timeout=45.0)
+                            summary_resp = await asyncio.to_thread(_sync_gen_sum)
                             user_sessions[chat_id_arg]['history'] = [
                                 {"role": "SYSTEM", "content": f"PREVIOUS EVENTS SUMMARY:\n{summary_resp.text.strip()}"}
                             ] + recent_part
-                        except (Exception, asyncio.TimeoutError) as ex:
+                        except Exception as ex:
                             print(f"⚠️ Помилка стиснення: {ex}")
                             user_sessions[chat_id_arg]['history'] = hist[-20:]
                     else:
@@ -1431,15 +1425,6 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         change_log = "\n\n📊 " + " | ".join(logs) if logs else ""
 
         return story + change_log, suggested_actions
-
-    except asyncio.TimeoutError:
-        logger.warning(f"[process_game_turn] Gemini timed out for chat_id={chat_id}")
-        if narrator_queue is not None:
-            try:
-                narrator_queue.put_nowait(None)
-            except Exception:
-                pass
-        return "⏳ *Сервіс перевантажений. Спробуйте ще раз через хвилину.*", []
 
     except Exception as e:
         import traceback

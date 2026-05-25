@@ -151,11 +151,8 @@ async def resolve_normal_action(
                     )
                 raise
 
-        resp = await asyncio.wait_for(asyncio.to_thread(_sync_gen), timeout=45.0)
+        resp = await asyncio.to_thread(_sync_gen)
         data = clean_and_parse_json(resp.text)
-    except asyncio.TimeoutError:
-        logger.warning("[DND_ENGINE] LLM call timed out after 45s")
-        raise
     except Exception as e:
         logger.warning(f"[DND_ENGINE] LLM call failed: {e}")
         data = None

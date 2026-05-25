@@ -827,6 +827,8 @@ async def handle_general_messages(message: Message, bot: Bot):
                             logger.warning(f"[CONSUMER_EDIT] edit_text failed: {type(e).__name__}: {e}")
 
             consumer_task = asyncio.create_task(_stream_consumer()) if USE_STREAMING else None
+            response_text: str | None = None
+            suggested_actions: list = []
             try:
                 response_text, suggested_actions = await process_game_turn(
                     chat_id, user_text,
@@ -844,11 +846,22 @@ async def handle_general_messages(message: Message, bot: Bot):
                 if consumer_task:
                     consumer_task.cancel()
                 error_trace = traceback.format_exc()
-                print(error_trace)
+                resp_len = len(response_text) if response_text is not None else "N/A"
+                resp_preview = response_text[:200] if response_text is not None else "N/A"
+                actions_len = len(suggested_actions)
+                logger.error(
+                    f"[HANDLER_FATAL] {type(e).__name__}: {str(e)[:300]}\n"
+                    f"  response_text len={resp_len}, preview={repr(resp_preview)}\n"
+                    f"  suggested_actions len={actions_len}\n"
+                    f"{error_trace}"
+                )
                 try:
                     await temp_msg.edit_text("⚠️ Технічна помилка. Спробуйте ще раз.", parse_mode=None)
                 except Exception:
-                    await bot.send_message(chat_id, "⚠️ Технічна помилка. Спробуйте ще раз.")
+                    try:
+                        await bot.send_message(chat_id, "⚠️ Технічна помилка. Спробуйте ще раз.")
+                    except Exception as final_err:
+                        logger.error(f"[HANDLER_LAST_RESORT_FAIL] {type(final_err).__name__}: {str(final_err)[:200]}")
             finally:
                 typing_task.cancel()
 

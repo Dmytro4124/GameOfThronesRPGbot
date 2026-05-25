@@ -1308,12 +1308,14 @@ def test_execute_combat_round_target_player_string_sanitized_to_npc():
         "reasoning": "attack intent",
     }
 
-    with patch("core.dnd_combat_engine.parse_player_combat_intent", new=AsyncMock(return_value=player_intent)):
-        with patch("core.dnd_combat_engine.decide_spotlight_npcs", new=AsyncMock(return_value=[])):
-            profile = _minimal_player_profile(mode="COMBAT")
-            combat_log, updates, npc_results = _run(
-                execute_combat_round(chat_id, "Атакую!", profile)
-            )
+    # Mock roll_d20 to return natural=15 (guaranteed hit vs AC=5, not nat1/nat20)
+    with patch("core.dnd_combat.roll_d20", return_value=(15, [15])):
+        with patch("core.dnd_combat_engine.parse_player_combat_intent", new=AsyncMock(return_value=player_intent)):
+            with patch("core.dnd_combat_engine.decide_spotlight_npcs", new=AsyncMock(return_value=[])):
+                profile = _minimal_player_profile(mode="COMBAT")
+                combat_log, updates, npc_results = _run(
+                    execute_combat_round(chat_id, "Атакую!", profile)
+                )
 
     # Player HP must NOT change from their own attack
     final_player_hp = state.player_snapshot["hp_current"]
