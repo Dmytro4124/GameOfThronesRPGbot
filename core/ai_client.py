@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import time
 import random
@@ -10,6 +11,8 @@ from core.prompts import JSON_ONLY_INSTRUCTION
 from google.genai import types
 from config import (GEMINI_API_KEY, MODEL_MAIN_NAME, MODEL_WORKER_NAME, MODEL_MAIN_TEMP, MODEL_WORKER_TEMP,
                      MODEL_GM_LOGIC_NAME, MODEL_GM_LOGIC_TEMP, MODEL_NARRATOR_NAME, MODEL_NARRATOR_TEMP)
+
+logger = logging.getLogger(__name__)
 
 # Ініціалізація клієнта
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -34,7 +37,7 @@ def _normalize_prompt(prompt) -> str:
 # Для multi-instance prod потрібен Redis (deferred).
 _CIRCUIT_STATE: dict = {}  # {model_name: {"consecutive_failures": int, "cooldown_until": float}}
 
-DEFAULT_MAX_RETRIES = 6
+DEFAULT_MAX_RETRIES = 3
 TRANSIENT_HTTP_CODES = (500, 502, 503, 504)
 RATE_LIMIT_CODES = (429,)
 PERMANENT_HTTP_CODES = (400, 401, 403, 404)
@@ -162,10 +165,17 @@ class AIWrapper:
                 cb["consecutive_failures"] = 0
                 cb["cooldown_until"] = 0.0
                 if self.include_thoughts:
-                    thoughts, content = split_thoughts(raw)
-                    if thoughts:
-                        _thoughts_log.append({"model": self.model_name, "thought": thoughts})
-                    return _AIResponse(content)
+                    try:
+                        thoughts, content = split_thoughts(raw)
+                        if thoughts:
+                            _thoughts_log.append({"model": self.model_name, "thought": thoughts})
+                        return _AIResponse(content)
+                    except Exception as e:
+                        logger.warning(
+                            f"[AIWrapper {self.model_name}] split_thoughts failed (MALFORMED?): "
+                            f"{type(e).__name__}: {str(e)[:120]}"
+                        )
+                        return raw  # повертаємо raw, нехай caller обробить через clean_and_parse_json
                 return raw
 
             except Exception as e:
@@ -269,14 +279,19 @@ def build_strict_config(
     schema,
     temperature: float = None,
 ) -> "types.GenerateContentConfig":
-    """Build a GenerateContentConfig with response_schema + JSON mode.
+    """Build a GenerateContentConfig with JSON mode (response_mime_type only).
+
+    DEPRECATED: schema is ignored. Strict constrained decoding (response_schema)
+    caused 14-minute hangs on gemma-4-31b-it preview — removed. The model still
+    returns correct JSON keys because prompts instruct it to do so (see CLAUDE.md
+    §5.3). Callers retain the schema parameter for forward-compat but it is a no-op.
 
     Inherits safety_settings and cached_content/system_instruction from the
     wrapper so callers don't have to repeat boilerplate.
 
     Args:
         model_wrapper: The AIWrapper whose safety / cache settings to inherit.
-        schema: A google.genai.types.Schema instance (from build_*_schema()).
+        schema: Accepted but ignored (see deprecation note above).
         temperature: Override temperature. If None, uses model_wrapper.temperature.
 
     Returns:
@@ -285,7 +300,6 @@ def build_strict_config(
     config_args: dict = {
         "temperature": temperature if temperature is not None else model_wrapper.temperature,
         "response_mime_type": "application/json",
-        "response_schema": schema,
     }
     if model_wrapper.block_none:
         config_args["safety_settings"] = [

@@ -1184,11 +1184,13 @@ def test_parse_player_combat_intent_passes_schema_config():
     assert result["intent"] == "attack"
     assert len(captured_configs) >= 1, "generate_content must be called"
     cfg = captured_configs[0]
-    assert cfg is not None, "config must not be None (schema mode)"
+    assert cfg is not None, "config must not be None"
     assert cfg.response_mime_type == "application/json", (
         f"Expected 'application/json', got {cfg.response_mime_type!r}"
     )
-    assert cfg.response_schema is not None, "response_schema must be set"
+    assert not hasattr(cfg, "response_schema") or cfg.response_schema is None, (
+        "response_schema must be None: strict schema causes 14-min hangs"
+    )
 
 
 def test_parse_player_combat_intent_schema_fallback_on_invalid_argument():
@@ -1253,9 +1255,11 @@ def test_execute_npc_actions_passes_schema_config():
     assert len(results) == 1
     assert len(captured_configs) >= 1, "generate_content must be called"
     cfg = captured_configs[0]
-    assert cfg is not None, "config must not be None (schema mode)"
+    assert cfg is not None, "config must not be None"
     assert cfg.response_mime_type == "application/json"
-    assert cfg.response_schema is not None
+    assert not hasattr(cfg, "response_schema") or cfg.response_schema is None, (
+        "response_schema must be None: strict schema causes 14-min hangs"
+    )
 
 
 # ===========================================================================

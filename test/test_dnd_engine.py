@@ -1118,7 +1118,10 @@ class TestResolveNormalActionPassesSchema:
         return _mock_gen, captured
 
     def test_schema_config_is_passed_not_none(self):
-        """resolve_normal_action must pass a non-None config with response_mime_type='application/json'."""
+        """resolve_normal_action must pass a non-None config with response_mime_type='application/json'.
+        response_schema must NOT be set: strict constrained decoding caused
+        14-min hangs on gemma-4-31b-it preview (schema parameter is now a no-op).
+        """
         data = _minimal_worker_data()
         mock_gen, captured = self._capture_config_and_return(data)
 
@@ -1139,7 +1142,9 @@ class TestResolveNormalActionPassesSchema:
         assert cfg.response_mime_type == "application/json", (
             f"response_mime_type must be 'application/json', got {cfg.response_mime_type!r}"
         )
-        assert cfg.response_schema is not None, "response_schema must not be None"
+        assert not hasattr(cfg, "response_schema") or cfg.response_schema is None, (
+            "response_schema must be None: strict schema causes 14-min hangs"
+        )
 
     def test_schema_config_fallback_on_invalid_argument(self):
         """If generate_content raises INVALID_ARGUMENT (schema rejected),
@@ -1194,14 +1199,17 @@ class TestResolveNormalActionPassesSchema:
             f"temperature override must be 0.42, got {cfg.temperature}"
         )
 
-    def test_build_strict_config_has_schema_and_mime_type(self):
-        """build_strict_config always sets response_mime_type and response_schema."""
+    def test_build_strict_config_has_mime_type_no_schema(self):
+        """build_strict_config sets response_mime_type=application/json.
+        response_schema must NOT be set: strict constrained decoding caused
+        14-min hangs on gemma-4-31b-it preview (schema is accepted but ignored).
+        """
         from core.ai_client import build_strict_config, model_worker
         from core.prompts import build_validate_action_schema
         schema = build_validate_action_schema()
         cfg = build_strict_config(model_worker, schema)
         assert cfg.response_mime_type == "application/json"
-        assert cfg.response_schema is schema
+        assert not hasattr(cfg, "response_schema") or cfg.response_schema is None
 
 
 class TestValidateActionPassesSchema:

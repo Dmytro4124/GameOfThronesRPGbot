@@ -588,3 +588,133 @@ def test_model_without_block_none_has_no_safety_settings():
         f"AIWrapper without block_none must NOT add safety_settings. "
         f"Got: {config.safety_settings!r}"
     )
+
+
+# ─── Тест 1 (нові): build_strict_config ignores schema ──────────────────────
+
+def test_build_strict_config_ignores_schema():
+    """build_strict_config приймає schema-аргумент, але НЕ встановлює response_schema.
+
+    Строгий constrained decoding (response_schema) спричиняв 14-хвилинні зависання
+    на gemma-4-31b-it preview. Параметр schema — no-op для сумісності сигнатури.
+    Перевіряємо:
+    - response_schema is None (або відсутній)
+    - response_mime_type == "application/json"
+    - safety_settings присутні (model_worker має block_none=True)
+    - temperature встановлено
+    """
+    from core.ai_client import build_strict_config, model_worker
+
+    # Передаємо довільну схему — вона має ігноруватись
+    dummy_schema = {"type": "object", "properties": {"key": {"type": "string"}}}
+
+    cfg = build_strict_config(model_worker, schema=dummy_schema, temperature=0.7)
+
+    # response_schema must NOT be set
+    assert not hasattr(cfg, "response_schema") or cfg.response_schema is None, (
+        "build_strict_config must NOT set response_schema: "
+        "strict constrained decoding causes 14-min hangs on gemma-4-31b-it preview"
+    )
+    # JSON mode via MIME type must still be active
+    assert cfg.response_mime_type == "application/json", (
+        f"response_mime_type must be 'application/json', got {cfg.response_mime_type!r}"
+    )
+    # model_worker has block_none=True → safety_settings must be present
+    assert cfg.safety_settings, (
+        "build_strict_config must inherit safety_settings from model_wrapper.block_none"
+    )
+    assert len(cfg.safety_settings) == 4
+    # temperature must be set
+    assert cfg.temperature == 0.7, (
+        f"temperature must be 0.7, got {cfg.temperature!r}"
+    )
+
+
+# ─── Тест 2 (нові): DEFAULT_MAX_RETRIES regression ──────────────────────────
+
+def test_default_max_retries_is_three():
+    """Регресійний тест: DEFAULT_MAX_RETRIES повернуто з 6 назад до 3.
+
+    Значення 6 спричиняло надто довгі retry-цикли при MALFORMED_RESPONSE
+    від preview-моделі. Цей тест гарантує, що ніхто випадково не поверне 6.
+    """
+    from core.ai_client import DEFAULT_MAX_RETRIES
+    assert DEFAULT_MAX_RETRIES == 3, (
+        f"DEFAULT_MAX_RETRIES must be 3 (reverted from 6). Got: {DEFAULT_MAX_RETRIES}"
+    )
+
+
+# ─── Тест 3 (нові): split_thoughts failure → raw returned, no retry ─────────
+
+def test_split_thoughts_failure_returns_raw(caplog):
+    """Коли split_thoughts кидає TypeError (MALFORMED_RESPONSE),
+    generate_content повертає raw без retry.
+
+    Перевіряємо:
+    - client.models.generate_content викликано РІВНО 1 раз (не 3)
+    - повернуто raw (той самий об'єкт, що повернув mock)
+    - logger.warning записав повідомлення з 'split_thoughts failed'
+    """
+    import logging
+    _reset_cb()
+    wrapper = _make_wrapper(include_thoughts=True)
+    fake_raw = MagicMock()
+    fake_raw.text = '{"key": "value"}'
+
+    with patch("core.ai_client.client.models.generate_content", return_value=fake_raw) as mock_gen, \
+         patch("core.ai_client.split_thoughts",
+               side_effect=TypeError("'NoneType' object is not iterable")), \
+         patch("core.ai_client.time.sleep"), \
+         caplog.at_level(logging.WARNING, logger="core.ai_client"):
+        result = wrapper.generate_content("prompt")
+
+    # Повинен повернути raw (без retry і без crash)
+    assert result is fake_raw, (
+        "generate_content must return raw response when split_thoughts raises TypeError"
+    )
+    # Рівно 1 виклик — без retry-циклу
+    assert mock_gen.call_count == 1, (
+        f"generate_content must be called exactly once (no retry on split_thoughts failure). "
+        f"Got: {mock_gen.call_count}"
+    )
+    # warning має бути залогований
+    assert "split_thoughts failed" in caplog.text, (
+        f"logger.warning must contain 'split_thoughts failed'. "
+        f"caplog.text: {caplog.text!r}"
+    )
+
+
+# ─── Тест 4 (нові): split_thoughts success → _AIResponse повернуто ──────────
+
+def test_split_thoughts_success_returns_ai_response():
+    """Happy-path regression: коли split_thoughts повертає (thoughts, content) нормально,
+    generate_content повертає _AIResponse(content).
+
+    Перевіряємо:
+    - результат є екземпляром _AIResponse
+    - result.text == content_part (без thoughts)
+    - client.models.generate_content викликано 1 раз
+    """
+    from core.ai_client import _AIResponse
+    _reset_cb()
+    wrapper = _make_wrapper(include_thoughts=True)
+    fake_raw = MagicMock()
+    expected_content = '{"verdict": "success"}'
+
+    with patch("core.ai_client.client.models.generate_content", return_value=fake_raw) as mock_gen, \
+         patch("core.ai_client.split_thoughts",
+               return_value=("some internal thought", expected_content)), \
+         patch("core.ai_client.time.sleep"):
+        result = wrapper.generate_content("prompt")
+
+    assert isinstance(result, _AIResponse), (
+        f"generate_content must return _AIResponse on successful split_thoughts. "
+        f"Got: {type(result).__name__}"
+    )
+    assert result.text == expected_content, (
+        f"_AIResponse.text must equal the content part from split_thoughts. "
+        f"Got: {result.text!r}"
+    )
+    assert mock_gen.call_count == 1, (
+        f"generate_content must be called exactly once. Got: {mock_gen.call_count}"
+    )
