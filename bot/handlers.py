@@ -520,7 +520,8 @@ def _build_dnd_profile_text(profile: dict, chat_id: int) -> str:
             lines.append(f"  • *{fname}* — {fdesc}")
 
     # A) Equipment — inventory without truncation; send_safe_message handles split
-    inv_str = str(inv_raw).strip() if inv_raw else "Нічого"
+    from core.inventory import parse_inventory, format_inventory
+    inv_str = format_inventory(parse_inventory(inv_raw)) if inv_raw else "Нічого"
     lines.append("")
     lines.append("⚔️ *Спорядження:*")
     lines.append(f"  Зброя: {weapon}")
@@ -608,7 +609,8 @@ def _build_legacy_profile_text(profile: dict) -> str:
     gold = profile.get("Особисте Золото", 0)
     weapon = profile.get("Зброя", "-")
     armor = profile.get("Броня", "-")
-    inv = profile.get("Інвентар", "Пусто")
+    from core.inventory import parse_inventory, format_inventory
+    inv = format_inventory(parse_inventory(profile.get("Інвентар", [])))
     rep = profile.get("Репутація (Рідний регіон)", 0)
     health_val = profile.get("Здоров'я", 100)
     energy_val = profile.get("Енергія", 1000)

@@ -9,6 +9,7 @@ from database.operations import get_user_data, save_user_data, find_best_match
 from database.sheets import db
 from database.canon_npc import _score_to_relation_text
 from core.mechanics import safe_int
+from core.inventory import parse_inventory, add_item, remove_item, _parse_one, format_inventory
 from core.world_constants import is_valid_location, get_region_for_location
 from config import GODMODE_USERS, PUPPET_USERS, EROTIC_USERS
 
@@ -226,40 +227,49 @@ async def cmd_sethouse(message, bot, chat_id, args):
 
 async def cmd_additem(message, bot, chat_id, args):
     if not args:
-        await message.answer("Використання: /additem <Назва предмету>"); return
+        await message.answer("Використання: /additem <Назва предмету> [xN]"); return
     profile, _ = await _get_profile(chat_id)
     if not profile:
         await message.answer("❌ Профіль не знайдено"); return
-    item = " ".join(args)
-    inv = profile.get("Інвентар", "").strip()
-    profile["Інвентар"] = f"{inv}, {item}" if inv else item
+    item_str = " ".join(args)
+    inv = parse_inventory(profile.get("Інвентар", []))
+    parsed = _parse_one(item_str)
+    if parsed:
+        add_item(inv, parsed["name"], parsed["quantity"])
+    else:
+        add_item(inv, item_str)
+    profile["Інвентар"] = inv
     await _save_profile(chat_id, profile)
-    await message.answer(f"✅ Додано: {item}")
+    await message.answer(f"✅ Додано: {item_str}")
 
 
 async def cmd_delitem(message, bot, chat_id, args):
     if not args:
-        await message.answer("Використання: /delitem <Назва предмету>"); return
+        await message.answer("Використання: /delitem <Назва предмету> [xN]"); return
     profile, _ = await _get_profile(chat_id)
     if not profile:
         await message.answer("❌ Профіль не знайдено"); return
-    target = " ".join(args)
-    inv = profile.get("Інвентар", "")
-    items = [i.strip() for i in inv.split(",") if i.strip()]
-    match = find_best_match(target, items)
-    if not match:
-        await message.answer(f"❌ Предмет '{target}' не знайдено в інвентарі"); return
-    items.remove(match)
-    profile["Інвентар"] = ", ".join(items)
+    target_str = " ".join(args)
+    inv = parse_inventory(profile.get("Інвентар", []))
+    parsed = _parse_one(target_str)
+    name_to_remove = parsed["name"] if parsed else target_str
+    qty_to_remove = parsed["quantity"] if parsed else 1
+    # Fuzzy-match name against current inventory names
+    inv_names = [i["name"] for i in inv]
+    matched_name = find_best_match(name_to_remove, inv_names)
+    if not matched_name:
+        await message.answer(f"❌ Предмет '{name_to_remove}' не знайдено в інвентарі"); return
+    removed = remove_item(inv, matched_name, qty_to_remove)
+    profile["Інвентар"] = inv
     await _save_profile(chat_id, profile)
-    await message.answer(f"✅ Видалено: {match}")
+    await message.answer(f"✅ Видалено: {matched_name} x{removed}")
 
 
 async def cmd_clearinv(message, bot, chat_id, args):
     profile, _ = await _get_profile(chat_id)
     if not profile:
         await message.answer("❌ Профіль не знайдено"); return
-    profile["Інвентар"] = ""
+    profile["Інвентар"] = []
     await _save_profile(chat_id, profile)
     await message.answer("✅ Інвентар очищено")
 
@@ -645,7 +655,7 @@ async def cmd_debug(message, bot, chat_id, args):
     p_scene = profile.get('Поточна сцена', '?')
     p_region = profile.get('Регіон', '?')
     p_time = profile.get('Ігровий час', '?')
-    p_inv = profile.get('Інвентар', '-')
+    p_inv = format_inventory(parse_inventory(profile.get('Інвентар', []))) or '-'
     text = (
         f"[DEBUG PROFILE]\n"
         f"Ім'я: {p_name}\n"

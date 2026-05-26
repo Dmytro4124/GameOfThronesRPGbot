@@ -417,15 +417,15 @@ class TestResolveNormalAction:
         )
         assert updates["natural_roll"] == 20
 
-    # 9. DC <= 5 (trivial action) → AUTO_SUCCESS without roll
+    # 9. DC <= 2 (ultra-trivial action) → AUTO_SUCCESS without roll
     def test_trivial_dc_yields_auto_success_no_roll(self):
-        """When difficulty=5 (AUTO_SUCCESS_MAX_DC) and skill_used='None', ability_used='None',
+        """When difficulty=2 (AUTO_SUCCESS_MAX_DC) and skill_used='None', ability_used='None',
         no dice are rolled and outcome is SUCCESS."""
         profile = _dnd_profile()
         data = _minimal_worker_data(
             ability_used="None",
             skill_used="None",
-            difficulty=5,
+            difficulty=2,
         )
 
         roll_calls = []
@@ -1606,4 +1606,653 @@ class TestGuardRailAttackHpDamageDice:
         assert profile.get("hp_current") == 50, (
             f"Player hp_current must remain 50 (guard suppressed 1d8 dice). "
             f"Got {profile.get('hp_current')!r}"
+        )
+
+
+# ===========================================================================
+# Integration test: training XP triggers level_up and HP actually increases
+# ===========================================================================
+
+def test_training_levelup_actually_increases_hp():
+    """User-reported bug: training XP triggers level_up message але HP не зростає.
+
+    Симулюємо training що дає L1 → L3 (1500 XP).
+    Після apply_pending_levelups профіль має:
+    - level == 3
+    - hp_max > початкового (HP increase з 2 рівнів)
+    - Не повинно бути '(Потрібна дія для level_up)' у logs
+    - У logs є рядки 'LEVEL 1 -> 2' і 'LEVEL 2 -> 3' (або подібні від хелпера)
+
+    Стратегія: мокаємо process_training_request щоб повернути leveled_up=True,
+    level_before=1, level_after=3 (як якщо б тренування дало 1500 XP з рівня L1).
+    Потім викликаємо apply_pending_levelups напряму (як це робить engine.py,
+    рядки 698–706), перевіряємо інваріанти.
+    """
+    from core.dnd_progression import award_xp, apply_pending_levelups
+
+    # --- Збудувати профіль L1 Knight ---
+    profile = {
+        "class": "Knight",
+        "level": 1,
+        "xp": 0,
+        "hp_current": 12,
+        "hp_max": 12,
+        "hit_dice_total": 1,
+        "hit_dice_used": 0,
+        "ability_scores": {
+            "STR": 16, "DEX": 12, "CON": 14,
+            "INT": 10, "WIS": 10, "CHA": 12,
+        },
+        "features": [],
+        "proficiency_bonus": 2,
+        "asi_pending": False,
+        "Ім'я": "TestHero",
+        "Здоров'я": 100,
+        "Енергія": 1000,
+    }
+
+    initial_hp_max = profile["hp_max"]
+    initial_level = profile["level"]
+
+    # --- Симулюємо award_xp(1500) → L1 → L3 ---
+    # process_training_request викликає award_xp внутрішньо;
+    # тут ми відтворюємо той самий шлях явно, щоб тест був deterministic.
+    xp_result = award_xp(profile, 1500, reason="training: Athletics")
+
+    # award_xp вже виставив profile['level'] = 3
+    assert xp_result.leveled_up is True, (
+        f"1500 XP from L1 must cross level thresholds. Got leveled_up={xp_result.leveled_up}"
+    )
+    assert xp_result.level_before == 1
+    assert xp_result.level_after == 3
+    assert xp_result.levels_gained == 2
+
+    # --- Викликаємо apply_pending_levelups (engine.py рядки 698–706) ---
+    logs = apply_pending_levelups(
+        profile,
+        level_before=xp_result.level_before,
+        levels_gained=xp_result.levels_gained,
+        class_name=profile.get("class", "Knight"),
+    )
+
+    # --- Перевіряємо інваріанти ---
+
+    # 1. Рівень має бути 3
+    assert profile["level"] == 3, (
+        f"Level must be 3 after L1→L3 training level-up. Got {profile['level']}"
+    )
+
+    # 2. HP має збільшитися (щонайменше +1 за кожен рівень)
+    assert profile["hp_max"] > initial_hp_max, (
+        f"hp_max must increase above {initial_hp_max} after 2 level-ups. "
+        f"Got {profile['hp_max']}"
+    )
+    # Мінімальний приріст: 2 рівні × (мінімум 1 HP кожен) = +2
+    assert profile["hp_max"] >= initial_hp_max + 2, (
+        f"hp_max must grow by at least +2 (min 1 HP per level × 2 levels). "
+        f"hp_max before={initial_hp_max}, after={profile['hp_max']}"
+    )
+
+    # 3. У logs НЕ має бути '(Потрібна дія для level_up)' — тест на відсутність баги,
+    #    при якій хелпер реєструє повідомлення про очікування рішення гравця
+    #    замість того, щоб застосувати level_up автоматично.
+    pending_action_log = any(
+        "Потрібна дія для level_up" in log for log in logs
+    )
+    assert not pending_action_log, (
+        f"Logs must NOT contain 'Потрібна дія для level_up'. "
+        f"This would indicate apply_pending_levelups is deferred instead of applied. "
+        f"Got logs: {logs}"
+    )
+
+    # 4. У logs мають бути рядки переходу рівнів для обох кроків
+    level_transition_logs = [log for log in logs if "LEVEL" in log and "->" in log]
+    assert len(level_transition_logs) == 2, (
+        f"Must have exactly 2 LEVEL transition log lines (1->2 and 2->3). "
+        f"Got {len(level_transition_logs)}: {level_transition_logs}"
+    )
+
+    # 5. Перші два логи мають містити '1 -> 2' і '2 -> 3' (або подібний формат з хелпера)
+    first_log_content = " ".join(level_transition_logs)
+    assert "1 ->" in first_log_content or "-> 2" in first_log_content, (
+        f"First transition must mention L1→L2. Got logs: {level_transition_logs}"
+    )
+    assert "2 ->" in first_log_content or "-> 3" in first_log_content, (
+        f"Second transition must mention L2→L3. Got logs: {level_transition_logs}"
+    )
+
+
+# ===========================================================================
+# Tests: P1 — Saving throw integration
+# ===========================================================================
+
+class TestSavingThrowIntegration:
+    """Tests for P1: Worker output save_used triggers saving_throw, not skill_check."""
+
+    def test_save_used_con_triggers_saving_throw(self):
+        """Worker output with save_used='CON' must invoke saving_throw instead of skill_check.
+        Verified via patch: saving_throw is called, skill_check is NOT called."""
+        profile = _dnd_profile_with_hp()
+        profile["saves_proficient"] = ["STR", "CON"]
+
+        data = _minimal_worker_data(
+            ability_used="None",
+            skill_used="None",
+            difficulty=15,
+        )
+        data["save_used"] = "CON"
+        data["save_dc"] = 12
+        data["updates"]["hp_damage_dice"] = "1d4"  # Worker set damage for poison scenario
+
+        save_calls = []
+
+        from core.dnd_core import CheckResult
+
+        def _mock_saving_throw(profile, ability, dc, advantage=False, disadvantage=False):
+            save_calls.append({"ability": ability, "dc": dc})
+            return CheckResult(
+                total=14, natural=12, ability_mod=2, prof_bonus=2,
+                dc=dc, success=True, critical="none",
+                roll_str=f"[12]→12 +2(CON) +2(prof) = 14 vs DC {dc} → SUCCESS",
+            )
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            stack.enter_context(
+                patch("core.dnd_engine.saving_throw", side_effect=_mock_saving_throw)
+            )
+
+            async def _run():
+                from core.dnd_engine import resolve_normal_action
+                return await resolve_normal_action(
+                    user_input="Ковтаю отруту",
+                    profile=profile,
+                )
+            verdict, updates = _run_async(_run())
+
+        assert len(save_calls) == 1, (
+            f"saving_throw must be called exactly once. Got {len(save_calls)} calls."
+        )
+        assert save_calls[0]["ability"] == "CON", (
+            f"saving_throw must be called with ability='CON'. Got {save_calls[0]['ability']!r}"
+        )
+        assert save_calls[0]["dc"] == 12, (
+            f"saving_throw dc must be 12 (clamped to LEGAL_DCS). Got {save_calls[0]['dc']}"
+        )
+        assert "SAVING THROW" in verdict, (
+            f"verdict must contain 'SAVING THROW'. Got: {verdict!r}"
+        )
+
+    def test_save_success_suppresses_hp_damage_dice(self):
+        """Save SUCCESS must force hp_damage_dice to 'none' — no damage on a passed save."""
+        profile = _dnd_profile_with_hp()
+
+        data = _minimal_worker_data(ability_used="None", skill_used="None", difficulty=15)
+        data["save_used"] = "DEX"
+        data["save_dc"] = 15
+        data["updates"]["hp_damage_dice"] = "2d6"  # fireball — should be cancelled on success
+
+        from core.dnd_core import CheckResult
+
+        def _mock_save_success(profile, ability, dc, advantage=False, disadvantage=False):
+            return CheckResult(
+                total=18, natural=15, ability_mod=1, prof_bonus=2,
+                dc=dc, success=True, critical="none",
+                roll_str=f"[15]→15 +1(DEX) +2(prof) = 18 vs DC {dc} → SUCCESS",
+            )
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            stack.enter_context(
+                patch("core.dnd_engine.saving_throw", side_effect=_mock_save_success)
+            )
+
+            async def _run():
+                from core.dnd_engine import resolve_normal_action
+                return await resolve_normal_action(
+                    user_input="Відстрибую від вогню",
+                    profile=profile,
+                )
+            verdict, updates = _run_async(_run())
+
+        assert updates.get("hp_damage_dice") in ("none", "None", ""), (
+            f"Save SUCCESS must suppress hp_damage_dice. Got {updates.get('hp_damage_dice')!r}"
+        )
+        assert updates["outcome"] == "SUCCESS"
+
+    def test_save_failure_keeps_hp_damage_dice(self):
+        """Save FAILURE must keep hp_damage_dice as Worker set it — damage applies."""
+        profile = _dnd_profile_with_hp()
+
+        data = _minimal_worker_data(ability_used="None", skill_used="None", difficulty=15)
+        data["save_used"] = "CON"
+        data["save_dc"] = 15
+        data["updates"]["hp_damage_dice"] = "1d4"  # poison damage on failure
+
+        from core.dnd_core import CheckResult
+
+        def _mock_save_failure(profile, ability, dc, advantage=False, disadvantage=False):
+            return CheckResult(
+                total=7, natural=5, ability_mod=2, prof_bonus=0,
+                dc=dc, success=False, critical="none",
+                roll_str=f"[5]→5 +2(CON) = 7 vs DC {dc} → FAIL",
+            )
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            stack.enter_context(
+                patch("core.dnd_engine.saving_throw", side_effect=_mock_save_failure)
+            )
+
+            async def _run():
+                from core.dnd_engine import resolve_normal_action
+                return await resolve_normal_action(
+                    user_input="Не встигаю ухилитися",
+                    profile=profile,
+                )
+            verdict, updates = _run_async(_run())
+
+        assert updates.get("hp_damage_dice") == "1d4", (
+            f"Save FAILURE must keep hp_damage_dice='1d4'. Got {updates.get('hp_damage_dice')!r}"
+        )
+        assert updates["outcome"] == "FAILURE"
+
+    def test_save_dc_clamped_to_legal_dcs(self):
+        """Worker returns save_dc=13 (illegal) → clamp_dc snaps to 12 or 15."""
+        from core.dnd_core import LEGAL_DCS
+        profile = _dnd_profile_with_hp()
+
+        data = _minimal_worker_data(ability_used="None", skill_used="None")
+        data["save_used"] = "WIS"
+        data["save_dc"] = 13  # not in LEGAL_DCS=(5,10,12,15,17,20,22)
+
+        captured_dc = []
+
+        from core.dnd_core import CheckResult
+
+        def _mock_save(profile, ability, dc, advantage=False, disadvantage=False):
+            captured_dc.append(dc)
+            return CheckResult(
+                total=10, natural=8, ability_mod=0, prof_bonus=2,
+                dc=dc, success=False, critical="none",
+                roll_str=f"[8]→8 = 8 vs DC {dc} → FAIL",
+            )
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            stack.enter_context(
+                patch("core.dnd_engine.saving_throw", side_effect=_mock_save)
+            )
+
+            async def _run():
+                from core.dnd_engine import resolve_normal_action
+                return await resolve_normal_action(
+                    user_input="Намагаюся протистояти чарам",
+                    profile=profile,
+                )
+            verdict, updates = _run_async(_run())
+
+        assert len(captured_dc) == 1
+        assert captured_dc[0] in LEGAL_DCS, (
+            f"save_dc must be clamped to LEGAL_DCS. Got {captured_dc[0]}"
+        )
+        assert updates["difficulty"] in LEGAL_DCS
+
+    def test_save_used_none_falls_through_to_skill_check_flow(self):
+        """When save_used is absent or 'None', saving_throw must NOT be called —
+        normal skill_check flow must execute instead."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data(ability_used="STR", skill_used="Athletics", difficulty=15)
+        # No save_used key — defaults to "None"
+
+        save_calls = []
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            stack.enter_context(
+                patch("core.dnd_engine.saving_throw", side_effect=lambda *a, **kw: save_calls.append(1))
+            )
+
+            async def _run():
+                from core.dnd_engine import resolve_normal_action
+                return await resolve_normal_action(
+                    user_input="Climb the wall",
+                    profile=profile,
+                )
+            verdict, updates = _run_async(_run())
+
+        assert len(save_calls) == 0, (
+            f"saving_throw must NOT be called when save_used is absent. "
+            f"Got {len(save_calls)} calls."
+        )
+        # Normal skill check path — should have valid outcome
+        assert updates["outcome"] in {"SUCCESS", "FAILURE", "CRITICAL SUCCESS", "CRITICAL FAILURE"}
+
+    def test_save_critical_failure_nat_1(self):
+        """Save with nat 1 → outcome CRITICAL FAILURE."""
+        profile = _dnd_profile_with_hp()
+
+        data = _minimal_worker_data(ability_used="None", skill_used="None")
+        data["save_used"] = "STR"
+        data["save_dc"] = 10
+
+        from core.dnd_core import CheckResult
+
+        def _mock_nat1_save(profile, ability, dc, advantage=False, disadvantage=False):
+            return CheckResult(
+                total=2, natural=1, ability_mod=3, prof_bonus=0,
+                dc=dc, success=False, critical="fail",
+                roll_str=f"[1]→1 +3(STR) = 4 vs DC {dc} → FAIL",
+            )
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            stack.enter_context(
+                patch("core.dnd_engine.saving_throw", side_effect=_mock_nat1_save)
+            )
+
+            async def _run():
+                from core.dnd_engine import resolve_normal_action
+                return await resolve_normal_action(
+                    user_input="Намагаюся встояти",
+                    profile=profile,
+                )
+            verdict, updates = _run_async(_run())
+
+        assert updates["outcome"] == "CRITICAL FAILURE", (
+            f"nat 1 save must yield CRITICAL FAILURE. Got {updates['outcome']!r}"
+        )
+        assert updates["natural_roll"] == 1
+
+    def test_save_critical_success_nat_20_suppresses_damage(self):
+        """Save with nat 20 → CRITICAL SUCCESS → hp_damage_dice suppressed."""
+        profile = _dnd_profile_with_hp()
+
+        data = _minimal_worker_data(ability_used="None", skill_used="None")
+        data["save_used"] = "DEX"
+        data["save_dc"] = 20
+        data["updates"]["hp_damage_dice"] = "2d8"
+
+        from core.dnd_core import CheckResult
+
+        def _mock_nat20_save(profile, ability, dc, advantage=False, disadvantage=False):
+            return CheckResult(
+                total=21, natural=20, ability_mod=1, prof_bonus=0,
+                dc=dc, success=True, critical="success",
+                roll_str=f"[20]→20 +1(DEX) = 21 vs DC {dc} → SUCCESS",
+            )
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            stack.enter_context(
+                patch("core.dnd_engine.saving_throw", side_effect=_mock_nat20_save)
+            )
+
+            async def _run():
+                from core.dnd_engine import resolve_normal_action
+                return await resolve_normal_action(
+                    user_input="Ухиляюся від вибуху",
+                    profile=profile,
+                )
+            verdict, updates = _run_async(_run())
+
+        assert updates["outcome"] == "CRITICAL SUCCESS"
+        assert updates.get("hp_damage_dice") in ("none", "None", ""), (
+            f"CRITICAL SUCCESS save must suppress hp_damage_dice. Got {updates.get('hp_damage_dice')!r}"
+        )
+
+
+# ===========================================================================
+# Tests: P2 — Rest integration
+# ===========================================================================
+
+class TestRestIntegration:
+    """Tests for P2: Worker output rest_type triggers rest mechanics, bypasses skill check."""
+
+    def test_rest_type_long_restores_full_hp(self):
+        """Worker output with rest_type='long' must call long_rest and fully restore HP."""
+        profile = _dnd_profile_with_hp()
+        profile["hp_current"] = 5
+        profile["hp_max"] = 20
+        profile["hit_dice_total"] = 1
+        profile["hit_dice_used"] = 0
+        profile["class"] = "Knight"
+
+        data = _minimal_worker_data(ability_used="None", skill_used="None", difficulty=5)
+        data["rest_type"] = "long"
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+
+            async def _run():
+                from core.dnd_engine import resolve_normal_action
+                return await resolve_normal_action(
+                    user_input="Лягаю спати в таверні",
+                    profile=profile,
+                )
+            verdict, updates = _run_async(_run())
+
+        # long_rest fully restores HP
+        assert profile["hp_current"] == 20, (
+            f"Long rest must restore hp_current to hp_max=20. Got {profile['hp_current']}"
+        )
+        assert "LONG REST" in verdict, (
+            f"verdict must mention LONG REST. Got: {verdict!r}"
+        )
+        assert updates["outcome"] == "SUCCESS"
+
+    def test_rest_type_long_suppresses_worker_hp_damage_dice(self):
+        """Long rest must clear any hp_damage_dice Worker set — no double-counting."""
+        profile = _dnd_profile_with_hp()
+        profile["hp_current"] = 10
+        profile["hp_max"] = 20
+        profile["hit_dice_total"] = 1
+        profile["hit_dice_used"] = 0
+        profile["class"] = "Knight"
+
+        data = _minimal_worker_data(ability_used="None", skill_used="None", difficulty=5)
+        data["rest_type"] = "long"
+        data["updates"]["hp_damage_dice"] = "1d6"  # Worker incorrectly set damage during rest
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+
+            async def _run():
+                from core.dnd_engine import resolve_normal_action
+                return await resolve_normal_action(
+                    user_input="Відпочиваю",
+                    profile=profile,
+                )
+            verdict, updates = _run_async(_run())
+
+        assert updates.get("hp_damage_dice") in ("none", "None", ""), (
+            f"Long rest must suppress hp_damage_dice. Got {updates.get('hp_damage_dice')!r}"
+        )
+
+    def test_rest_type_long_suppresses_worker_hp_heal_dice(self):
+        """Long rest already fully heals — must suppress hp_heal_dice to avoid double-count."""
+        profile = _dnd_profile_with_hp()
+        profile["hp_current"] = 10
+        profile["hp_max"] = 20
+        profile["hit_dice_total"] = 1
+        profile["hit_dice_used"] = 0
+        profile["class"] = "Knight"
+
+        data = _minimal_worker_data(ability_used="None", skill_used="None", difficulty=5)
+        data["rest_type"] = "long"
+        data["updates"]["hp_heal_dice"] = "2d8"  # Worker redundantly set heal dice
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+
+            async def _run():
+                from core.dnd_engine import resolve_normal_action
+                return await resolve_normal_action(
+                    user_input="Відпочиваю в таверні",
+                    profile=profile,
+                )
+            verdict, updates = _run_async(_run())
+
+        assert updates.get("hp_heal_dice") in ("none", "None", ""), (
+            f"Long rest must suppress hp_heal_dice (already full HP). "
+            f"Got {updates.get('hp_heal_dice')!r}"
+        )
+
+    def test_rest_type_short_calls_short_rest(self):
+        """Worker output with rest_type='short' must invoke short_rest and restore some HP."""
+        profile = _dnd_profile_with_hp()
+        profile["hp_current"] = 5
+        profile["hp_max"] = 20
+        profile["hit_dice_total"] = 4
+        profile["hit_dice_used"] = 0
+        profile["class"] = "Knight"
+
+        data = _minimal_worker_data(ability_used="None", skill_used="None", difficulty=5)
+        data["rest_type"] = "short"
+
+        short_rest_calls = []
+
+        from core.dnd_rest import RestResult as _RestResult
+
+        def _mock_short_rest(profile_arg, hit_dice_spent):
+            short_rest_calls.append(hit_dice_spent)
+            # Simulate restoring 6 HP
+            profile_arg["hp_current"] = min(
+                profile_arg.get("hp_max", 20),
+                profile_arg.get("hp_current", 0) + 6,
+            )
+            return _RestResult(
+                rest_type="short",
+                hp_restored=6,
+                hit_dice_spent=hit_dice_spent,
+                hit_dice_regained=0,
+                conditions_cleared=[],
+                duration_minutes=60,
+                log="Short rest: +6 HP",
+            )
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            stack.enter_context(
+                patch("core.dnd_rest.short_rest", side_effect=_mock_short_rest)
+            )
+
+            async def _run():
+                from core.dnd_engine import resolve_normal_action
+                return await resolve_normal_action(
+                    user_input="Роблю короткий перепочинок",
+                    profile=profile,
+                )
+            verdict, updates = _run_async(_run())
+
+        assert len(short_rest_calls) == 1, (
+            f"short_rest must be called exactly once. Got {len(short_rest_calls)} calls."
+        )
+        assert short_rest_calls[0] == 1, (
+            f"short_rest must be called with hit_dice_spent=1 (default). Got {short_rest_calls[0]}"
+        )
+        assert "SHORT REST" in verdict, (
+            f"verdict must mention SHORT REST. Got: {verdict!r}"
+        )
+
+    def test_rest_type_short_spends_one_hit_die_default(self):
+        """Short rest spends exactly 1 hit die by default (no parameterisation yet)."""
+        profile = _dnd_profile_with_hp()
+        profile["hp_current"] = 10
+        profile["hp_max"] = 20
+        profile["hit_dice_total"] = 3
+        profile["hit_dice_used"] = 0
+        profile["class"] = "Knight"
+
+        data = _minimal_worker_data(ability_used="None", skill_used="None", difficulty=5)
+        data["rest_type"] = "short"
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+
+            async def _run():
+                from core.dnd_engine import resolve_normal_action
+                return await resolve_normal_action(
+                    user_input="Відпочиваю годину",
+                    profile=profile,
+                )
+            verdict, updates = _run_async(_run())
+
+        # hit_dice_used should be 1 (spent 1 die)
+        assert profile["hit_dice_used"] == 1, (
+            f"Short rest must spend exactly 1 hit die. hit_dice_used={profile['hit_dice_used']}"
+        )
+
+    def test_rest_type_none_does_not_trigger_rest(self):
+        """When rest_type is absent or 'none', rest mechanics must NOT be triggered."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data(ability_used="STR", skill_used="Athletics", difficulty=15)
+        # No rest_type key — defaults to "none"
+
+        long_rest_calls = []
+        short_rest_calls = []
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            stack.enter_context(
+                patch("core.dnd_rest.long_rest",
+                      side_effect=lambda *a, **kw: long_rest_calls.append(1))
+            )
+            stack.enter_context(
+                patch("core.dnd_rest.short_rest",
+                      side_effect=lambda *a, **kw: short_rest_calls.append(1))
+            )
+
+            async def _run():
+                from core.dnd_engine import resolve_normal_action
+                return await resolve_normal_action(
+                    user_input="Climb the wall",
+                    profile=profile,
+                )
+            verdict, updates = _run_async(_run())
+
+        assert len(long_rest_calls) == 0, "long_rest must NOT be called when rest_type is absent."
+        assert len(short_rest_calls) == 0, "short_rest must NOT be called when rest_type is absent."
+
+    def test_rest_type_long_syncs_legacy_health_field(self):
+        """Long rest must sync profile['Здоров'я'] to 100 (legacy UI field)."""
+        profile = _dnd_profile_with_hp()
+        profile["hp_current"] = 5
+        profile["hp_max"] = 20
+        profile["hit_dice_total"] = 1
+        profile["hit_dice_used"] = 0
+        profile["class"] = "Knight"
+        profile["Здоров'я"] = 25  # initially stale/wrong
+
+        data = _minimal_worker_data(ability_used="None", skill_used="None", difficulty=5)
+        data["rest_type"] = "long"
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+
+            async def _run():
+                from core.dnd_engine import resolve_normal_action
+                return await resolve_normal_action(
+                    user_input="Сплю 8 годин",
+                    profile=profile,
+                )
+            _run_async(_run())
+
+        health_key = "Здоров'я"
+        assert profile.get(health_key) == 100, (
+            f"Long rest must set legacy {health_key} to 100. Got {profile.get(health_key)}"
         )

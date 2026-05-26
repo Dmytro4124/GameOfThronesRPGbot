@@ -81,13 +81,23 @@ class AIWrapper:
         Tolerant: if caching is not supported for this model, returns None and
         falls back to inline system_instruction on every call.
 
-        Skips caching if system_instruction is shorter than 1000 chars — too
+        Skips caching if system_instruction is shorter than 200 chars — too
         small to yield meaningful token savings.
+
+        Threshold lowered from 1000 → 200 to include model_narrator system_instruction
+        (~269 chars NSFW preamble). Verified: model/model_worker/model_gm_logic have
+        system_instruction=None so they skip caching regardless of threshold.
+
+        WARNING: This method is NOT thread-safe. Currently safe because only
+        model_narrator has system_instruction set (everyone else has system_instruction=None
+        and skips early on the guard). If you add system_instruction to model_worker or
+        model_gm_logic in the future, wrap _ensure_cache invocations with a lock or
+        ensure they happen only from the event loop (not from asyncio.to_thread threads).
         """
         if self._cache_attempted:
             return self._cached_content_name
         self._cache_attempted = True
-        if not self.system_instruction or len(self.system_instruction) < 1000:
+        if not self.system_instruction or len(self.system_instruction) < 200:
             return None
         try:
             from google.genai import types as _gtypes

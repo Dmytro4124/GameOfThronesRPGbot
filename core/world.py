@@ -225,13 +225,15 @@ async def generate_initial_stats(char_name, house_name, house_data):
         for f in get_class_features_at_level(suggested_class, 1)
     ]
 
-    # Equipment string for legacy "Інвентар" field
+    # Equipment list for "Інвентар" field — stored as list[dict] (new structured format).
+    # parse_inventory handles backward compat on load; new profiles start structured.
+    from core.inventory import parse_inventory as _parse_inv
     items_list: list[str] = list(kit.get("items", []))
     if kit.get("weapon_main"):
         items_list.insert(0, kit["weapon_main"])
     if kit.get("weapon_off"):
         items_list.insert(1, kit["weapon_off"])
-    inventory_str = ", ".join(items_list) if items_list else "Пусто"
+    inventory_str = _parse_inv(items_list)  # list[dict] for new profiles
 
     gold_from_kit = int(kit.get("gold", 0))
 
@@ -295,7 +297,110 @@ async def generate_initial_stats(char_name, house_name, house_data):
         "reputation": {"regions": {}, "factions": {}},
     }
 
-    print(f"✅ [D&D] Профіль створено: {char_name} | {suggested_class} L{level} | {suggested_heritage} | HP {hp_current}/{hp_max} | AC {ac}")
+    # --- Build structured equipped_weapon (P5 fix) ---
+    # Parse weapon_main string like "Рапіра (1d8 колота, фінесс)" into a structured dict.
+    # This is ADDITIVE — profile["Зброя"] (legacy string) is preserved.
+    weapon_main_str: str = kit.get("weapon_main", "") or ""
+    if weapon_main_str:
+        import re as _re
+        _w_name = weapon_main_str.split("(")[0].strip()
+        _w_props: list[str] = []
+        _w_dice = "1d4"
+        _w_dmg_type = "bludgeoning"
+        # Extract content inside parentheses: "1d8 колота, фінесс"
+        _inner_match = _re.search(r'\(([^)]+)\)', weapon_main_str)
+        if _inner_match:
+            _inner = _inner_match.group(1)
+            _parts = [p.strip() for p in _inner.split(",")]
+            for _p in _parts:
+                _p_lower = _p.lower()
+                # Dice pattern: NdM
+                if _re.match(r'\d+d\d+', _p_lower):
+                    _dice_match = _re.match(r'(\d+d\d+)\s*(.*)', _p_lower)
+                    if _dice_match:
+                        _w_dice = _dice_match.group(1)
+                        _dmg_raw = _dice_match.group(2).strip()
+                        if _dmg_raw:
+                            _w_dmg_type = _dmg_raw
+                # Property keywords
+                elif any(kw in _p_lower for kw in ("фінесс", "finesse")):
+                    _w_props.append("finesse")
+                elif any(kw in _p_lower for kw in ("дворуч", "two-handed")):
+                    _w_props.append("two-handed")
+                elif any(kw in _p_lower for kw in ("легка", "light")):
+                    _w_props.append("light")
+                elif any(kw in _p_lower for kw in ("метн", "thrown")):
+                    _w_props.append("thrown")
+                elif any(kw in _p_lower for kw in ("80/", "20/", "range")):
+                    _w_props.append("ranged")
+        profile["equipped_weapon"] = {
+            "name": _w_name,
+            "damage_dice": _w_dice,
+            "damage_type": _w_dmg_type,
+            "properties": _w_props,
+        }
+    else:
+        profile["equipped_weapon"] = None
+
+    # --- Build structured equipped_armor (P3 infrastructure) ---
+    # Armor types dict: maps partial string patterns to (ac_base, type).
+    # This list is intentionally sparse — full armor definitions are a separate task.
+    # When a pattern matches, we store structured data; otherwise equipped_armor stays None.
+    _ARMOR_PATTERNS: list[tuple[str, int, str]] = [
+        # (substring_to_match_lowercase, ac_base, armor_type)
+        ("кольчуга", 16, "heavy"),
+        ("chainmail", 16, "heavy"),
+        ("кольч", 16, "heavy"),
+        ("латн", 18, "heavy"),
+        ("plate", 18, "heavy"),
+        ("кіряса", 14, "medium"),
+        ("breastplate", 14, "medium"),
+        ("напів", 15, "medium"),
+        ("half plate", 15, "medium"),
+        ("hide", 12, "medium"),
+        ("шкура", 12, "medium"),
+        ("шкіра з клепками", 12, "medium"),  # studded leather
+        ("studded", 12, "medium"),
+        ("шкіра", 11, "light"),
+        ("leather", 11, "light"),
+        ("стьобан", 11, "light"),
+        ("padded", 11, "light"),
+    ]
+    armor_str_lower = armor_str.lower()
+    _equipped_armor = None
+    for _pat, _base, _atype in _ARMOR_PATTERNS:
+        if _pat in armor_str_lower:
+            _equipped_armor = {"ac_base": _base, "type": _atype}
+            break
+    # Attempt regex fallback: "КЗ 16" or "AC 16" in armor_str
+    if _equipped_armor is None and armor_str:
+        import re as _re2
+        _ac_fallback = _re2.search(r'(?:КЗ|AC)\s*(\d+)', armor_str, _re2.IGNORECASE)
+        if _ac_fallback:
+            _base_fallback = int(_ac_fallback.group(1))
+            # Classify by AC value: heavy >= 16, medium 12-15, light <= 11
+            if _base_fallback >= 16:
+                _atype_fallback = "heavy"
+            elif _base_fallback >= 12:
+                _atype_fallback = "medium"
+            else:
+                _atype_fallback = "light"
+            _equipped_armor = {"ac_base": _base_fallback, "type": _atype_fallback}
+    profile["equipped_armor"] = _equipped_armor
+
+    # Shield flag
+    profile["equipped_shield"] = bool(kit.get("shield", False))
+
+    # Recompute AC now that structured armor data is available (uses recompute_ac from dnd_engine)
+    # Import lazily to avoid circular imports at module load time
+    try:
+        from core.dnd_engine import recompute_ac
+        recompute_ac(profile)
+    except Exception as _ac_err:
+        # Non-fatal: log and keep the previously calculated ac value
+        print(f"⚠️ [D&D] recompute_ac failed at profile creation: {_ac_err}. Using ac={ac}.")
+
+    print(f"✅ [D&D] Профіль створено: {char_name} | {suggested_class} L{level} | {suggested_heritage} | HP {hp_current}/{hp_max} | AC {profile.get('ac', ac)}")
     return profile
 
 

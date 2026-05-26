@@ -195,18 +195,19 @@ def apply_system_impacts(profile, ai_impacts):
         logs.append(f"💰 Золото: {gold_change:+}")
 
     # === 4. ОБРОБКА ІНВЕНТАРЯ ===
-    current_inv_str = str(profile.get("Інвентар", ""))
-    if current_inv_str in ["-", "Пусто", ""]:
-        inventory_list = []
-    else:
-        inventory_list = [item.strip() for item in current_inv_str.split(',') if item.strip()]
+    from core.inventory import parse_inventory, add_item, remove_item, format_inventory, _parse_one
+
+    # Normalise current inventory regardless of stored format (str, list[str], list[dict]).
+    # Backward compat: existing profiles with CSV strings are migrated on first read.
+    current_inv = parse_inventory(profile.get("Інвентар", []))
 
     new_items = ai_impacts.get("inventory_new")
     if new_items:
-        if isinstance(new_items, str): new_items = [new_items]
-        for item in new_items:
-            # Якщо предмет вже є в інвентарі — пропускаємо без логу
-            if item.strip().lower() in current_inv_str.lower():
+        if isinstance(new_items, str):
+            new_items = [new_items]
+        for item_str in new_items:
+            parsed = _parse_one(str(item_str))
+            if parsed is None:
                 continue
             # Fallback-захист від галюцинацій: якщо предмет з'являється без золотової транзакції,
             # без бойових подій і без зміни локації/сцени — позначаємо підозрілим для Евалюатора.
@@ -215,22 +216,35 @@ def apply_system_impacts(profile, ai_impacts):
             _has_transaction = _gold_tag not in ("none", "0")
             _has_combat = ai_impacts.get("health_impact", "none") != "none"
             _has_scene_change = ai_impacts.get("scene_impact", "none") != "none"
-            if not (_has_transaction or _has_combat or _has_scene_change):
-                logs.append(f"[БЛОКУВАННЯ ГАЛЮЦИНАЦІЇ] Предмет '{item}' отримано без транзакції, бою або зміни сцени.")
-            inventory_list.append(item)
-            logs.append(f"➕ Отримано: {item}")
+            # Check whether item already present (by name, case-insensitive)
+            already_present = any(
+                it["name"].lower() == parsed["name"].lower() for it in current_inv
+            )
+            if already_present and not (_has_transaction or _has_combat or _has_scene_change):
+                continue  # skip duplicate without hallucination log (item already owned)
+            if not already_present and not (_has_transaction or _has_combat or _has_scene_change):
+                logs.append(
+                    f"[БЛОКУВАННЯ ГАЛЮЦИНАЦІЇ] Предмет '{parsed['name']}' отримано без транзакції, бою або зміни сцени."
+                )
+            add_item(current_inv, parsed["name"], parsed["quantity"])
+            qty_suffix = f" x{parsed['quantity']}" if parsed["quantity"] > 1 else ""
+            logs.append(f"➕ Отримано: {parsed['name']}{qty_suffix}")
 
     lost_items = ai_impacts.get("inventory_lost")
     if lost_items:
-        if isinstance(lost_items, str): lost_items = [lost_items]
-        for item in lost_items:
-            for existing_item in inventory_list:
-                if item.strip().lower() == existing_item.strip().lower():
-                    inventory_list.remove(existing_item)
-                    logs.append(f"➖ Втрачено: {existing_item}")
-                    break
+        if isinstance(lost_items, str):
+            lost_items = [lost_items]
+        for item_str in lost_items:
+            parsed = _parse_one(str(item_str))
+            if parsed is None:
+                continue
+            removed = remove_item(current_inv, parsed["name"], parsed["quantity"])
+            if removed > 0:
+                qty_suffix = f" x{removed}" if removed > 1 else ""
+                logs.append(f"➖ Втрачено: {parsed['name']}{qty_suffix}")
 
-    profile["Інвентар"] = "Пусто" if not inventory_list else ", ".join(inventory_list)
+    # Save as list[dict] — JSON-serialisable, backward compat on load via parse_inventory().
+    profile["Інвентар"] = current_inv
 
     # === 5. ОБРОБКА НАВИЧОК ===
     skill_updates = ai_impacts.get("skill_impact", {})
@@ -356,7 +370,9 @@ async def validate_action(user_input, profile):
         return False, "Ви мертві. Ваша історія завершена, і ви не можете діяти."
 
     char_name = profile.get("Ім'я", "Герой")
-    inventory_list = profile.get("Інвентар", "порожній") or "порожній"
+    from core.inventory import parse_inventory, format_inventory
+    _inv_items = parse_inventory(profile.get("Інвентар", []))
+    inventory_list = format_inventory(_inv_items) if _inv_items else "порожній"
 
     prompt = build_validate_action_prompt(char_name, user_input, inventory_list)
     try:

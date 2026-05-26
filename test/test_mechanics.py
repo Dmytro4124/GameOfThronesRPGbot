@@ -77,6 +77,7 @@ def test_energy_impact_overheal():
 
 
 def test_apply_system_impacts_inventory():
+    from core.inventory import parse_inventory
     profile = {"Інвентар": "Меч, Яблуко"}
     impacts = {
         "inventory_new": ["Щит"],
@@ -84,9 +85,12 @@ def test_apply_system_impacts_inventory():
     }
     updated, logs = apply_system_impacts(profile, impacts)
 
-    assert "Щит" in updated["Інвентар"]
-    assert "Яблуко" not in updated["Інвентар"]
-    assert "Меч" in updated["Інвентар"]
+    # profile["Інвентар"] is now list[dict] — check by item names
+    items = parse_inventory(updated["Інвентар"])
+    names = [i["name"] for i in items]
+    assert "Щит" in names
+    assert "Яблуко" not in names
+    assert "Меч" in names
 
 
 def test_apply_system_impacts_skills():

@@ -23,6 +23,7 @@ from core.dnd_progression import (
     award_xp,
     level_up,
     apply_asi,
+    apply_pending_levelups,
     xp_for_encounter_difficulty,
 )
 
@@ -379,3 +380,120 @@ def test_xp_for_encounter_difficulty_level_25_clamped_to_20():
     result_25 = xp_for_encounter_difficulty(25, "medium")
     result_20 = xp_for_encounter_difficulty(20, "medium")
     assert result_25 == result_20
+
+
+# ---------------------------------------------------------------------------
+# 8. apply_pending_levelups (training path integration)
+# ---------------------------------------------------------------------------
+
+def _dnd_profile_with_hp(level: int = 1, hp_max: int = 10, class_name: str = "Courtier") -> dict:
+    """Minimal profile simulating a character after award_xp() was called."""
+    return {
+        "class": class_name,
+        "level": level,       # apply_pending_levelups will reset this to level_before
+        "xp": 0,
+        "hp_max": hp_max,
+        "hp_current": hp_max,
+        "hit_dice_total": level,
+        "hit_dice_used": 0,
+        "ability_scores": {
+            "STR": 10, "DEX": 14, "CON": 10,
+            "INT": 14, "WIS": 12, "CHA": 16,
+        },
+        "features": [],
+        "proficiency_bonus": 2,
+        "asi_pending": False,
+    }
+
+
+def test_apply_pending_levelups_training_path_hp_increases():
+    """Training XP triggers level_up — hp_max must increase after apply_pending_levelups."""
+    profile = _dnd_profile_with_hp(level=2, hp_max=10)
+    # Simulate: award_xp already set profile['level'] = 2 (level_before=1, levels_gained=1)
+    logs = apply_pending_levelups(profile, level_before=1, levels_gained=1, class_name="Courtier")
+
+    assert profile["level"] == 2
+    assert profile["hp_max"] > 10, "hp_max must have increased after level_up"
+    assert any("HP +" in log for log in logs), f"Expected HP log, got: {logs}"
+
+
+def test_apply_pending_levelups_multi_level_gain():
+    """Crossing two levels at once (e.g. L1 → L3 from training)."""
+    profile = _dnd_profile_with_hp(level=3, hp_max=10)
+    logs = apply_pending_levelups(profile, level_before=1, levels_gained=2, class_name="Courtier")
+
+    assert profile["level"] == 3
+    assert profile["hp_max"] > 10
+    # Should have two HP log lines
+    hp_logs = [l for l in logs if "HP +" in l]
+    assert len(hp_logs) == 2, f"Expected 2 HP log lines for 2 levels, got: {hp_logs}"
+
+
+def test_apply_pending_levelups_zero_levels_noop():
+    """levels_gained=0 must be a no-op — profile and logs unchanged."""
+    profile = _dnd_profile_with_hp(level=1, hp_max=10)
+    original_level = profile["level"]
+    original_hp = profile["hp_max"]
+
+    logs = apply_pending_levelups(profile, level_before=1, levels_gained=0, class_name="Knight")
+
+    assert logs == []
+    assert profile["level"] == original_level
+    assert profile["hp_max"] == original_hp
+
+
+def test_apply_pending_levelups_unknown_class_fallback():
+    """Unknown class falls back to Knight without raising."""
+    profile = _dnd_profile_with_hp(level=2, hp_max=10, class_name="UnknownClass")
+    logs = apply_pending_levelups(profile, level_before=1, levels_gained=1, class_name="UnknownClass")
+
+    # Should not raise; Knight fallback applied
+    assert profile["level"] == 2
+    assert profile["hp_max"] > 10
+
+
+def test_apply_pending_levelups_asi_at_l4():
+    """L3 → L4 triggers ASI auto-distribution for Courtier (primary: CHA, INT)."""
+    profile = _dnd_profile_with_hp(level=4, hp_max=22, class_name="Courtier")
+    cha_before = profile["ability_scores"]["CHA"]  # 16
+    int_before = profile["ability_scores"]["INT"]  # 14
+
+    logs = apply_pending_levelups(profile, level_before=3, levels_gained=1, class_name="Courtier")
+
+    assert profile["level"] == 4
+    # ASI should have been distributed — at least one primary ability increased
+    cha_after = profile["ability_scores"]["CHA"]
+    int_after = profile["ability_scores"]["INT"]
+    assert cha_after + int_after > cha_before + int_before, (
+        f"ASI should have increased CHA or INT. Before: CHA={cha_before}, INT={int_before}. "
+        f"After: CHA={cha_after}, INT={int_after}"
+    )
+    assert any("Ability Score Improvement" in log for log in logs)
+
+
+def test_features_stored_as_json_serializable_dicts():
+    """Bug fix: profile['features'] must contain dicts, not Feature dataclass objects.
+    json.dumps must work on profile after level-up."""
+    import json
+
+    profile = _dnd_profile_with_hp()
+    profile["level"] = 1
+    profile["class"] = "Courtier"
+
+    apply_pending_levelups(profile, level_before=1, levels_gained=2, class_name="Courtier")
+
+    # Must have features after level-up (Courtier L1+L2)
+    assert len(profile.get("features", [])) > 0
+
+    # Each feature must be a dict with required keys
+    for feat in profile["features"]:
+        assert isinstance(feat, dict), f"Feature must be dict, got {type(feat)}"
+        assert "name" in feat
+        assert "desc" in feat
+        assert "source" in feat
+
+    # CRITICAL: json.dumps must not raise TypeError
+    try:
+        json.dumps(profile)
+    except TypeError as exc:
+        pytest.fail(f"profile must be JSON-serializable after level-up: {exc}")

@@ -461,10 +461,18 @@ def player_attack(
         # Caller provided a specific weapon name not matching main — use as-is for parsing
         weapon_str = weapon_name
 
-    # Finesse weapons: use better of STR/DEX
-    finesse_keywords = ("dagger", "shortsword", "rapier", "кинджал", "рапіра", "короткий меч")
-    weapon_lower = weapon_str.lower()
-    if any(kw in weapon_lower for kw in finesse_keywords):
+    # Finesse weapons: use better of STR/DEX.
+    # PRIMARY path: read structured equipped_weapon["properties"] (P5 fix).
+    # FALLBACK path: keyword detection for legacy profiles without equipped_weapon.
+    _equipped_weapon = player.get("equipped_weapon")
+    if _equipped_weapon and isinstance(_equipped_weapon, dict):
+        _is_finesse = "finesse" in _equipped_weapon.get("properties", [])
+    else:
+        # Legacy fallback: keyword detection (preserved for existing profiles)
+        _finesse_keywords = ("dagger", "shortsword", "rapier", "кинджал", "рапіра", "короткий меч")
+        _is_finesse = any(kw in weapon_str.lower() for kw in _finesse_keywords)
+
+    if _is_finesse:
         str_mod = _get_str_mod(player)
         dex_mod = _get_dex_mod(player)
         attack_mod = max(str_mod, dex_mod)

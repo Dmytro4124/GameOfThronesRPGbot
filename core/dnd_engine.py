@@ -16,11 +16,11 @@ logger = logging.getLogger(__name__)
 from core.ai_client import model_worker, clean_and_parse_json, build_strict_config
 from core.dnd_core import (
     roll_d20, ability_modifier, proficiency_bonus, clamp_dc,
-    LEGAL_DCS, skill_check, ability_check, CheckResult,
+    LEGAL_DCS, skill_check, ability_check, saving_throw, CheckResult,
 )
 from core.dnd_skills import SKILLS, get_ability_for_skill, is_valid_skill
 from core.dnd_classes import GOT_CLASSES, get_class_features_at_level
-from core.dnd_progression import award_xp, level_up, apply_asi, get_level_for_xp
+from core.dnd_progression import award_xp, level_up, apply_asi, get_level_for_xp, apply_pending_levelups
 from core.dnd_conditions import (
     apply_condition, remove_condition, has_condition, condition_modifies,
 )
@@ -32,9 +32,11 @@ from core.world_constants import (
 
 # ---------------------------------------------------------------------------
 # AUTO_SUCCESS DC threshold: DC <= this value means no roll needed.
-# LEGAL_DCS[0] == 5 — trivial actions skip the roll entirely.
+# LEGAL_DCS[0] == 2 — ultra-trivial actions (sensory, body movement, prosaic
+# interaction, social signals) skip the roll entirely with DC 2 auto-success.
+# DC 5 still triggers a (very easy) roll for slightly riskier trivial actions.
 # ---------------------------------------------------------------------------
-AUTO_SUCCESS_MAX_DC: int = 5
+AUTO_SUCCESS_MAX_DC: int = 2
 
 # Legal XP award values (from prompts output_schema)
 _LEGAL_XP: frozenset[int] = frozenset({0, 25, 50, 100, 200})
@@ -222,6 +224,154 @@ async def resolve_normal_action(
     raw_xp: int = safe_int(data.get("xp_award", 0), 0)
     reputation_delta: int = safe_int(data.get("reputation_delta", 0), 0)
     reputation_target_npc: str = str(data.get("reputation_target_npc", "")).strip()
+
+    # --- 4b. P2: Rest resolution (override skill-check flow) ---
+    # NOTE: REST has priority over SAVE. If LLM returns both rest_type and save_used,
+    # rest is applied first and the early return skips the save block entirely.
+    rest_type: str = str(data.get("rest_type", "none")).strip().lower()
+
+    if rest_type in ("long", "short"):
+        from core.dnd_rest import long_rest, short_rest
+        if rest_type == "long":
+            rest_result = long_rest(profile)
+            verdict_addendum = (
+                f"\nLONG REST: HP {rest_result.hp_restored} restored "
+                f"(→ {profile.get('hp_max')}/{profile.get('hp_max')}), "
+                f"hit dice regained: {rest_result.hit_dice_regained}, "
+                f"conditions cleared: {rest_result.conditions_cleared or 'none'}."
+            )
+            # Long rest fully heals — suppress any Worker-supplied dice that would double-count
+            if raw_updates.get("hp_damage_dice") not in ("none", "None", ""):
+                raw_updates["hp_damage_dice"] = "none"
+            if raw_updates.get("hp_heal_dice") not in ("none", "None", ""):
+                raw_updates["hp_heal_dice"] = "none"
+            # Sync legacy UI field
+            hp_max = safe_int(profile.get("hp_max", 1), 1)
+            profile["Здоров'я"] = 100 if hp_max > 0 else 0
+
+        else:  # short
+            hit_dice_spent = 1  # default 1 die; future: parameterise from Worker output
+            rest_result = short_rest(profile, hit_dice_spent=hit_dice_spent)
+            verdict_addendum = (
+                f"\nSHORT REST: spent {rest_result.hit_dice_spent} hit dice, "
+                f"restored {rest_result.hp_restored} HP."
+            )
+            # Short rest already applied HP — suppress Worker damage dice
+            if raw_updates.get("hp_damage_dice") not in ("none", "None", ""):
+                raw_updates["hp_damage_dice"] = "none"
+            # Sync legacy UI field
+            hp_current = safe_int(profile.get("hp_current", 0), 0)
+            hp_max = safe_int(profile.get("hp_max", 1), 1)
+            profile["Здоров'я"] = round(100 * hp_current / hp_max) if hp_max > 0 else 0
+
+        verdict_text_llm = (verdict_text_llm or "") + verdict_addendum
+
+        # Rest actions bypass skill check flow entirely
+        updates = _build_updates(
+            raw_updates=raw_updates,
+            action_type="standard",
+            skill_used="None",
+            ability_used="None",
+            outcome="SUCCESS",
+            natural_roll=0,
+            total_score=0,
+            difficulty=AUTO_SUCCESS_MAX_DC,
+            advantage_reason="",
+            disadvantage_reason="",
+            combat_imminent=combat_imminent,
+            xp_award=raw_xp if raw_xp in _LEGAL_XP else 0,
+            reputation_delta=reputation_delta,
+            reputation_target_npc=reputation_target_npc,
+        )
+        verdict_str = f"MECHANICAL VERDICT: REST ({rest_type.upper()}). GM INFO: {verdict_text_llm}"
+        updates["dice_roll"] = "-"
+        updates["skill_val"] = 0
+        return verdict_str, updates
+
+    # --- 4c. P1: Saving throw resolution (override skill-check flow) ---
+    save_used: str = str(data.get("save_used", "None")).strip().upper()
+    save_dc_raw: int = safe_int(data.get("save_dc", 5), 5)
+
+    if save_used in ("STR", "DEX", "CON", "INT", "WIS", "CHA"):
+        # Worker decided this is a save scenario — override normal skill flow
+        save_dc: int = clamp_dc(save_dc_raw)
+        if save_dc != save_dc_raw:
+            logger.info(f"[DND_ENGINE] save_dc clamped: {save_dc_raw} → {save_dc}")
+
+        # GODMODE: always succeed on saves too
+        from config import GODMODE_USERS
+        if user_id and user_id in GODMODE_USERS:
+            save_natural = 20
+            save_total = 20
+            save_outcome = "CRITICAL SUCCESS"
+            save_roll_str = "GODMODE"
+        else:
+            save_result: CheckResult = saving_throw(
+                profile=profile,
+                ability=save_used,
+                dc=save_dc,
+                advantage=False,
+                disadvantage=False,
+            )
+            save_natural = save_result.natural
+            save_total = save_result.total
+            save_roll_str = save_result.roll_str
+            if save_result.critical == "success":
+                save_outcome = "CRITICAL SUCCESS"
+            elif save_result.critical == "fail":
+                save_outcome = "CRITICAL FAILURE"
+            elif save_result.success:
+                save_outcome = "SUCCESS"
+            else:
+                save_outcome = "FAILURE"
+
+        # On FAILURE → hp_damage_dice stays as Worker set it (damage happens)
+        # On SUCCESS / CRITICAL SUCCESS → no damage (suppress hp_damage_dice)
+        if save_outcome in ("SUCCESS", "CRITICAL SUCCESS"):
+            if raw_updates.get("hp_damage_dice") not in ("none", "None", ""):
+                logger.info(
+                    f"[DND_ENGINE] Save {save_outcome}: suppressing hp_damage_dice="
+                    f"{raw_updates['hp_damage_dice']!r}"
+                )
+                raw_updates["hp_damage_dice"] = "none"
+
+        # XP validation (needed before _build_updates)
+        xp_award_save: int = raw_xp if raw_xp in _LEGAL_XP else 0
+
+        verdict_str = (
+            f"MECHANICAL VERDICT: SAVING THROW {save_outcome}! "
+            f"({save_used} save vs DC {save_dc}, Roll: {save_roll_str}, "
+            f"Total: {save_total}). "
+            f"GM INFO: {verdict_text_llm}"
+        )
+        updates = _build_updates(
+            raw_updates=raw_updates,
+            action_type="standard",
+            skill_used="None",
+            ability_used=save_used,
+            outcome=save_outcome,
+            natural_roll=save_natural,
+            total_score=save_total,
+            difficulty=save_dc,
+            advantage_reason="",
+            disadvantage_reason="",
+            combat_imminent=combat_imminent,
+            xp_award=xp_award_save,
+            reputation_delta=reputation_delta,
+            reputation_target_npc=reputation_target_npc,
+        )
+        updates["dice_roll"] = save_roll_str
+        updates["skill_val"] = 0
+
+        # Attack guard rail still applies to save scenarios (defence-in-depth)
+        _user_lower_save = (user_input or "").lower()
+        if any(kw in _user_lower_save for kw in _ATTACK_KEYWORDS):
+            if updates.get("hp_damage_dice") not in ("none", "None", ""):
+                updates["hp_damage_dice"] = "none"
+            if not updates.get("combat_imminent"):
+                updates["combat_imminent"] = True
+
+        return verdict_str, updates
 
     # --- 5. Validate and clamp DC via clamp_dc (§5.2 DC invariant) ---
     # clamp_dc snaps to nearest legal value in LEGAL_DCS
@@ -543,6 +693,60 @@ def _build_updates(
 
 
 # ---------------------------------------------------------------------------
+# AC recompute helper (P3 fix)
+# ---------------------------------------------------------------------------
+
+def recompute_ac(profile: dict) -> int:
+    """Recompute Armour Class from equipped_armor and DEX modifier, write to profile["ac"].
+
+    Rules:
+    - No armor (or equipped_armor absent): 10 + DEX_mod (unarmored default).
+    - Light armor: armor["ac_base"] + DEX_mod (no cap on DEX bonus).
+    - Medium armor: armor["ac_base"] + min(DEX_mod, 2).
+    - Heavy armor: armor["ac_base"] (no DEX bonus).
+    - Shield: +2 regardless of armor type (if equipped_shield is True in profile).
+
+    equipped_armor schema (OPTIONAL, new profile field):
+    {
+        "ac_base": int,                     # base AC of the armor (e.g. 16 for chainmail)
+        "type": "light" | "medium" | "heavy",
+    }
+
+    Boundary conditions:
+    - DEX_mod can be negative → still applied for light/medium (can reduce AC below base).
+    - ac_base 0 or missing → treated as 10 (safety floor).
+    - Unknown armor type → falls back to no-armor formula.
+
+    Returns the new AC value and mutates profile["ac"].
+    """
+    dex_score = profile.get("ability_scores", {}).get("DEX", 10)
+    dex_mod = ability_modifier(dex_score)
+
+    armor = profile.get("equipped_armor")
+    if armor and isinstance(armor, dict):
+        ac_base = safe_int(armor.get("ac_base", 10), 10)
+        if ac_base <= 0:
+            ac_base = 10
+        armor_type = str(armor.get("type", "light")).lower().strip()
+        if armor_type == "heavy":
+            new_ac = ac_base
+        elif armor_type == "medium":
+            new_ac = ac_base + min(dex_mod, 2)
+        else:  # light or unknown → light formula
+            new_ac = ac_base + dex_mod
+    else:
+        # No armor: unarmored default
+        new_ac = 10 + dex_mod
+
+    # Shield bonus
+    if profile.get("equipped_shield", False):
+        new_ac += 2
+
+    profile["ac"] = new_ac
+    return new_ac
+
+
+# ---------------------------------------------------------------------------
 # apply_dnd_impacts
 # ---------------------------------------------------------------------------
 
@@ -673,101 +877,21 @@ def apply_dnd_impacts(profile: dict, updates: dict) -> tuple[dict, list[str]]:
         logs.append(f"XP: +{xp_award} (Всього: {xp_result.xp_after})")
 
         if xp_result.leveled_up:
-            # award_xp already set profile['level'] = level_after.
-            # level_up() increments profile['level'] by 1 per call, so we must reset
-            # to level_before first and let level_up walk up one step at a time.
-            profile["level"] = xp_result.level_before
-
-            # Resolve class name with fallback
             class_name = profile.get("class", "")
             if not class_name or class_name not in GOT_CLASSES:
                 logger.warning(
-                    f"[DND_ENGINE] Unknown or missing class {class_name!r} in profile — "
+                    f"[DND_ENGINE] Unknown or missing class {class_name!r} — "
                     f"falling back to 'Knight' for level_up."
                 )
                 class_name = "Knight"
 
-            for _ in range(xp_result.levels_gained):
-                try:
-                    level_result = level_up(profile, class_name, hp_roll=None)
-                except ValueError as exc:
-                    # Already at max level (L20) — level_up raises ValueError
-                    logs.append(f"Max level reached: {exc}")
-                    break
-
-                logs.append(
-                    f"LEVEL {profile['level'] - 1} -> {profile['level']}! "
-                    f"HP +{level_result.hp_gained}"
-                )
-
-                if level_result.proficiency_bonus_changed:
-                    logs.append(
-                        f"Proficiency bonus -> +{profile.get('proficiency_bonus', '?')}"
-                    )
-
-                for feat in level_result.new_features:
-                    logs.append(
-                        f"New feature: {feat.name} -- {feat.desc[:80]}..."
-                    )
-
-                # Auto-ASI: distribute points to primary_abilities at L4/8/12/16/19
-                if level_result.asi_pending:
-                    ability_scores = profile.get("ability_scores")
-                    if not ability_scores:
-                        logs.append("ASI skipped: no ability_scores in profile.")
-                    else:
-                        primary = GOT_CLASSES[class_name].primary_abilities
-                        if not primary:
-                            primary = ["STR"]
-
-                        # Strategy: split +1/+1 across two primary abilities; +2 if only one
-                        if len(primary) >= 2:
-                            asi_choices: dict[str, int] = {primary[0]: 1, primary[1]: 1}
-                        else:
-                            asi_choices = {primary[0]: 2}
-
-                        # Clamp: no ability may exceed 20
-                        for ab, delta in list(asi_choices.items()):
-                            current = ability_scores.get(ab, 10)
-                            if current + delta > 20:
-                                asi_choices[ab] = max(0, 20 - current)
-
-                        # If sum < 2 after clamping, try to redistribute to other abilities
-                        if sum(asi_choices.values()) < 2:
-                            for ab in ["CON", "DEX", "STR", "WIS", "INT", "CHA"]:
-                                if sum(asi_choices.values()) >= 2:
-                                    break
-                                current = ability_scores.get(ab, 10)
-                                if current < 20:
-                                    needed = 2 - sum(asi_choices.values())
-                                    asi_choices[ab] = asi_choices.get(ab, 0) + min(
-                                        needed, 20 - current
-                                    )
-
-                        # Remove zero-valued entries to keep choices clean
-                        asi_choices = {ab: v for ab, v in asi_choices.items() if v > 0}
-
-                        total_asi_points = sum(asi_choices.values())
-                        if total_asi_points == 2:
-                            try:
-                                apply_asi(profile, asi_choices)
-                                logs.append(
-                                    f"Ability Score Improvement: {asi_choices}"
-                                )
-                            except ValueError as exc:
-                                # apply_asi validates keys and cap — should not happen
-                                # after our clamping, but guard defensively
-                                logger.warning(
-                                    f"[DND_ENGINE] apply_asi failed unexpectedly: {exc}"
-                                )
-                                logs.append(
-                                    f"ASI pending (apply_asi error: {exc})"
-                                )
-                        else:
-                            # All primary abilities at 20/20
-                            logs.append(
-                                "ASI pending (all abilities at cap 20/20) -- skipped."
-                            )
+            levelup_logs = apply_pending_levelups(
+                profile,
+                level_before=xp_result.level_before,
+                levels_gained=xp_result.levels_gained,
+                class_name=class_name,
+            )
+            logs.extend(levelup_logs)
 
     # --- 6. Delegate the rest to legacy apply_system_impacts ---
     # Передаємо оригінальний updates без D&D-специфічних ключів,
@@ -792,5 +916,17 @@ def apply_dnd_impacts(profile: dict, updates: dict) -> tuple[dict, list[str]]:
 
     profile, legacy_logs = apply_system_impacts(profile, legacy_updates)
     logs.extend(legacy_logs)
+
+    # --- 7. AC recompute when inventory changed (P3 fix) ---
+    # apply_system_impacts already ran; check whether inventory was touched this turn.
+    # Guard: only recompute for D&D-aware profiles (have equipped_armor or ability_scores).
+    # Legacy profiles without these would get ac wiped to default (10+0=10) on inventory change.
+    _inv_changed = bool(legacy_updates.get("inventory_new")) or bool(legacy_updates.get("inventory_lost"))
+    _is_dnd_profile = "equipped_armor" in profile or "ability_scores" in profile
+    if _inv_changed and _is_dnd_profile:
+        old_ac = profile.get("ac", 10)
+        new_ac = recompute_ac(profile)
+        if new_ac != old_ac:
+            logs.append(f"AC: {old_ac} -> {new_ac}")
 
     return profile, logs

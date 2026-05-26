@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from typing import Literal
 
 # Legal DC values for the ASoIaF-calibrated d20 system (max 22; see CLAUDE.md §5.2).
-LEGAL_DCS: tuple[int, ...] = (5, 10, 12, 15, 17, 20, 22)
+# DC 2 reserved for ultra-trivial actions (auto-success skip; see AUTO_SUCCESS_MAX_DC).
+LEGAL_DCS: tuple[int, ...] = (2, 5, 10, 12, 15, 17, 20, 22)
 
 _ABILITY_KEYS = ("STR", "DEX", "CON", "INT", "WIS", "CHA")
 

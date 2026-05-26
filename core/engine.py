@@ -11,6 +11,8 @@ from core.ai_client import model_worker, model_gm_logic, model_narrator, clean_a
 from config import MODEL_NARRATOR_NAME
 from core.mechanics import apply_system_impacts, process_training_request, safe_int, validate_action
 from core.dnd_engine import resolve_normal_action, apply_dnd_impacts
+from core.dnd_classes import GOT_CLASSES
+from core.dnd_progression import apply_pending_levelups
 from core.dnd_combat_engine import (
     execute_combat_round,
     cleanup_and_exit_combat,
@@ -23,6 +25,12 @@ from core.prompts import (
     build_gm_logic_schema,
 )
 from core.world_constants import VALID_LOCATIONS_ORDERED, VALID_REGIONS_ORDERED, TRAVEL_LOCATION, get_region_for_location, get_locations_for_region, LOCATION_DESCRIPTIONS, format_scenes_for_prompt
+from core.inventory import parse_inventory as _parse_inventory, format_inventory as _fmt_inventory
+
+
+def _format_inventory_for_prompt(raw) -> str:
+    """Normalise profile['Інвентар'] → display string for GM_Logic prompt context."""
+    return _fmt_inventory(_parse_inventory(raw))
 
 
 # ── Safe wrapper for sync functions passed to asyncio.to_thread ─────────────
@@ -407,7 +415,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         "Weapon": profile.get("Зброя", "None"),
         "Armor": profile.get("Броня", "None"),
         "Transport": profile.get("Транспорт", "None"),
-        "Inventory": profile.get("Інвентар", "Пусто"),
+        "Inventory": _format_inventory_for_prompt(profile.get("Інвентар", [])),
         "Worldview": profile.get("Світогляд", ""),
         "Traits": profile.get("Риси", ""),
         "Flaws": profile.get("Вади", ""),
@@ -445,22 +453,73 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
     t_start = time.time()
     logs = []
 
-    # === ЦЕНЗОР: Перевірка дії до будь-якої механіки ===
+    # === ЦЕНЗОР + SPECULATIVE WORKER ===
+    # NORMAL mode: Censor і Worker запускаються паралельно (speculative execution).
+    # Worker стартує одночасно з Censor — у 95% випадків Censor пропускає дію,
+    # тому Worker вже закінчив роботу до того, як ми його очікуємо.
+    # При блокуванні Censor'ом — Worker скасовується (asyncio.CancelledError;
+    # thread продовжить виконання, але результат відкидається — прийнятна вартість 5% викликів).
+    # COMBAT mode: залишається sequential (combat_state lock + складний cancel).
     if progress_callback:
         await progress_callback("🎲 Оцінюємо дію...")
-    is_valid, refusal_reason = await validate_action(user_input, profile)
-    if not is_valid:
-        return refusal_reason + "\n\n📊 🛑 Дію заблоковано Цензором.", []
-
-    if progress_callback:
-        await progress_callback("⚔️ Кидаємо кубики...")
     last_turn = history[-1]["content"] if history else ""
 
     # === FSM-ДИСПЕТЧЕР (Phase 7: COMBAT активний; NORMAL — основний pipeline) ===
     _game_mode = profile.get("mode", "NORMAL")
+    mechanics_verdict: str | None = None
     mechanical_updates: dict = {}
 
-    if _game_mode == "COMBAT":
+    if _game_mode == "NORMAL":
+        # --- Speculative: запускаємо Censor і Worker паралельно ---
+        logger.info("[SPEC] Worker started speculatively with Censor")
+        censor_task = asyncio.create_task(validate_action(user_input, profile))
+        worker_task = asyncio.create_task(resolve_normal_action(
+            user_input, profile, npc_reputation_context,
+            current_scene=curr_scene, npc_names=legal_npc_names,
+            last_turn_summary=last_turn, user_id=chat_id,
+            current_location=curr_loc,
+        ))
+
+        # Крок 1: чекаємо результат Censor
+        try:
+            is_valid, refusal_reason = await censor_task
+        except Exception as _censor_exc:
+            logger.warning(f"[CENSOR] failed, fail-open: {_censor_exc}")
+            is_valid, refusal_reason = True, ""
+
+        if not is_valid:
+            # Censor заблокував — скасовуємо Worker
+            # NOTE: cancel() does NOT stop the underlying thread inside asyncio.to_thread.
+            # The Worker LLM call will continue in background and may append to _thoughts_log
+            # after the turn returns. clear_thoughts() at next turn start overwrites stale data.
+            # This is acceptable cost for ~5% of blocked actions.
+            worker_task.cancel()
+            try:
+                await worker_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            return refusal_reason + "\n\n📊 🛑 Дію заблоковано Цензором.", []
+
+        if progress_callback:
+            await progress_callback("⚔️ Кидаємо кубики...")
+
+        # Крок 2: Censor пройшов — забираємо результат Worker (він вже міг завершитись)
+        _combat_log_for_narrator = []
+        try:
+            mechanics_verdict, mechanical_updates = await worker_task
+        except Exception as _worker_exc:
+            logger.error(f"[WORKER] speculative task failed: {_worker_exc}", exc_info=True)
+            raise
+
+    elif _game_mode == "COMBAT":
+        # Sequential Censor для COMBAT (combat_state lock несумісний з cancel)
+        is_valid, refusal_reason = await validate_action(user_input, profile)
+        if not is_valid:
+            return refusal_reason + "\n\n📊 🛑 Дію заблоковано Цензором.", []
+
+        if progress_callback:
+            await progress_callback("⚔️ Кидаємо кубики...")
+
         from core.combat_state import get_combat_state, get_or_create_lock
 
         combat_lock = get_or_create_lock(chat_id)
@@ -556,15 +615,21 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                     _game_mode = "NORMAL"
                     _combat_log_for_narrator = []
 
-    if _game_mode == "NORMAL":
+    # COMBAT→NORMAL fallback (state lost) або unknown mode — додатковий NORMAL resolve.
+    # mechanics_verdict залишається None якщо COMBAT block скинув mode до NORMAL
+    # через відсутній combat_state (Speculative Worker не запускався в COMBAT block).
+    if _game_mode == "NORMAL" and mechanics_verdict is None:
+        # Цей шлях досягається лише якщо COMBAT fallback скинув mode до NORMAL
+        # (combat_state was None). Speculative Worker не запускався в COMBAT block,
+        # тому потрібен звичайний sequential resolve.
         _combat_log_for_narrator = []
         mechanics_verdict, mechanical_updates = await resolve_normal_action(
             user_input, profile, npc_reputation_context,
             current_scene=curr_scene, npc_names=legal_npc_names, last_turn_summary=last_turn,
             user_id=chat_id, current_location=curr_loc
         )
-    elif _game_mode != "COMBAT":
-        # Unknown mode — force NORMAL (resolve_action_mechanics removed in Phase 9 cleanup)
+    elif _game_mode not in ("NORMAL", "COMBAT"):
+        # Unknown mode — force NORMAL
         logger.warning(f"[FSM] Unknown mode '{_game_mode}' — forcing NORMAL for chat_id={chat_id}")
         profile["mode"] = "NORMAL"
         _game_mode = "NORMAL"
@@ -628,12 +693,23 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                     mechanical_updates["hp_damage_dice"] = hp_damage_dice
                     logs.append(f"🩸 Травма від виснаження ({hp_damage_dice} HP).")
 
-                # Level-up notification
+                # Level-up: apply pending level mechanics (HP+, proficiency, features, auto-ASI)
                 if training_result.get("leveled_up"):
                     logs.append(
-                        f"РІВЕНЬ {training_result['level_before']} → {training_result['level_after']}! "
-                        f"(Потрібна дія для level_up)"
+                        f"РІВЕНЬ {training_result['level_before']} → {training_result['level_after']}!"
                     )
+                    tr_class = profile.get("class", "")
+                    if not tr_class or tr_class not in GOT_CLASSES:
+                        tr_class = "Knight"
+                    levelup_logs = apply_pending_levelups(
+                        profile,
+                        level_before=training_result["level_before"],
+                        levels_gained=(
+                            training_result["level_after"] - training_result["level_before"]
+                        ),
+                        class_name=tr_class,
+                    )
+                    logs.extend(levelup_logs)
 
         mechanical_updates["skill_used"] = "None"
 

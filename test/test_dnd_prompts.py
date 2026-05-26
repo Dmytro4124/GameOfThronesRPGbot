@@ -695,3 +695,132 @@ def test_gm_logic_schema_intent_has_description():
     intent_schema = action_schema.items.properties["intent"]
     assert intent_schema.description is not None, "intent schema must have a description"
     assert "Ukrainian" in intent_schema.description
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. Class features context in build_normal_resolve_prompt
+# ─────────────────────────────────────────────────────────────────────────────
+
+from core.dnd_classes import Feature
+
+
+def _courtier_l3_profile():
+    """Minimal Courtier L3 profile with two L1 features."""
+    return {
+        "Ім'я": "Петір Бейліш",
+        "Дім": "Бейліш",
+        "level": 3,
+        "class": "Courtier",
+        "ability_scores": {"STR": 8, "DEX": 12, "CON": 10, "INT": 14, "WIS": 12, "CHA": 16},
+        "proficiency_bonus": 2,
+        "skill_profs": ["Persuasion", "Deception", "Insight"],
+        "conditions": [],
+        "hp_current": 20,
+        "hp_max": 20,
+        "ac": 12,
+        "features": [
+            Feature(name="Срібний язик", desc="1/day: перекидаєш Переконання або Обман після бачення результату; береш новий кидок навіть якщо він нижчий.", source="Courtier L1"),
+            Feature(name="Шляхетне поводження", desc="Перевага на CHA-перевірки (Переконання, Обман, Гра, Залякування) проти осіб рівного або нижчого соціального статусу.", source="Courtier L1"),
+        ],
+    }
+
+
+def _call_normal_resolve(profile):
+    return build_normal_resolve_prompt(
+        user_input="test action",
+        profile=profile,
+        current_scene="Тронний Зал",
+        npcs_in_scene=[],
+        last_turn_summary="Гра почалась.",
+        current_location="Вінтерфелл",
+        npc_reputation_context=None,
+        clocks_info=None,
+    )
+
+
+def test_normal_resolve_prompt_includes_features_block():
+    """Worker prompt must include feature names and sources when features are present."""
+    profile = _courtier_l3_profile()
+    result = _call_normal_resolve(profile)
+    assert "Срібний язик" in result, "Expected 'Срібний язик' feature name in prompt"
+    assert "Шляхетне поводження" in result, "Expected 'Шляхетне поводження' feature name in prompt"
+    assert "Courtier L1" in result, "Expected feature source 'Courtier L1' in prompt"
+    assert "<class_features>" in result, "Expected <class_features> XML block in prompt"
+
+
+def test_normal_resolve_prompt_omits_features_block_when_empty():
+    """If features list is empty — the <class_features> block must NOT appear."""
+    profile = _courtier_l3_profile()
+    profile["features"] = []
+    result = _call_normal_resolve(profile)
+    assert "<class_features>" not in result, "Expected no <class_features> block when features list is empty"
+    assert "Class features" not in result, "Expected no class features noise when list is empty"
+
+
+def test_normal_resolve_prompt_omits_features_block_when_key_absent():
+    """If 'features' key is absent from profile — no crash and no features block."""
+    profile = _courtier_l3_profile()
+    del profile["features"]
+    result = _call_normal_resolve(profile)
+    assert isinstance(result, str)
+    assert "<class_features>" not in result
+
+
+def test_normal_resolve_prompt_truncates_long_desc():
+    """Feature descriptions longer than 120 chars must be truncated with '...' in prompt."""
+    long_desc = "А" * 130  # 130 Ukrainian chars > 120 limit
+    profile = _courtier_l3_profile()
+    profile["features"] = [Feature(name="ТестФіча", desc=long_desc, source="Test L1")]
+    result = _call_normal_resolve(profile)
+    # The full 130-char desc must NOT appear; truncated version with '...' must appear
+    assert long_desc not in result, "Long description should be truncated"
+    assert "ТестФіча" in result, "Feature name must still appear after truncation"
+    assert "..." in result, "Truncated description must end with '...'"
+
+
+def test_normal_resolve_prompt_gate0_instruction_present():
+    """GATE 0 feature-check instruction must be in thinking_directives when features present."""
+    profile = _courtier_l3_profile()
+    result = _call_normal_resolve(profile)
+    assert "GATE 0" in result, "Expected GATE 0 class features check in thinking_directives"
+    assert "advantage_reason" in result, "Expected advantage_reason instruction in GATE 0"
+
+
+def test_normal_resolve_prompt_features_supports_dict_format():
+    """Features stored as plain dicts (not Feature dataclass) must also render correctly."""
+    profile = _courtier_l3_profile()
+    profile["features"] = [
+        {"name": "Срібний язик", "desc": "1/day reroll.", "source": "Courtier L1"},
+    ]
+    result = _call_normal_resolve(profile)
+    assert "Срібний язик" in result
+    assert "Courtier L1" in result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10b. Off-by-one boundary tests for desc truncation (WARN-3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_feature_desc_exactly_120_chars_not_truncated():
+    """Edge case: desc with exactly 120 chars must NOT be truncated (len > 120 is False)."""
+    desc_120 = "Б" * 120
+    profile = _courtier_l3_profile()
+    profile["features"] = [{"name": "TestFeature", "desc": desc_120, "source": "Test"}]
+    result = _call_normal_resolve(profile)
+    # Full 120-char string must be present verbatim
+    assert desc_120 in result, "120-char desc must NOT be truncated"
+    # No ellipsis suffix appended to it
+    assert (desc_120 + "...") not in result, "120-char desc must not gain '...' suffix"
+
+
+def test_feature_desc_121_chars_is_truncated():
+    """Edge case: desc with 121 chars must be truncated to first 117 chars + '...'."""
+    desc_121 = "В" * 121
+    profile = _courtier_l3_profile()
+    profile["features"] = [{"name": "TestFeature", "desc": desc_121, "source": "Test"}]
+    result = _call_normal_resolve(profile)
+    # Truncation: desc[:117] + "..."
+    truncated_expected = "В" * 117 + "..."
+    assert truncated_expected in result, "121-char desc must be truncated to first 117 chars + '...'"
+    # Full 121-char string must NOT appear
+    assert desc_121 not in result, "Full 121-char desc must not be present after truncation"

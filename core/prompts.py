@@ -536,8 +536,23 @@ def build_normal_resolve_prompt(
 
     Replaces build_resolve_mechanics_prompt for the NORMAL pipeline branch.
     Returns a prompt whose LLM output must match the output_schema block below.
+
+    Worker output may include OPTIONAL D&D mechanics keys:
+      save_used: ability for saving throw (overrides skill_used flow)
+      save_dc: DC for the save (legal DC enum)
+      rest_type: "long"|"short"|"none" — triggers rest mechanics in engine
+
+    DC selection (added 2026-05, refined 2026-05):
+    - GATE 1 enumerates ultra-trivial actions (sensory, body movement, prosaic
+      interaction, social signals) that MUST go to DC 2 auto-success (no roll).
+    - GATE 3 anchor points: DC 2 (ultra-trivial), DC 5 (trivial-with-flavor),
+      DC 10 (easy), DC 12+ (justified obstacle).
+    - LEGAL_DCS = (2, 5, 10, 12, 15, 17, 20, 22); AUTO_SUCCESS_MAX_DC = 2.
+    Goal: prevent LLM from over-DCing prosaic actions.
     """
-    profile_str = json.dumps(profile, ensure_ascii=False)
+    # Exclude non-serialisable Feature dataclass objects from JSON dump
+    profile_for_json = {k: v for k, v in profile.items() if k != "features"}
+    profile_str = json.dumps(profile_for_json, ensure_ascii=False)
     clocks_str = json.dumps(clocks_info or {}, ensure_ascii=False)
     rep_str = json.dumps(npc_reputation_context or {}, ensure_ascii=False)
     last_turn_str = last_turn_summary or "Game start"
@@ -563,6 +578,54 @@ def build_normal_resolve_prompt(
     conditions = profile.get("conditions", [])
     cond_line = ", ".join(c.get("name", str(c)) for c in conditions) if conditions else "none"
 
+    # Build equipped_weapon block — only when structured weapon data is present
+    equipped_weapon = profile.get("equipped_weapon")
+    if equipped_weapon and isinstance(equipped_weapon, dict):
+        props = equipped_weapon.get("properties", [])
+        props_str = ", ".join(props) if props else "немає"
+        equipped_weapon_block = (
+            f"\nEquipped weapon: {equipped_weapon.get('name', '?')} "
+            f"(damage: {equipped_weapon.get('damage_dice', '?')} "
+            f"{equipped_weapon.get('damage_type', '')}, "
+            f"properties: {props_str})"
+        )
+    else:
+        equipped_weapon_block = ""
+
+    # Build class features block — only when features are present
+    raw_features = profile.get("features", [])
+    if raw_features:
+        features_lines = []
+        for feat in raw_features:
+            # Support both dataclass Feature objects and plain dicts
+            name = feat.name if hasattr(feat, "name") else feat.get("name", "?")
+            desc = feat.desc if hasattr(feat, "desc") else feat.get("desc", "")
+            source = feat.source if hasattr(feat, "source") else feat.get("source", "")
+            # Truncate description to ≤120 chars to keep prompt lean
+            if len(desc) > 120:
+                desc = desc[:117] + "..."
+            features_lines.append(f"  • {name} [{source}] — {desc}")
+        features_block = "\n<class_features>\nActive class/heritage features:\n" + "\n".join(features_lines) + "\n</class_features>"
+        gate0_block = """
+[GATE 0 — CLASS FEATURES?]
+Scan <class_features> block above. For each feature ask:
+  A) Is this a PASSIVE feature with a condition (e.g. "Advantage on CHA vs lower-status targets")?
+     → Check if the action + target NPC meet that condition RIGHT NOW.
+     → If YES → set advantage_reason="<feature_name>: <one-sentence reason condition is met>"
+  B) Is this an ACTIVE feature (e.g. "1/day: reroll Persuasion after seeing result")?
+     → Check if player's user_input EXPLICITLY references using this feature
+       (e.g. "використовую Срібний язик", "активую здібність", "перекидаю через здібність").
+     → If YES → set advantage_reason="<feature_name>: player explicitly requested activation"
+     NOTE: Daily usage tracking is NOT in the system yet. Trust the player's narrative.
+           If they say they use it, honour it. A tracker will be added later.
+  C) If NO features are active/triggered → proceed normally (advantage_reason stays "").
+IMPORTANT: Never fabricate features not listed above.
+
+"""
+    else:
+        features_block = ""
+        gate0_block = ""
+
     return f"""<system>
 You are the System Engine (Worker) for a Grimdark RPG set in Westeros/Essos (298 AC).
 Your ONLY job: resolve the mechanical outcome of the player's action using D&D 5e rules adapted for ASoIaF.
@@ -577,9 +640,9 @@ Proficiency bonus: +{prof}
 Skill proficiencies: {skill_profs}
 Active conditions: {cond_line}
 Current location: {loc_str}
-Current scene: {scene_str}
+Current scene: {scene_str}{equipped_weapon_block}
 </player_state>
-
+{features_block}
 <scene_data>
 NPCs present (JSON array):
 {npc_array_str}
@@ -591,19 +654,73 @@ Last turn: {last_turn_str}
 <thinking_directives>
 MANDATORY GATE CHECKLIST — answer every gate before writing JSON.
 Write reasoning in "skill_check_reasoning", "difficulty_reasoning", "gold_reasoning".
+{gate0_block}
+[GATE 1 — FREE ACTION / TRIVIAL ACTION?]
+Does this action belong to ANY of the following categories AND there is NO context of resistance, danger, or deliberate risk?
 
-[GATE 1 — FREE ACTION?]
-Greeting, casual talk, examining object, drawing weapon without combat, waiting, moving within same scene?
-→ YES → ability_used="None", skill_used="None", difficulty=5, combat_imminent=false. Jump to GATE 4.
-→ NO  → GATE 2.
+  A) SENSORY / OBSERVATION (no skill needed):
+     роздивляюся, дивлюсь, оглядаю, споглядаю; слухаю, прислухаюсь; нюхаю, відчуваю запах;
+     дивлюся на [об'єкт/місце/людину]; вдивляюсь, роздивляюсь, поглядаю навколо.
+
+  B) BODY MOVEMENT in a safe context:
+     встаю, сідаю, лягаю, нахиляюсь, обертаюсь, повертаюсь;
+     іду / йду / ступаю / прохожу (до місця без перешкод);
+     чекаю, стою, залишаюся на місці.
+
+  C) TRIVIAL OBJECT INTERACTION (no resistance):
+     беру [предмет] зі столу / з полиці / з відкритого місця / з простягнутої руки;
+     кладу, ставлю, опускаю, відкладаю;
+     відкриваю [незачинені / незамкнені двері, шафку, скриньку без замка];
+     закриваю, зачиняю (без замка);
+     наливаю, виливаю; їм, п'ю (звичайну, неотруєну їжу/пиття).
+
+  D) TRIVIAL SOCIAL SIGNALS (no persuasion attempt):
+     посміхаюсь, киваю, хитаю головою, дивлюсь у вічі, відводжу погляд;
+     вітаюсь, прощаюсь; кажу "так" / "ні" / "добре" / "зрозумів";
+     мовчу, нічого не кажу; вклоняюсь.
+
+→ BELONGS TO A/B/C/D AND NO RESISTANCE/DANGER → ОБОВ'ЯЗКОВО:
+     ability_used="None", skill_used="None", difficulty=2, combat_imminent=false. Jump to GATE 4.
+     DC 2 = ultra-trivial AUTO-SUCCESS — engine пропускає кидок кубика повністю.
+→ DOES NOT BELONG or RESISTANCE/DANGER EXISTS → GATE 2.
+
+[GATE W — WEAPON PROPERTIES?]
+If <player_state> contains "Equipped weapon:" line:
+  • "finesse" in properties → melee attack MAY use DEX instead of STR (use whichever is higher).
+  • "thrown" or "ranged" in properties → ranged/thrown attack uses DEX.
+  • Otherwise melee attacks use STR.
+If no "Equipped weapon:" line — use default STR for melee, DEX for ranged.
 
 [GATE 2 — ABILITY + SKILL?]
 Pick ABILITY: STR(lift/melee) DEX(stealth/ranged) CON(endure) INT(lore/investigate) WIS(sense/track/heal) CHA(persuade/deceive/intimidate).
 Pick SKILL (optional, from <output_schema> list). RULE: skill_used≠"None" → ability_used must be non-None.
-No real resistance → ability_used="None", skill_used="None", difficulty=5.
+No real resistance → ability_used="None", skill_used="None", difficulty=2.
 
 [GATE 3 — DC — STRICT ENUM {_LEGAL_DCS_NORMAL}]
-5=trivial | 10=easy | 12=moderate | 15=hard | 17=very hard | 20=epic | 22=legendary (max).
+Anchor points (use the LOWEST DC that honestly fits the action):
+  DC 2  → ULTRA-TRIVIAL: просаїчні дії без жодного опору чи навичкового аспекту
+           (взяти яблуко зі столу, посміхнутися, роздивитися, кивнути, сісти).
+           AUTO-SUCCESS — engine не виконує кидок кубика.
+  DC 5  → trivial-with-flavor: дія яку 90%+ дорослих успішно виконають, але з дрібним
+           ситуативним фактором (відкрити незачинені двері з неприємним скрипом у тиші,
+           наповнити келих повний по краю, підняти меч зі слизької підлоги поспіхом).
+           Викликає кидок — але ~90% шансу успіху.
+  DC 10 → easy: дія яку успішно виконає proficient L1 у 95% часу
+           (відкрити простий замок маючи відмичку, переконати дружнього NPC, помітити очевидну деталь).
+  DC 12 → moderate: виклик для невправленого, але проста для тренованого
+           (заспокоїти роздратованого NPC, помітити приховану деталь).
+  DC 15 → hard: реальний виклик для proficient L1 (~40% без advantage).
+  DC 17 → very hard: high-stakes, рідко для L1.
+  DC 20 → epic: межа людських можливостей.
+  DC 22 → legendary (max у тестовому релізі).
+
+BIAS RULE: Якщо ти обираєш DC ≥ 12 — СТОП. Запитай себе:
+  "Чи є реальний опір, перешкода або ризик у цій дії?"
+  → НІ → знизь до DC 10 або DC 5.
+  → ТАК → обґрунтуй у difficulty_reasoning ≥15 слів, що саме чинить опір.
+
+ДЕФОЛТ: ULTRA-TRIVIAL → DC 2, trivial-with-flavor → DC 5, easy → DC 10. Більший DC лише якщо є явна причина.
+
 Rep modifier: score≥60→-2DC; score≤-60→+5DC. Escalation: request→12-15; threat→17-20; assassination→20-22.
 
 [GATE 4 — GOLD]
@@ -629,6 +746,26 @@ hp_damage_dice PURPOSE — PLAYER SELF-DAMAGE ONLY:
 
 [GATE 7 — TRAINING?]
 Explicit TRAIN/PRACTICE/STUDY intent? YES→action_type="training". Incidental skill use→"standard".
+
+[GATE S — SAVING THROW?]
+Does this action describe an EXTERNAL EFFECT being applied TO the player that requires a resistance roll?
+(Poison, charm, fear, paralysis, magical illusion, nausea, disease, trap trigger via passive)
+  → YES → set save_used=<ability> + save_dc=<DC from enum>; set ability_used="None", skill_used="None".
+         difficulty=5 (auto-success; actual resolution is via saving_throw() in engine).
+         hp_damage_dice="none" — damage is applied AFTER save resolution by engine.
+  → NO  → save_used="None", save_dc=5 (ignored by engine when save_used="None").
+RULE: save_used applies ONLY when the player is the target of an external effect.
+Active player actions (attack, persuade, sneak) use ability_used + skill_used, NOT save_used.
+
+[GATE R — REST?]
+Does the player's action describe resting or sleeping?
+  → LONG REST (8+ hours, sleeping until morning, spending the night, full overnight):
+       rest_type="long", ability_used="None", skill_used="None", difficulty=5.
+       updates.minutes_passed=480.
+  → SHORT REST (1 hour, catching breath, sitting to recover, brief pause):
+       rest_type="short", ability_used="None", skill_used="None", difficulty=5.
+       updates.minutes_passed=60.
+  → NEITHER → rest_type="none".
 </thinking_directives>
 
 <antiexamples>
@@ -660,6 +797,98 @@ EXAMPLE B — Environmental self-damage (valid hp_damage_dice use):
   combat_imminent: false
   hp_damage_dice: "1d6"          ← VALID: environmental damage to player, not NPC attack
   verdict_text: "Стрибок з висоти — гравець ризикує отримати травму."
+
+EXAMPLE C — Passive feature triggers advantage (Шляхетне поводження):
+  class_features: [Шляхетне поводження [Courtier L1] — Перевага на CHA-перевірки проти осіб рівного або нижчого соціального статусу.]
+  player_action: "Я переконую слугу Маріка показати лист"
+  target NPC: Марік (слуга — нижчий соціальний статус)
+  GATE 0: Шляхетне поводження — passive. Condition: target is lower-status. Марік is a servant → condition MET.
+  ability_used: "CHA"
+  skill_used: "Persuasion"
+  difficulty: 12
+  advantage_reason: "Шляхетне поводження: target is servant (lower social status) — condition met"
+  disadvantage_reason: ""
+  verdict_text: "Гравець переконує слугу з природною шляхетною владністю."
+
+EXAMPLE D — Active feature triggers advantage (Срібний язик, player requests it):
+  class_features: [Срібний язик [Courtier L1] — 1/day: перекидаєш Переконання або Обман після бачення результату.]
+  player_action: "Я використовую Срібний язик і перекидаю спробу збрехати"
+  GATE 0: Срібний язик — active (1/day). Player explicitly says "використовую Срібний язик" → activation confirmed.
+  ability_used: "CHA"
+  skill_used: "Deception"
+  difficulty: 15
+  advantage_reason: "Срібний язик: player explicitly requested activation"
+  disadvantage_reason: ""
+  verdict_text: "Гравець пускає в хід дар срібного язика, перекидаючи брехню."
+
+EXAMPLE F — Saving throw (external effect on player):
+  player_action: "Випиваю келих вина яке мені подав підозрілий торговець"
+  GATE S: YES — external poison effect targeting player; CON save required.
+  save_used: "CON"
+  save_dc: 12
+  ability_used: "None"
+  skill_used: "None"
+  difficulty: 5
+  combat_imminent: false
+  hp_damage_dice: "none"
+  rest_type: "none"
+  verdict_text: "Гравець п'є потенційно отруєне вино — потрібен рятівний кидок CON."
+
+EXAMPLE G — Long rest:
+  player_action: "Лягаю спати до ранку у своїй кімнаті"
+  GATE R: YES — long rest (sleeping until morning).
+  rest_type: "long"
+  save_used: "None"
+  save_dc: 5
+  ability_used: "None"
+  skill_used: "None"
+  difficulty: 5
+  combat_imminent: false
+  hp_damage_dice: "none"
+  verdict_text: "Гравець лягає спати — повний відпочинок до ранку."
+  updates.minutes_passed: 480
+
+EXAMPLE H — Trivial object interaction (GATE 1 → DC 2):
+  player_action: "Я беру келих вина зі столу"
+  GATE 1: free action — category C (trivial object interaction, no resistance, item on open table) → DC 2 ultra-trivial auto-success.
+  ability_used: "None"
+  skill_used: "None"
+  difficulty: 2
+  combat_imminent: false
+  hp_damage_dice: "none"
+  verdict_text: "Гравець бере келих вина. Тривіально."
+
+EXAMPLE I — Trivial social signal + safe movement (GATE 1 → DC 2):
+  player_action: "Я киваю слузі і йду до виходу"
+  GATE 1: free action — category D (social signal: кивок) + category B (safe movement to exit, no obstacle) → DC 2 ultra-trivial.
+  ability_used: "None"
+  skill_used: "None"
+  difficulty: 2
+  combat_imminent: false
+  verdict_text: "Гравець киває слузі й прямує до виходу. Тривіально."
+
+EXAMPLE J — NOT trivial (opposed force exists → GATE 1 fails):
+  player_action: "Я беру келих з рук охоронця короля"
+  GATE 1: NOT free action — taking from someone who may actively resist (охоронець king's guard, armed, on duty) → resistance EXISTS → proceed to GATE 2.
+  GATE 3: Opposed grab from a trained guard. BIAS CHECK: is there real resistance? YES — trained guard will not surrender item willingly. DC 12 justified.
+  ability_used: "DEX"
+  skill_used: "Sleight of Hand"
+  difficulty: 12
+  combat_imminent: false
+  verdict_text: "Гравець намагається непомітно взяти келих з рук охоронця — ризикована затія."
+
+EXAMPLE K — DC 2 vs DC 5 boundary (risk factor shifts tier):
+  player_action: "Я підіймаю меч що лежить на підлозі"
+  GATE 1: free action — category C (picking up a non-grabbed item, no holder, no resistance).
+          BUT: context matters — risk factor may shift tier.
+  GATE 3:
+    → Якщо немає risk factor (стабільна підлога, час є, рука ціла) → DC 2 (ultra-trivial pickup, AUTO-SUCCESS).
+    → Якщо є дрібний modifier (слизька підлога / поспіх / поранена рука / тремтіння) → DC 5 (trivial-with-flavor, викликає кидок).
+  ability_used: "None"
+  skill_used: "None"
+  difficulty: 2  # default no-risk pickup; підвищуй до 5 тільки при явному risk factor
+  combat_imminent: false
+  verdict_text: "Гравець піднімає меч з підлоги. Без ускладнень."
 </few_shot_examples>
 
 <location_rules>
@@ -708,6 +937,11 @@ updates (object):
   clocks_impact   : object (e.g. {{"Scene_Tension": 1}} or {{"Scene_Tension": "clear"}})
   condition_apply : array of {{"name": string, "duration": int (rounds), "target": "player"|npc_name}}
   condition_remove: array of {{"name": string, "target": "player"|npc_name}}
+
+OPTIONAL KEYS (include when relevant; engine uses safe defaults when absent):
+save_used  : {_LEGAL_ABILITIES} — ability for saving throw (GATE S); "None" if no save needed (default: "None")
+save_dc    : one integer from {{{_LEGAL_DCS_NORMAL}}} — DC for the save; required when save_used != "None" (default: 5)
+rest_type  : "none" | "short" | "long" — GATE R verdict (default: "none")
 </output_schema>
 
 OUTPUT STRICTLY VALID JSON. NO MARKDOWN. NO BACKTICKS:
@@ -727,6 +961,9 @@ OUTPUT STRICTLY VALID JSON. NO MARKDOWN. NO BACKTICKS:
     "reputation_reasoning": "Дія не спрямована на конкретного NPC, тому дельта = 0.",
     "reputation_delta": 0,
     "reputation_target_npc": "",
+    "save_used": "None",
+    "save_dc": 5,
+    "rest_type": "none",
     "updates": {{
         "minutes_passed": 5,
         "location_impact": "none",
@@ -1566,6 +1803,22 @@ def build_normal_resolve_schema():
             "reputation_delta": _int,
             "reputation_target_npc": _str,
             "updates": updates_schema,
+            # Optional D&D mechanics keys (GATE S + GATE R).
+            # Not in required[] — engine uses safe defaults when absent.
+            "save_used": gtypes.Schema(
+                type=gtypes.Type.STRING,
+                enum=["STR", "DEX", "CON", "INT", "WIS", "CHA", "None"],
+                description="Ability for saving throw (GATE S). 'None' = no save.",
+            ),
+            "save_dc": gtypes.Schema(
+                type=gtypes.Type.INTEGER,
+                description="DC for the saving throw. Must be from LEGAL_DCS enum. Ignored when save_used='None'.",
+            ),
+            "rest_type": gtypes.Schema(
+                type=gtypes.Type.STRING,
+                enum=["none", "short", "long"],
+                description="Rest mechanics trigger (GATE R). 'none' = regular action.",
+            ),
         },
         required=[
             "skill_check_reasoning", "difficulty_reasoning", "gold_reasoning",

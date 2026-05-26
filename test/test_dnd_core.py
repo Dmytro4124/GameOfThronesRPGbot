@@ -128,8 +128,16 @@ def test_clamp_dc_legal_values_returned_unchanged(value):
     assert clamp_dc(value) == value
 
 
-def test_clamp_dc_below_minimum_returns_five():
-    assert clamp_dc(3) == 5
+def test_clamp_dc_below_minimum_returns_two():
+    # After DC=2 added to LEGAL_DCS, 3 clamps to nearest lower legal = 2
+    assert clamp_dc(3) == 2
+
+
+def test_clamp_dc_zero_or_negative_returns_two():
+    # Values <= 2 clamp to LEGAL_DCS[0] = 2
+    assert clamp_dc(1) == 2
+    assert clamp_dc(0) == 2
+    assert clamp_dc(-5) == 2
 
 
 def test_clamp_dc_above_maximum_returns_twentytwo():

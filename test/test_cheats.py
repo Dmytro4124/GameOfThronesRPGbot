@@ -603,3 +603,262 @@ class TestCmdSetAbility:
         with get_p, save_p:
             _run(_run_max())
         assert profile["ability_scores"]["WIS"] == 20
+
+
+# ---------------------------------------------------------------------------
+# /additem  (structured inventory)
+# ---------------------------------------------------------------------------
+
+class TestCmdAddItem:
+    def test_additem_appends_new_item_to_structured_inventory(self):
+        """/additem Зілля on structured inventory → new entry added."""
+        profile = _dnd_profile(**{"Інвентар": [{"name": "Рапіра", "quantity": 1}]})
+        msg = _make_message("/additem Зілля")
+        get_p, save_p = _mock_get_save(profile)
+
+        async def _coro():
+            from core.cheats import cmd_additem
+            await cmd_additem(msg, MagicMock(), 42, ["Зілля"])
+
+        with get_p, save_p:
+            _run(_coro())
+
+        from core.inventory import parse_inventory
+        inv = parse_inventory(profile["Інвентар"])
+        names = [i["name"] for i in inv]
+        assert "Зілля" in names, f"Expected 'Зілля' in inventory. Got: {names}"
+        assert "Рапіра" in names, "Pre-existing item must not be removed"
+
+    def test_additem_with_quantity_parses_x_format(self):
+        """/additem Лист x3 → item with quantity=3 added."""
+        profile = _dnd_profile(**{"Інвентар": []})
+        msg = _make_message("/additem Лист x3")
+        get_p, save_p = _mock_get_save(profile)
+
+        async def _coro():
+            from core.cheats import cmd_additem
+            await cmd_additem(msg, MagicMock(), 42, ["Лист", "x3"])
+
+        with get_p, save_p:
+            _run(_coro())
+
+        from core.inventory import parse_inventory
+        inv = parse_inventory(profile["Інвентар"])
+        letter = next((i for i in inv if i["name"] == "Лист"), None)
+        assert letter is not None, "Item 'Лист' must be present after /additem 'Лист x3'"
+        assert letter["quantity"] == 3, f"Expected quantity=3. Got: {letter['quantity']}"
+
+    def test_additem_increments_existing_item(self):
+        """/additem Лист x3 when 'Лист x2' already exists → quantity becomes 5."""
+        profile = _dnd_profile(**{"Інвентар": [{"name": "Лист", "quantity": 2}]})
+        msg = _make_message("/additem Лист x3")
+        get_p, save_p = _mock_get_save(profile)
+
+        async def _coro():
+            from core.cheats import cmd_additem
+            await cmd_additem(msg, MagicMock(), 42, ["Лист", "x3"])
+
+        with get_p, save_p:
+            _run(_coro())
+
+        from core.inventory import parse_inventory
+        inv = parse_inventory(profile["Інвентар"])
+        letter = next((i for i in inv if i["name"] == "Лист"), None)
+        assert letter is not None
+        assert letter["quantity"] == 5, f"Expected quantity=5 (2+3). Got: {letter['quantity']}"
+
+    def test_additem_on_legacy_string_inventory_migrates(self):
+        """/additem on old CSV-string profile auto-migrates and appends correctly."""
+        profile = _dnd_profile(**{"Інвентар": "Меч, Щит"})
+        msg = _make_message("/additem Зілля")
+        get_p, save_p = _mock_get_save(profile)
+
+        async def _coro():
+            from core.cheats import cmd_additem
+            await cmd_additem(msg, MagicMock(), 42, ["Зілля"])
+
+        with get_p, save_p:
+            _run(_coro())
+
+        from core.inventory import parse_inventory
+        inv = parse_inventory(profile["Інвентар"])
+        names = [i["name"] for i in inv]
+        assert "Зілля" in names
+        assert "Меч" in names
+        assert "Щит" in names
+
+    def test_additem_profile_stored_as_list_dict(self):
+        """/additem must leave profile['Інвентар'] as list[dict], not string."""
+        profile = _dnd_profile(**{"Інвентар": []})
+        msg = _make_message("/additem Зілля")
+        get_p, save_p = _mock_get_save(profile)
+
+        async def _coro():
+            from core.cheats import cmd_additem
+            await cmd_additem(msg, MagicMock(), 42, ["Зілля"])
+
+        with get_p, save_p:
+            _run(_coro())
+
+        assert isinstance(profile["Інвентар"], list), (
+            f"profile['Інвентар'] must be list, got {type(profile['Інвентар'])}"
+        )
+        assert all(isinstance(i, dict) for i in profile["Інвентар"])
+
+
+# ---------------------------------------------------------------------------
+# /delitem  (structured inventory)
+# ---------------------------------------------------------------------------
+
+class TestCmdDelItem:
+    def test_delitem_removes_one_by_default(self):
+        """/delitem Лист when quantity=3 → quantity becomes 2."""
+        profile = _dnd_profile(**{"Інвентар": [{"name": "Лист", "quantity": 3}]})
+        msg = _make_message("/delitem Лист")
+        get_p, save_p = _mock_get_save(profile)
+
+        async def _coro():
+            from core.cheats import cmd_delitem
+            await cmd_delitem(msg, MagicMock(), 42, ["Лист"])
+
+        with patch("core.cheats.find_best_match", return_value="Лист"):
+            with get_p, save_p:
+                _run(_coro())
+
+        from core.inventory import parse_inventory
+        inv = parse_inventory(profile["Інвентар"])
+        letter = next((i for i in inv if i["name"] == "Лист"), None)
+        assert letter is not None, "Item must still exist (qty 3→2)"
+        assert letter["quantity"] == 2, f"Expected quantity=2. Got: {letter['quantity']}"
+
+    def test_delitem_with_quantity_removes_specified_amount(self):
+        """/delitem Лист x2 when quantity=3 → quantity becomes 1."""
+        profile = _dnd_profile(**{"Інвентар": [{"name": "Лист", "quantity": 3}]})
+        msg = _make_message("/delitem Лист x2")
+        get_p, save_p = _mock_get_save(profile)
+
+        async def _coro():
+            from core.cheats import cmd_delitem
+            await cmd_delitem(msg, MagicMock(), 42, ["Лист", "x2"])
+
+        with patch("core.cheats.find_best_match", return_value="Лист"):
+            with get_p, save_p:
+                _run(_coro())
+
+        from core.inventory import parse_inventory
+        inv = parse_inventory(profile["Інвентар"])
+        letter = next((i for i in inv if i["name"] == "Лист"), None)
+        assert letter is not None
+        assert letter["quantity"] == 1
+
+    def test_delitem_removes_entry_when_quantity_reaches_zero(self):
+        """/delitem Лист when quantity=1 → entry fully removed."""
+        profile = _dnd_profile(**{"Інвентар": [{"name": "Лист", "quantity": 1}]})
+        msg = _make_message("/delitem Лист")
+        get_p, save_p = _mock_get_save(profile)
+
+        async def _coro():
+            from core.cheats import cmd_delitem
+            await cmd_delitem(msg, MagicMock(), 42, ["Лист"])
+
+        with patch("core.cheats.find_best_match", return_value="Лист"):
+            with get_p, save_p:
+                _run(_coro())
+
+        from core.inventory import parse_inventory
+        inv = parse_inventory(profile["Інвентар"])
+        names = [i["name"] for i in inv]
+        assert "Лист" not in names
+
+    def test_delitem_not_found_reports_error(self):
+        """/delitem when item absent → error message, inventory unchanged."""
+        profile = _dnd_profile(**{"Інвентар": [{"name": "Рапіра", "quantity": 1}]})
+        msg = _make_message("/delitem Зілля")
+        get_p, save_p = _mock_get_save(profile)
+
+        async def _coro():
+            from core.cheats import cmd_delitem
+            await cmd_delitem(msg, MagicMock(), 42, ["Зілля"])
+
+        # find_best_match returns None → "not found" path
+        with patch("core.cheats.find_best_match", return_value=None):
+            with get_p, save_p:
+                _run(_coro())
+
+        from core.inventory import parse_inventory
+        inv = parse_inventory(profile["Інвентар"])
+        assert len(inv) == 1, "Inventory must be unchanged when item not found"
+        msg.answer.assert_called()
+        assert any("не знайдено" in str(c) for c in msg.answer.call_args_list)
+
+    def test_delitem_profile_stored_as_list_dict(self):
+        """/delitem must leave profile['Інвентар'] as list[dict]."""
+        profile = _dnd_profile(**{"Інвентар": [{"name": "Лист", "quantity": 3}]})
+        msg = _make_message("/delitem Лист")
+        get_p, save_p = _mock_get_save(profile)
+
+        async def _coro():
+            from core.cheats import cmd_delitem
+            await cmd_delitem(msg, MagicMock(), 42, ["Лист"])
+
+        with patch("core.cheats.find_best_match", return_value="Лист"):
+            with get_p, save_p:
+                _run(_coro())
+
+        assert isinstance(profile["Інвентар"], list)
+
+
+# ---------------------------------------------------------------------------
+# /clearinv  (structured inventory)
+# ---------------------------------------------------------------------------
+
+class TestCmdClearInv:
+    def test_clearinv_resets_to_empty_list(self):
+        """/clearinv must set profile['Інвентар'] = [] (not empty string)."""
+        profile = _dnd_profile(**{"Інвентар": [{"name": "Рапіра", "quantity": 1}]})
+        msg = _make_message("/clearinv")
+        get_p, save_p = _mock_get_save(profile)
+
+        async def _coro():
+            from core.cheats import cmd_clearinv
+            await cmd_clearinv(msg, MagicMock(), 42, [])
+
+        with get_p, save_p:
+            _run(_coro())
+
+        assert profile["Інвентар"] == [], (
+            f"Expected [], got {profile['Інвентар']!r}"
+        )
+
+    def test_clearinv_result_is_list_not_string(self):
+        """/clearinv must not leave a string value (regression vs old '' pattern)."""
+        profile = _dnd_profile(**{"Інвентар": "Меч, Щит"})
+        msg = _make_message("/clearinv")
+        get_p, save_p = _mock_get_save(profile)
+
+        async def _coro():
+            from core.cheats import cmd_clearinv
+            await cmd_clearinv(msg, MagicMock(), 42, [])
+
+        with get_p, save_p:
+            _run(_coro())
+
+        assert not isinstance(profile["Інвентар"], str), (
+            "profile['Інвентар'] must be list after /clearinv, not string"
+        )
+        assert profile["Інвентар"] == []
+
+    def test_clearinv_on_already_empty_inventory(self):
+        """/clearinv on empty inventory is idempotent."""
+        profile = _dnd_profile(**{"Інвентар": []})
+        msg = _make_message("/clearinv")
+        get_p, save_p = _mock_get_save(profile)
+
+        async def _coro():
+            from core.cheats import cmd_clearinv
+            await cmd_clearinv(msg, MagicMock(), 42, [])
+
+        with get_p, save_p:
+            _run(_coro())
+
+        assert profile["Інвентар"] == []

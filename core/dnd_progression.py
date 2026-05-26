@@ -4,11 +4,14 @@ Standalone module — no engine/prompts/mechanics/world imports.
 Imports only from core.dnd_* and stdlib.
 """
 
+import logging
 import random
 from dataclasses import dataclass, field
 
 from core.dnd_core import ability_modifier, proficiency_bonus
-from core.dnd_classes import Feature, get_class, get_class_features_at_level
+from core.dnd_classes import Feature, get_class, get_class_features_at_level, GOT_CLASSES
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # XP table — D&D 5e PHB p.15 "Character Advancement"
@@ -297,6 +300,136 @@ def apply_asi(profile: dict, choices: dict[str, int]) -> dict:
     profile["asi_pending"] = False
 
     return profile
+
+
+def apply_pending_levelups(
+    profile: dict,
+    level_before: int,
+    levels_gained: int,
+    class_name: str = "",
+) -> list[str]:
+    """Apply level_up() one step at a time after award_xp() has set new level.
+
+    Caller MUST call award_xp() before this function — award_xp() sets
+    profile['level'] = level_after.  This function temporarily resets
+    profile['level'] to level_before and then calls level_up() for each
+    gained level so that HP, features, proficiency bonus, and ASI are all
+    applied correctly one level at a time.
+
+    Args:
+        profile:      Character profile dict (mutated in-place).
+        level_before: Level before award_xp() was called.
+        levels_gained: Number of levels crossed (level_after - level_before).
+        class_name:   GoT class name (e.g. "Knight"). Falls back to "Knight"
+                      if empty or unknown.
+
+    Returns:
+        List of human-readable log strings describing HP gains, proficiency
+        changes, new features, and ASI decisions.  Never raises — errors are
+        captured into log strings so callers do not need try/except.
+
+    Invariants preserved:
+        - ability_scores capped at MAX_ABILITY_SCORE (20) per D&D PHB.
+        - HP minimum gain of 1 per level (enforced inside level_up()).
+        - ASI auto-distributed to class primary_abilities; redistributed to
+          other abilities when primaries are at cap.
+        - profile['level'] ends at level_before + levels_gained on success,
+          or at the last successfully processed level on ValueError (max level).
+    """
+    if levels_gained <= 0:
+        return []
+
+    logs: list[str] = []
+
+    # Resolve and validate class name with fallback
+    if not class_name or class_name not in GOT_CLASSES:
+        logger.warning(
+            "[DND_PROGRESSION] Unknown or missing class %r — "
+            "falling back to 'Knight' for apply_pending_levelups.",
+            class_name,
+        )
+        class_name = "Knight"
+
+    # award_xp() already set profile['level'] = level_after.
+    # level_up() increments profile['level'] += 1 per call, so we must
+    # reset to level_before first and walk up one level at a time.
+    profile["level"] = level_before
+
+    for _ in range(levels_gained):
+        try:
+            level_result = level_up(profile, class_name, hp_roll=None)
+        except ValueError as exc:
+            # Already at MAX_LEVEL — level_up() raises ValueError.
+            logs.append(f"Max level reached: {exc}")
+            break
+
+        logs.append(
+            f"LEVEL {profile['level'] - 1} -> {profile['level']}! "
+            f"HP +{level_result.hp_gained}"
+        )
+
+        if level_result.proficiency_bonus_changed:
+            logs.append(
+                f"Proficiency bonus -> +{profile.get('proficiency_bonus', '?')}"
+            )
+
+        for feat in level_result.new_features:
+            logs.append(f"New feature: {feat.name} -- {feat.desc[:80]}...")
+
+        # Auto-ASI: distribute points to primary_abilities at L4/8/12/16/19
+        if level_result.asi_pending:
+            ability_scores = profile.get("ability_scores")
+            if not ability_scores:
+                logs.append("ASI skipped: no ability_scores in profile.")
+            else:
+                primary = GOT_CLASSES[class_name].primary_abilities
+                if not primary:
+                    primary = ["STR"]
+
+                # Strategy: split +1/+1 across two primary abilities; +2 if only one
+                if len(primary) >= 2:
+                    asi_choices: dict[str, int] = {primary[0]: 1, primary[1]: 1}
+                else:
+                    asi_choices = {primary[0]: 2}
+
+                # Clamp: no ability may exceed MAX_ABILITY_SCORE (20)
+                for ab, delta in list(asi_choices.items()):
+                    current = ability_scores.get(ab, 10)
+                    if current + delta > MAX_ABILITY_SCORE:
+                        asi_choices[ab] = max(0, MAX_ABILITY_SCORE - current)
+
+                # If sum < 2 after clamping, redistribute to other abilities
+                if sum(asi_choices.values()) < 2:
+                    for ab in ["CON", "DEX", "STR", "WIS", "INT", "CHA"]:
+                        if sum(asi_choices.values()) >= 2:
+                            break
+                        current = ability_scores.get(ab, 10)
+                        if current < MAX_ABILITY_SCORE:
+                            needed = 2 - sum(asi_choices.values())
+                            asi_choices[ab] = asi_choices.get(ab, 0) + min(
+                                needed, MAX_ABILITY_SCORE - current
+                            )
+
+                # Remove zero-valued entries to keep choices clean
+                asi_choices = {ab: v for ab, v in asi_choices.items() if v > 0}
+
+                total_asi_points = sum(asi_choices.values())
+                if total_asi_points == 2:
+                    try:
+                        apply_asi(profile, asi_choices)
+                        logs.append(f"Ability Score Improvement: {asi_choices}")
+                    except ValueError as exc:
+                        logger.warning(
+                            "[DND_PROGRESSION] apply_asi failed unexpectedly: %s", exc
+                        )
+                        logs.append(f"ASI pending (apply_asi error: {exc})")
+                else:
+                    # All primary abilities at 20/20
+                    logs.append(
+                        "ASI pending (all abilities at cap 20/20) -- skipped."
+                    )
+
+    return logs
 
 
 def xp_for_encounter_difficulty(party_level: int, difficulty: str = "medium") -> int:
