@@ -48,12 +48,12 @@ def _make_bot() -> MagicMock:
 
 def test_format_player_map_known_location_with_current_scene():
     """
-    Ланніспорт має 4 категорії: hub, semi_public, labor, military.
+    Ланніспорт має 5 категорій: hub, semi_public, private, labor, military.
     format_player_map повинна:
     - містити заголовок "🗺️ *Ланніспорт*"
     - містити "📍 Ви тут: _Головна Пристань_" (поточна сцена)
     - містити "Головна Пристань ←" (маркер поточної сцени)
-    - містити назви всіх наявних категорій: hub, semi_public, labor, military
+    - містити назви наявних категорій: hub, semi_public, labor, military
     - НЕ містити категорію "sacred" ("Священні"), якої нема у Ланніспорті
     """
     from core.world_constants import format_player_map

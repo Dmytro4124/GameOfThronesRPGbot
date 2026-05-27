@@ -862,3 +862,122 @@ class TestCmdClearInv:
             _run(_coro())
 
         assert profile["Інвентар"] == []
+
+
+# ---------------------------------------------------------------------------
+# /debugmode  (admin-only pipeline trace toggle)
+# ---------------------------------------------------------------------------
+
+class TestCmdDebugMode:
+    """Tests for cmd_debugmode: admin-only toggle for full pipeline trace."""
+
+    def setup_method(self):
+        """Ensure DEBUG_USERS is clean before each test."""
+        import importlib
+        import core.cheats as _cheats
+        _cheats.DEBUG_USERS.clear()
+
+    def teardown_method(self):
+        """Clean up DEBUG_USERS after each test."""
+        import core.cheats as _cheats
+        _cheats.DEBUG_USERS.clear()
+
+    def test_non_admin_receives_refusal(self):
+        """Non-admin chat_id must receive refusal and NOT be added to DEBUG_USERS."""
+        non_admin_id = 99999999
+        msg = _make_message("/debugmode")
+
+        async def _coro():
+            from core.cheats import cmd_debugmode
+            await cmd_debugmode(msg, MagicMock(), non_admin_id, [])
+
+        with patch("core.cheats.ADMIN_TELEGRAM_IDS", [494157543, 778186089]):
+            _run(_coro())
+
+        import core.cheats as _cheats
+        assert non_admin_id not in _cheats.DEBUG_USERS, (
+            "Non-admin must not be added to DEBUG_USERS"
+        )
+        msg.answer.assert_called_once()
+        call_text = str(msg.answer.call_args_list[0])
+        assert "адмін" in call_text.lower() or "admin" in call_text.lower() or "лише" in call_text.lower(), (
+            f"Refusal message must mention admin restriction. Got: {call_text}"
+        )
+
+    def test_admin_toggle_on_adds_to_debug_users(self):
+        """Admin /debugmode when OFF must add chat_id to DEBUG_USERS."""
+        admin_id = 494157543
+        msg = _make_message("/debugmode")
+
+        async def _coro():
+            from core.cheats import cmd_debugmode
+            await cmd_debugmode(msg, MagicMock(), admin_id, [])
+
+        with patch("core.cheats.ADMIN_TELEGRAM_IDS", [admin_id]):
+            _run(_coro())
+
+        import core.cheats as _cheats
+        assert admin_id in _cheats.DEBUG_USERS, (
+            "Admin chat_id must be in DEBUG_USERS after toggle-on"
+        )
+
+    def test_admin_toggle_off_removes_from_debug_users(self):
+        """Admin /debugmode when already ON must remove chat_id from DEBUG_USERS."""
+        admin_id = 494157543
+
+        import core.cheats as _cheats
+        _cheats.DEBUG_USERS.add(admin_id)  # pre-populate: already ON
+
+        msg = _make_message("/debugmode")
+
+        async def _coro():
+            from core.cheats import cmd_debugmode
+            await cmd_debugmode(msg, MagicMock(), admin_id, [])
+
+        with patch("core.cheats.ADMIN_TELEGRAM_IDS", [admin_id]):
+            _run(_coro())
+
+        assert admin_id not in _cheats.DEBUG_USERS, (
+            "Admin chat_id must be removed from DEBUG_USERS after toggle-off"
+        )
+
+    def test_toggle_on_sends_confirmation_message(self):
+        """Toggle-on must send a confirmation message describing what will be traced."""
+        admin_id = 494157543
+        msg = _make_message("/debugmode")
+
+        async def _coro():
+            from core.cheats import cmd_debugmode
+            await cmd_debugmode(msg, MagicMock(), admin_id, [])
+
+        with patch("core.cheats.ADMIN_TELEGRAM_IDS", [admin_id]):
+            _run(_coro())
+
+        msg.answer.assert_called_once()
+        # Message must mention debug mode and pipeline
+        call_text = str(msg.answer.call_args_list[0]).lower()
+        assert "debug" in call_text or "увімкнено" in call_text, (
+            f"Toggle-on message must confirm activation. Got: {call_text}"
+        )
+
+    def test_toggle_off_sends_deactivation_message(self):
+        """Toggle-off must send a deactivation confirmation message."""
+        admin_id = 494157543
+
+        import core.cheats as _cheats
+        _cheats.DEBUG_USERS.add(admin_id)
+
+        msg = _make_message("/debugmode")
+
+        async def _coro():
+            from core.cheats import cmd_debugmode
+            await cmd_debugmode(msg, MagicMock(), admin_id, [])
+
+        with patch("core.cheats.ADMIN_TELEGRAM_IDS", [admin_id]):
+            _run(_coro())
+
+        msg.answer.assert_called_once()
+        call_text = str(msg.answer.call_args_list[0]).lower()
+        assert "вимкнено" in call_text or "debug" in call_text, (
+            f"Toggle-off message must confirm deactivation. Got: {call_text}"
+        )

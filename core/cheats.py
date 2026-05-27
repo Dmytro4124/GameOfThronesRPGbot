@@ -11,7 +11,10 @@ from database.canon_npc import _score_to_relation_text
 from core.mechanics import safe_int
 from core.inventory import parse_inventory, add_item, remove_item, _parse_one, format_inventory
 from core.world_constants import is_valid_location, get_region_for_location
-from config import GODMODE_USERS, PUPPET_USERS, EROTIC_USERS
+from config import GODMODE_USERS, PUPPET_USERS, EROTIC_USERS, ADMIN_TELEGRAM_IDS
+
+# ─── Module-level debug state (parallel to GODMODE_USERS / PUPPET_USERS) ───
+DEBUG_USERS: set = set()
 
 
 # ─────────────────────────── Helpers ────────────────────────────
@@ -698,6 +701,37 @@ async def cmd_thoughts(message, bot, chat_id, args):
         await message.answer(chunk, parse_mode=None)
 
 
+async def cmd_debugmode(message, bot, chat_id, args):
+    """Toggle full pipeline debug trace for admin users.
+
+    Usage: /debugmode
+    Admin-only (config.ADMIN_TELEGRAM_IDS).
+    When active, each game turn stores a _debug_trace dict in
+    user_sessions[chat_id]['last_debug_trace'] for pickup by handlers.py.
+    """
+    if chat_id not in ADMIN_TELEGRAM_IDS:
+        await message.answer("Команда доступна лише адмінам.")
+        return
+
+    if chat_id in DEBUG_USERS:
+        DEBUG_USERS.discard(chat_id)
+        await message.answer(
+            "Debug mode ВИМКНЕНО. Pipeline trace більше не записується."
+        )
+    else:
+        DEBUG_USERS.add(chat_id)
+        await message.answer(
+            "Debug mode УВІМКНЕНО.\n"
+            "Кожен наступний хід згенерує .txt файл з повним pipeline:\n"
+            "- Player action\n"
+            "- Censor reasoning + JSON output\n"
+            "- Worker reasoning + JSON output\n"
+            "- GM_Logic reasoning + JSON output\n"
+            "- Narrator reasoning + final text\n"
+            "- Mechanical impacts log"
+        )
+
+
 async def cmd_erotic(message, bot, chat_id, args):
     if chat_id in EROTIC_USERS:
         EROTIC_USERS.discard(chat_id)
@@ -737,6 +771,7 @@ async def handle_cheat_command(message, bot):
         "/cleanscene": cmd_cleanscene,
         "/godmode": cmd_godmode,
         "/debug": cmd_debug,
+        "/debugmode": cmd_debugmode,
         "/puppet": cmd_puppet,
         "/erotic": cmd_erotic,
         "/thoughts": cmd_thoughts,

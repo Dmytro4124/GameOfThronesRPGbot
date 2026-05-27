@@ -1,11 +1,14 @@
 # bot/handlers.py
 import asyncio
+import io
+import json
 import logging
 import random
 import time
 import traceback
+from datetime import datetime
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -717,6 +720,94 @@ async def back_to_houses_handler(call: CallbackQuery):
                                  parse_mode='Markdown')
 
 
+async def _send_debug_trace_file(bot: Bot, chat_id: int, trace: dict) -> None:
+    """Send full pipeline trace as a .txt file attachment (admin debug mode only)."""
+    lines = []
+    lines.append("=" * 70)
+    lines.append("DEBUG TRACE — Game Turn Pipeline")
+    lines.append(f"Chat ID: {trace.get('chat_id')}")
+    lines.append(f"Timestamp: {datetime.fromtimestamp(trace.get('timestamp', 0)).isoformat()}")
+    lines.append("=" * 70)
+
+    lines.append("\n## 1. PLAYER ACTION")
+    lines.append(trace.get("user_input", "<empty>"))
+
+    # Censor
+    censor = trace.get("censor", {})
+    lines.append("\n## 2. CENSOR")
+    lines.append("Thoughts:")
+    for t in censor.get("thoughts", []):
+        lines.append(f"  - {t}")
+    if not censor.get("thoughts"):
+        lines.append("  (no thoughts captured — Censor uses model_worker, see Worker section)")
+    lines.append("Parsed output:")
+    lines.append(json.dumps(censor.get("parsed", {}), ensure_ascii=False, indent=2))
+
+    # Worker
+    worker = trace.get("worker", {})
+    lines.append("\n## 3. WORKER (NORMAL pipeline)")
+    lines.append("Thoughts:")
+    for t in worker.get("thoughts", []):
+        lines.append(f"  - {t}")
+    if not worker.get("thoughts"):
+        lines.append("  (none)")
+    lines.append("Raw LLM response:")
+    lines.append(worker.get("raw", "<not captured>"))
+    lines.append("Parsed output:")
+    parsed_w = worker.get("parsed")
+    if parsed_w:
+        lines.append(json.dumps(parsed_w, ensure_ascii=False, indent=2))
+    else:
+        lines.append("<None — Worker skipped or failed>")
+
+    # GM_Logic
+    gm = trace.get("gm_logic", {})
+    lines.append("\n## 4. GM_LOGIC")
+    lines.append("Thoughts:")
+    for t in gm.get("thoughts", []):
+        lines.append(f"  - {t}")
+    if not gm.get("thoughts"):
+        lines.append("  (none)")
+    lines.append("Raw LLM response:")
+    lines.append(gm.get("raw", "<not captured>"))
+    lines.append("Parsed output:")
+    parsed_gm = gm.get("parsed")
+    if parsed_gm:
+        lines.append(json.dumps(parsed_gm, ensure_ascii=False, indent=2))
+    else:
+        lines.append("<None — GM_Logic skipped or failed>")
+
+    # Narrator
+    nar = trace.get("narrator", {})
+    lines.append("\n## 5. NARRATOR")
+    lines.append("Thoughts:")
+    for t in nar.get("thoughts", []):
+        lines.append(f"  - {t}")
+    if not nar.get("thoughts"):
+        lines.append("  (none)")
+    lines.append("Final text:")
+    lines.append(nar.get("final_text", "<empty>"))
+
+    # Mechanical impacts
+    lines.append("\n## 6. MECHANICAL IMPACTS (logs)")
+    for log in trace.get("logs", []):
+        lines.append(f"  - {log}")
+
+    lines.append("\n" + "=" * 70)
+    lines.append("END OF TRACE")
+
+    content = "\n".join(lines).encode("utf-8")
+    ts = datetime.fromtimestamp(trace.get("timestamp", 0)).strftime("%Y%m%d_%H%M%S")
+    filename = f"debug_{chat_id}_{ts}.txt"
+
+    file = BufferedInputFile(content, filename=filename)
+    await bot.send_document(
+        chat_id=chat_id,
+        document=file,
+        caption=f"Debug trace ({len(lines)} lines)",
+    )
+
+
 @router.message()
 async def handle_general_messages(message: Message, bot: Bot):
     chat_id = message.chat.id
@@ -844,6 +935,17 @@ async def handle_general_messages(message: Message, bot: Bot):
                     response_text = f"🗣️ _{display_intent}_\n\n{response_text}"
                 await send_game_response(bot, chat_id, response_text, suggested_actions,
                                          edit_message=temp_msg)
+
+                # Debug trace dispatch (admin-only, opt-in via /debugmode)
+                from core.cheats import DEBUG_USERS
+                if chat_id in DEBUG_USERS:
+                    session = user_sessions.get(chat_id, {})
+                    trace = session.pop("last_debug_trace", None)  # consume one-time
+                    if trace:
+                        try:
+                            await _send_debug_trace_file(bot, chat_id, trace)
+                        except Exception as _trace_err:
+                            logger.warning(f"[DEBUG_TRACE] Failed to send: {type(_trace_err).__name__}: {_trace_err}")
             except Exception as e:
                 if consumer_task:
                     consumer_task.cancel()

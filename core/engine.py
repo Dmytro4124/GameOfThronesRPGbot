@@ -7,7 +7,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from core.ai_client import model_worker, model_gm_logic, model_narrator, clean_and_parse_json, clear_thoughts, record_thought, hedged_generate_content_async, build_strict_config
+from core.ai_client import model_worker, model_gm_logic, model_narrator, clean_and_parse_json, clear_thoughts, get_thoughts_log, record_thought, hedged_generate_content_async, build_strict_config
 from config import MODEL_NARRATOR_NAME
 from core.mechanics import apply_system_impacts, process_training_request, safe_int, validate_action
 from core.dnd_engine import resolve_normal_action, apply_dnd_impacts
@@ -353,6 +353,22 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
     global_start = time.time()
     debug_log += f"🚀 [START] Хід гравця {chat_id}..."
 
+    # === DEBUG TRACE (admin-only, toggle via /debugmode) ===
+    from core.cheats import DEBUG_USERS
+    _debug_active = chat_id in DEBUG_USERS
+    _debug_trace: dict | None = None
+    if _debug_active:
+        _debug_trace = {
+            "chat_id": chat_id,
+            "user_input": user_input,
+            "timestamp": time.time(),
+            "censor": {"raw": None, "parsed": None, "thoughts": []},
+            "worker": {"raw": None, "parsed": None, "thoughts": []},
+            "gm_logic": {"raw": None, "parsed": None, "thoughts": []},
+            "narrator": {"thoughts": [], "final_text": None},
+            "logs": [],
+        }
+
     user_id = chat_id
     timing_details = []
 
@@ -470,46 +486,97 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
     mechanical_updates: dict = {}
 
     if _game_mode == "NORMAL":
-        # --- Speculative: запускаємо Censor і Worker паралельно ---
-        logger.info("[SPEC] Worker started speculatively with Censor")
-        censor_task = asyncio.create_task(validate_action(user_input, profile))
-        worker_task = asyncio.create_task(resolve_normal_action(
-            user_input, profile, npc_reputation_context,
-            current_scene=curr_scene, npc_names=legal_npc_names,
-            last_turn_summary=last_turn, user_id=chat_id,
-            current_location=curr_loc,
-        ))
-
-        # Крок 1: чекаємо результат Censor
-        try:
-            is_valid, refusal_reason = await censor_task
-        except Exception as _censor_exc:
-            logger.warning(f"[CENSOR] failed, fail-open: {_censor_exc}")
-            is_valid, refusal_reason = True, ""
-
-        if not is_valid:
-            # Censor заблокував — скасовуємо Worker
-            # NOTE: cancel() does NOT stop the underlying thread inside asyncio.to_thread.
-            # The Worker LLM call will continue in background and may append to _thoughts_log
-            # after the turn returns. clear_thoughts() at next turn start overwrites stale data.
-            # This is acceptable cost for ~5% of blocked actions.
-            worker_task.cancel()
+        if _debug_active:
+            # --- Debug sequential path: Censor then Worker in sequence ---
+            # Runs sequentially so clear_thoughts() between stages accurately attributes
+            # each stage's thoughts. ~2-3s slower than speculative; acceptable for admin-only.
+            logger.info("[DEBUG_SEQ] Sequential Censor+Worker for debug trace")
+            clear_thoughts()
             try:
-                await worker_task
-            except (asyncio.CancelledError, Exception):
-                pass
-            return refusal_reason + "\n\n📊 🛑 Дію заблоковано Цензором.", []
+                is_valid, refusal_reason = await validate_action(user_input, profile)
+            except Exception as _censor_exc:
+                logger.warning(f"[CENSOR] failed, fail-open: {_censor_exc}")
+                is_valid, refusal_reason = True, ""
 
-        if progress_callback:
-            await progress_callback("⚔️ Кидаємо кубики...")
+            if _debug_trace is not None:
+                _debug_trace["censor"]["parsed"] = {
+                    "is_valid": is_valid,
+                    "refusal_reason": refusal_reason,
+                }
+                _debug_trace["censor"]["thoughts"] = [
+                    e.get("thought", "") for e in get_thoughts_log() if e.get("thought")
+                ]
 
-        # Крок 2: Censor пройшов — забираємо результат Worker (він вже міг завершитись)
-        _combat_log_for_narrator = []
-        try:
-            mechanics_verdict, mechanical_updates = await worker_task
-        except Exception as _worker_exc:
-            logger.error(f"[WORKER] speculative task failed: {_worker_exc}", exc_info=True)
-            raise
+            if not is_valid:
+                if _debug_trace is not None:
+                    _debug_trace["narrator"]["final_text"] = "[BLOCKED BY CENSOR — pipeline stopped]"
+                    _debug_trace["logs"] = [f"Censor refusal: {refusal_reason}"]
+                    user_sessions.setdefault(chat_id, {})["last_debug_trace"] = _debug_trace
+                return refusal_reason + "\n\n📊 🛑 Дію заблоковано Цензором.", []
+
+            if progress_callback:
+                await progress_callback("⚔️ Кидаємо кубики...")
+
+            clear_thoughts()  # reset before Worker — isolates Worker thoughts
+            _combat_log_for_narrator = []
+            try:
+                mechanics_verdict, mechanical_updates = await resolve_normal_action(
+                    user_input, profile, npc_reputation_context,
+                    current_scene=curr_scene, npc_names=legal_npc_names,
+                    last_turn_summary=last_turn, user_id=chat_id,
+                    current_location=curr_loc,
+                )
+            except Exception as _worker_exc:
+                logger.error(f"[WORKER] sequential debug failed: {_worker_exc}", exc_info=True)
+                raise
+
+            if _debug_trace is not None:
+                _debug_trace["worker"]["thoughts"] = [
+                    e.get("thought", "") for e in get_thoughts_log() if e.get("thought")
+                ]
+                _debug_trace["worker"]["parsed"] = mechanical_updates
+
+        else:
+            # --- Speculative: запускаємо Censor і Worker паралельно ---
+            logger.info("[SPEC] Worker started speculatively with Censor")
+            censor_task = asyncio.create_task(validate_action(user_input, profile))
+            worker_task = asyncio.create_task(resolve_normal_action(
+                user_input, profile, npc_reputation_context,
+                current_scene=curr_scene, npc_names=legal_npc_names,
+                last_turn_summary=last_turn, user_id=chat_id,
+                current_location=curr_loc,
+            ))
+
+            # Крок 1: чекаємо результат Censor
+            try:
+                is_valid, refusal_reason = await censor_task
+            except Exception as _censor_exc:
+                logger.warning(f"[CENSOR] failed, fail-open: {_censor_exc}")
+                is_valid, refusal_reason = True, ""
+
+            if not is_valid:
+                # Censor заблокував — скасовуємо Worker
+                # NOTE: cancel() does NOT stop the underlying thread inside asyncio.to_thread.
+                # The Worker LLM call will continue in background and may append to _thoughts_log
+                # after the turn returns. clear_thoughts() at next turn start overwrites stale data.
+                # This is acceptable cost for ~5% of blocked actions.
+                worker_task.cancel()
+                try:
+                    await worker_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                return refusal_reason + "\n\n📊 🛑 Дію заблоковано Цензором.", []
+
+            if progress_callback:
+                await progress_callback("⚔️ Кидаємо кубики...")
+
+            # Крок 2: Censor пройшов — забираємо результат Worker (він вже міг завершитись)
+            _combat_log_for_narrator = []
+            try:
+                mechanics_verdict, mechanical_updates = await worker_task
+            except Exception as _worker_exc:
+                logger.error(f"[WORKER] speculative task failed: {_worker_exc}", exc_info=True)
+                raise
 
     elif _game_mode == "COMBAT":
         # Sequential Censor для COMBAT (combat_state lock несумісний з cancel)
@@ -898,6 +965,10 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         _gm_logic_cfg = build_strict_config(
             model_gm_logic, build_gm_logic_schema(mode=_gm_mode)
         )
+
+        if _debug_active:
+            clear_thoughts()  # isolate GM_Logic thoughts from previous stages
+
         def _sync_gen_gm_logic():
             try:
                 return model_gm_logic.generate_content(gm_logic_prompt, config=_gm_logic_cfg)
@@ -915,6 +986,13 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         if not ai_data:
             ai_data = {"director_notes": ["Дія мала неоднозначний результат."],
                        "npc_updates": [], "suggested_actions": []}
+
+        if _debug_active and _debug_trace is not None:
+            _debug_trace["gm_logic"]["thoughts"] = [
+                e.get("thought", "") for e in get_thoughts_log() if e.get("thought")
+            ]
+            _debug_trace["gm_logic"]["raw"] = gm_logic_raw
+            _debug_trace["gm_logic"]["parsed"] = ai_data
 
         duration_gm_logic = time.time() - t_gm_logic
         timing_details.append(f"🧠 GM_Logic: {duration_gm_logic:.2f}s")
@@ -1004,6 +1082,9 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             scene_continuity_block=scene_continuity_block,
             combat_log=_combat_log_for_narrator if _combat_log_for_narrator else None,
         )
+
+        if _debug_active:
+            clear_thoughts()  # isolate Narrator thoughts from GM_Logic
 
         if narrator_queue is not None:
             # === STREAMING MODE: стрімимо narrator-текст чанками через queue ===
@@ -1298,6 +1379,17 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         duration_narrator = time.time() - t_narrator
         timing_details.append(f"✍️ Narrator: {duration_narrator:.2f}s")
 
+        # === DEBUG TRACE: stage-aware capture (thoughts already collected per-stage above) ===
+        # Narrator thoughts + final text captured here; censor/worker/gm_logic already set.
+        if _debug_active and _debug_trace is not None:
+            _debug_trace["narrator"]["thoughts"] = [
+                e.get("thought", "") for e in get_thoughts_log() if e.get("thought")
+            ]
+            _debug_trace["narrator"]["final_text"] = story
+            _debug_trace["logs"] = list(logs)
+            # Store in session for handlers.py pickup
+            user_sessions.setdefault(chat_id, {})["last_debug_trace"] = _debug_trace
+
         t_start = time.time()
         npc_changes = ai_data.get("npc_updates", []) + mechanical_updates.get("npc_updates", [])
         companion_npcs = ai_data.get("companion_npcs", [])
@@ -1511,4 +1603,19 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 narrator_queue.put_nowait(None)
             except Exception:
                 pass
+        # Persist partial debug trace so admin can inspect engine crash.
+        # Most valuable debug context — preserve whatever was collected before crash.
+        try:
+            if _debug_active and _debug_trace is not None:
+                _debug_trace["narrator"]["final_text"] = (
+                    f"[ENGINE CRASH — {type(e).__name__}: {str(e)[:200]}]"
+                )
+                _debug_trace["logs"] = (_debug_trace.get("logs") or []) + [
+                    f"EXCEPTION: {type(e).__name__}",
+                    f"MESSAGE: {str(e)[:300]}",
+                    f"TRACEBACK (last 5 lines): {traceback.format_exc()[-500:]}",
+                ]
+                user_sessions.setdefault(chat_id, {})["last_debug_trace"] = _debug_trace
+        except Exception:
+            pass  # never block crash recovery for debug persistence
         return "📜 *Ворон згубив вашого листа... Спробуйте ще раз.*", []
