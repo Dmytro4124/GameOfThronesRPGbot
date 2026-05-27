@@ -726,7 +726,7 @@ async def cmd_debugmode(message, bot, chat_id, args):
             "- Player action\n"
             "- Censor reasoning + JSON output\n"
             "- Worker reasoning + JSON output\n"
-            "- GM_Logic reasoning + JSON output\n"
+            "- GM Logic reasoning + JSON output\n"
             "- Narrator reasoning + final text\n"
             "- Mechanical impacts log"
         )
