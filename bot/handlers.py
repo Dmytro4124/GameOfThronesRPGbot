@@ -936,16 +936,18 @@ async def handle_general_messages(message: Message, bot: Bot):
                 await send_game_response(bot, chat_id, response_text, suggested_actions,
                                          edit_message=temp_msg)
 
-                # Debug trace dispatch (admin-only, opt-in via /debugmode)
-                from core.cheats import DEBUG_USERS
-                if chat_id in DEBUG_USERS:
-                    session = user_sessions.get(chat_id, {})
-                    trace = session.pop("last_debug_trace", None)  # consume one-time
-                    if trace:
-                        try:
-                            await _send_debug_trace_file(bot, chat_id, trace)
-                        except Exception as _trace_err:
-                            logger.warning(f"[DEBUG_TRACE] Failed to send: {type(_trace_err).__name__}: {_trace_err}")
+                # Debug trace dispatch — decoupled from in-memory DEBUG_USERS.
+                # Engine saves last_debug_trace whenever _debug_active (in-memory set OR profile flag).
+                # We just check the session; if trace exists, the turn was debug-active.
+                session = user_sessions.get(chat_id, {})
+                trace = session.pop("last_debug_trace", None)  # consume one-time
+                if trace:
+                    logger.info(f"[DEBUG_MODE] Checkpoint: trace found for chat_id={chat_id}, sending file")
+                    try:
+                        await _send_debug_trace_file(bot, chat_id, trace)
+                        logger.info(f"[DEBUG_MODE] File sent OK for chat_id={chat_id}")
+                    except Exception as _trace_err:
+                        logger.error(f"[DEBUG_TRACE] Failed to send: {type(_trace_err).__name__}: {_trace_err}", exc_info=True)
             except Exception as e:
                 if consumer_task:
                     consumer_task.cancel()

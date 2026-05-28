@@ -708,20 +708,29 @@ async def cmd_debugmode(message, bot, chat_id, args):
     Admin-only (config.ADMIN_TELEGRAM_IDS).
     When active, each game turn stores a _debug_trace dict in
     user_sessions[chat_id]['last_debug_trace'] for pickup by handlers.py.
+    State is persisted to profile["_debug_mode"] (bool) in Google Sheets,
+    so it survives Render cold-starts.
     """
     if chat_id not in ADMIN_TELEGRAM_IDS:
         await message.answer("Команда доступна лише адмінам.")
         return
 
-    if chat_id in DEBUG_USERS:
+    profile, _ = await _get_profile(chat_id)
+    if not profile:
+        await message.answer("Профіль не знайдено — спершу /start.")
+        return
+
+    if chat_id in DEBUG_USERS or profile.get("_debug_mode"):
         DEBUG_USERS.discard(chat_id)
-        await message.answer(
-            "Debug mode ВИМКНЕНО. Pipeline trace більше не записується."
-        )
+        profile["_debug_mode"] = False
+        await _save_profile(chat_id, profile)
+        await message.answer("Debug mode ВИМКНЕНО. Pipeline trace більше не записується.")
     else:
         DEBUG_USERS.add(chat_id)
+        profile["_debug_mode"] = True
+        await _save_profile(chat_id, profile)
         await message.answer(
-            "Debug mode УВІМКНЕНО.\n"
+            "Debug mode УВІМКНЕНО (persist — переживає рестарт бота).\n"
             "Кожен наступний хід згенерує .txt файл з повним pipeline:\n"
             "- Player action\n"
             "- Censor reasoning + JSON output\n"

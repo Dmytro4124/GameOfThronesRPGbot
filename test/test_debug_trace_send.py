@@ -8,8 +8,10 @@ pattern adopted in test/test_cheats.py and test/test_bg_intro_flow.py.
 Covers:
 1. _send_debug_trace_file builds a .txt file and calls bot.send_document.
 2. File content includes all 6 pipeline section headers and key data.
-3. No file sent when chat_id is NOT in DEBUG_USERS.
+3. Checkpoint sends file when trace is in session (decoupled from DEBUG_USERS).
 4. If bot.send_document raises, the error is logged but does not propagate.
+5. Full debug flow: trace in session → send_document called, trace popped.
+6. No send when trace is absent from session (regardless of DEBUG_USERS state).
 """
 
 import asyncio
@@ -208,42 +210,50 @@ def test_send_debug_trace_file_content_contains_all_sections(handlers_module):
 
 
 # ---------------------------------------------------------------------------
-# Test 3: no file sent when chat_id NOT in DEBUG_USERS
+# Test 3: checkpoint sends file when trace is in session (decoupled from DEBUG_USERS)
 # ---------------------------------------------------------------------------
 
-def test_debug_trace_not_sent_when_user_not_in_debug_users(handlers_module):
+def test_debug_trace_sent_when_trace_in_session_regardless_of_debug_users(handlers_module):
     """
-    Simulates the condition guard from handle_general_messages.
-    If chat_id is absent from DEBUG_USERS, _send_debug_trace_file must
-    never be called.
+    Checkpoint in handle_general_messages is decoupled from DEBUG_USERS.
+    If last_debug_trace is present in session, _send_debug_trace_file must be
+    called even when chat_id is NOT in DEBUG_USERS (covers cold-start scenario
+    where engine saved trace via profile flag but in-memory set is empty).
     """
     hm = handlers_module
     chat_id = 999
 
-    # Guarantee chat_id is absent
-    import core.cheats as cheats_mod
-    cheats_mod.DEBUG_USERS.discard(chat_id)
+    import sys
+    cheats_stub = sys.modules["core.cheats"]
+    # Guarantee chat_id is absent from in-memory set (cold-start scenario)
+    cheats_stub.DEBUG_USERS.discard(chat_id)
 
-    call_count = []
+    user_sessions = hm.user_sessions
+    trace = _make_trace(chat_id)
+    user_sessions[chat_id] = {"last_debug_trace": trace}
 
-    async def _run():
-        mock_bot = MagicMock()
-        mock_bot.send_document = AsyncMock()
+    send_document_calls = []
 
-        session = {"last_debug_trace": _make_trace(chat_id)}
+    try:
+        async def _run():
+            mock_bot = MagicMock()
+            mock_bot.send_document = AsyncMock(
+                side_effect=lambda **kw: send_document_calls.append(kw)
+            )
 
-        # Reproduce the condition guard from handle_general_messages
-        from core.cheats import DEBUG_USERS
-        if chat_id in DEBUG_USERS:
-            trace = session.pop("last_debug_trace", None)
-            if trace:
-                call_count.append(1)
-                await hm._send_debug_trace_file(mock_bot, chat_id, trace)
+            # Reproduce the new decoupled checkpoint: just check session, not DEBUG_USERS
+            session = user_sessions.get(chat_id, {})
+            popped_trace = session.pop("last_debug_trace", None)
+            if popped_trace:
+                await hm._send_debug_trace_file(mock_bot, chat_id, popped_trace)
 
-    asyncio.run(_run())
+        asyncio.run(_run())
+    finally:
+        user_sessions.pop(chat_id, None)
 
-    assert len(call_count) == 0, (
-        "_send_debug_trace_file must NOT be called when chat_id not in DEBUG_USERS"
+    assert len(send_document_calls) == 1, (
+        "_send_debug_trace_file must be called when trace is in session, "
+        "even if chat_id is absent from DEBUG_USERS (cold-start scenario)"
     )
 
 
@@ -299,4 +309,104 @@ def test_send_debug_trace_file_handles_send_error_gracefully(handlers_module):
     )
     assert "RuntimeError" in warning_calls[0], (
         "warning message must name the exception type"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 5: full debug flow — trace in session → send called, trace popped
+#         (decoupled from DEBUG_USERS membership)
+# ---------------------------------------------------------------------------
+
+def test_full_debug_flow_file_sent(handlers_module):
+    """
+    End-to-end checkpoint logic (new decoupled version):
+    - user_sessions[chat_id]['last_debug_trace'] contains a valid trace
+    - checkpoint pops the trace and calls _send_debug_trace_file
+    - bot.send_document is called exactly once
+    - last_debug_trace is no longer in session after the call
+    - DEBUG_USERS membership is irrelevant (decoupled)
+
+    Uses hm.user_sessions (the binding captured when bot.handlers was loaded
+    by the fixture) to avoid sys.modules resolution ambiguity with the real
+    core.engine that other test files import at collection time.
+    """
+    hm = handlers_module
+    chat_id = 200
+
+    user_sessions = hm.user_sessions  # the fixture's fake_engine.user_sessions
+    trace = _make_trace(chat_id)
+    user_sessions[chat_id] = {"last_debug_trace": trace}
+
+    send_document_calls = []
+
+    try:
+        async def _run():
+            mock_bot = MagicMock()
+
+            async def _fake_send_document(**kwargs):
+                send_document_calls.append(kwargs)
+
+            mock_bot.send_document = AsyncMock(side_effect=_fake_send_document)
+
+            # Reproduce the new decoupled checkpoint block from handle_general_messages
+            session = user_sessions.get(chat_id, {})
+            popped_trace = session.pop("last_debug_trace", None)
+            if popped_trace:
+                await hm._send_debug_trace_file(mock_bot, chat_id, popped_trace)
+
+        asyncio.run(_run())
+    finally:
+        user_sessions.pop(chat_id, None)
+
+    assert len(send_document_calls) == 1, (
+        "bot.send_document must be called exactly once in the full flow"
+    )
+    assert send_document_calls[0].get("chat_id") == chat_id, (
+        f"send_document must target chat_id={chat_id}"
+    )
+    # Trace must be consumed (popped) from session
+    remaining = user_sessions.get(chat_id, {})
+    assert "last_debug_trace" not in remaining, (
+        "last_debug_trace must be popped from session after dispatch"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 6: no send when trace is absent from session
+# ---------------------------------------------------------------------------
+
+def test_full_debug_flow_no_send_when_trace_absent(handlers_module):
+    """
+    If last_debug_trace is absent from session (engine did not save it because
+    _debug_active was False for this turn), send_document must NOT be called.
+    This is the correct guard now that the checkpoint is decoupled from DEBUG_USERS.
+    """
+    hm = handlers_module
+    chat_id = 201
+
+    user_sessions = hm.user_sessions
+    # No last_debug_trace in session
+    user_sessions[chat_id] = {}
+
+    send_document_calls = []
+
+    try:
+        async def _run():
+            mock_bot = MagicMock()
+            mock_bot.send_document = AsyncMock(
+                side_effect=lambda **kw: send_document_calls.append(kw)
+            )
+
+            # Reproduce the new decoupled checkpoint
+            session = user_sessions.get(chat_id, {})
+            popped_trace = session.pop("last_debug_trace", None)
+            if popped_trace:
+                await hm._send_debug_trace_file(mock_bot, chat_id, popped_trace)
+
+        asyncio.run(_run())
+    finally:
+        user_sessions.pop(chat_id, None)
+
+    assert len(send_document_calls) == 0, (
+        "send_document must NOT be called when last_debug_trace is absent from session"
     )

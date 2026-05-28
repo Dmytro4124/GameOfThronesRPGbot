@@ -865,15 +865,19 @@ class TestCmdClearInv:
 
 
 # ---------------------------------------------------------------------------
-# /debugmode  (admin-only pipeline trace toggle)
+# /debugmode  (admin-only pipeline trace toggle, persistent via profile flag)
 # ---------------------------------------------------------------------------
 
 class TestCmdDebugMode:
-    """Tests for cmd_debugmode: admin-only toggle for full pipeline trace."""
+    """Tests for cmd_debugmode: admin-only toggle for full pipeline trace.
+
+    Since v2 the command persists state to profile["_debug_mode"] (bool) in
+    Google Sheets so it survives Render cold-starts.  Tests mock _get_profile
+    and _save_profile to verify profile mutation without real Sheets calls.
+    """
 
     def setup_method(self):
         """Ensure DEBUG_USERS is clean before each test."""
-        import importlib
         import core.cheats as _cheats
         _cheats.DEBUG_USERS.clear()
 
@@ -881,6 +885,22 @@ class TestCmdDebugMode:
         """Clean up DEBUG_USERS after each test."""
         import core.cheats as _cheats
         _cheats.DEBUG_USERS.clear()
+
+    # ── helpers ────────────────────────────────────────────────────────────
+
+    def _mock_profile_ops(self, profile: dict):
+        """Return (get_patch, save_patch) that simulate DB read/write."""
+        get_patch = patch(
+            "core.cheats.get_user_data",
+            new=AsyncMock(return_value=(profile, 1)),
+        )
+        save_patch = patch(
+            "core.cheats.save_user_data",
+            new=AsyncMock(return_value=True),
+        )
+        return get_patch, save_patch
+
+    # ── non-admin guard ────────────────────────────────────────────────────
 
     def test_non_admin_receives_refusal(self):
         """Non-admin chat_id must receive refusal and NOT be added to DEBUG_USERS."""
@@ -904,16 +924,39 @@ class TestCmdDebugMode:
             f"Refusal message must mention admin restriction. Got: {call_text}"
         )
 
-    def test_admin_toggle_on_adds_to_debug_users(self):
-        """Admin /debugmode when OFF must add chat_id to DEBUG_USERS."""
+    # ── no profile guard ───────────────────────────────────────────────────
+
+    def test_admin_no_profile_sends_start_hint(self):
+        """If profile not found, must send hint to /start and NOT mutate DEBUG_USERS."""
         admin_id = 494157543
         msg = _make_message("/debugmode")
+        get_p = patch("core.cheats.get_user_data", new=AsyncMock(return_value=(None, None)))
 
         async def _coro():
             from core.cheats import cmd_debugmode
             await cmd_debugmode(msg, MagicMock(), admin_id, [])
 
-        with patch("core.cheats.ADMIN_TELEGRAM_IDS", [admin_id]):
+        with patch("core.cheats.ADMIN_TELEGRAM_IDS", [admin_id]), get_p:
+            _run(_coro())
+
+        import core.cheats as _cheats
+        assert admin_id not in _cheats.DEBUG_USERS
+        msg.answer.assert_called_once()
+
+    # ── toggle-on ─────────────────────────────────────────────────────────
+
+    def test_admin_toggle_on_adds_to_debug_users(self):
+        """Admin /debugmode when OFF (no in-memory, no profile flag) must add to DEBUG_USERS."""
+        admin_id = 494157543
+        profile = _dnd_profile()  # _debug_mode absent → defaults to False
+        msg = _make_message("/debugmode")
+        get_p, save_p = self._mock_profile_ops(profile)
+
+        async def _coro():
+            from core.cheats import cmd_debugmode
+            await cmd_debugmode(msg, MagicMock(), admin_id, [])
+
+        with patch("core.cheats.ADMIN_TELEGRAM_IDS", [admin_id]), get_p, save_p:
             _run(_coro())
 
         import core.cheats as _cheats
@@ -921,59 +964,170 @@ class TestCmdDebugMode:
             "Admin chat_id must be in DEBUG_USERS after toggle-on"
         )
 
-    def test_admin_toggle_off_removes_from_debug_users(self):
-        """Admin /debugmode when already ON must remove chat_id from DEBUG_USERS."""
+    def test_admin_toggle_on_sets_profile_flag_true(self):
+        """Toggle-on must persist profile['_debug_mode'] = True."""
         admin_id = 494157543
-
-        import core.cheats as _cheats
-        _cheats.DEBUG_USERS.add(admin_id)  # pre-populate: already ON
-
+        profile = _dnd_profile()
         msg = _make_message("/debugmode")
+        get_p, save_p = self._mock_profile_ops(profile)
 
         async def _coro():
             from core.cheats import cmd_debugmode
             await cmd_debugmode(msg, MagicMock(), admin_id, [])
 
-        with patch("core.cheats.ADMIN_TELEGRAM_IDS", [admin_id]):
+        with patch("core.cheats.ADMIN_TELEGRAM_IDS", [admin_id]), get_p, save_p:
+            _run(_coro())
+
+        assert profile.get("_debug_mode") is True, (
+            "profile['_debug_mode'] must be True after toggle-on"
+        )
+
+    def test_admin_toggle_on_calls_save_profile(self):
+        """Toggle-on must call save_user_data to persist the flag."""
+        admin_id = 494157543
+        profile = _dnd_profile()
+        msg = _make_message("/debugmode")
+        get_p = patch("core.cheats.get_user_data", new=AsyncMock(return_value=(profile, 1)))
+        save_mock = AsyncMock(return_value=True)
+        save_p = patch("core.cheats.save_user_data", new=save_mock)
+
+        async def _coro():
+            from core.cheats import cmd_debugmode
+            await cmd_debugmode(msg, MagicMock(), admin_id, [])
+
+        with patch("core.cheats.ADMIN_TELEGRAM_IDS", [admin_id]), get_p, save_p:
+            _run(_coro())
+
+        assert save_mock.called, "save_user_data must be called on toggle-on"
+
+    # ── toggle-off via in-memory set ───────────────────────────────────────
+
+    def test_admin_toggle_off_removes_from_debug_users(self):
+        """Admin /debugmode when already ON (in-memory) must remove from DEBUG_USERS."""
+        admin_id = 494157543
+        import core.cheats as _cheats
+        _cheats.DEBUG_USERS.add(admin_id)  # pre-populate: in-memory ON
+
+        profile = _dnd_profile(**{"_debug_mode": True})
+        msg = _make_message("/debugmode")
+        get_p, save_p = self._mock_profile_ops(profile)
+
+        async def _coro():
+            from core.cheats import cmd_debugmode
+            await cmd_debugmode(msg, MagicMock(), admin_id, [])
+
+        with patch("core.cheats.ADMIN_TELEGRAM_IDS", [admin_id]), get_p, save_p:
             _run(_coro())
 
         assert admin_id not in _cheats.DEBUG_USERS, (
             "Admin chat_id must be removed from DEBUG_USERS after toggle-off"
         )
 
-    def test_toggle_on_sends_confirmation_message(self):
-        """Toggle-on must send a confirmation message describing what will be traced."""
+    def test_admin_toggle_off_sets_profile_flag_false(self):
+        """Toggle-off must persist profile['_debug_mode'] = False."""
         admin_id = 494157543
+        import core.cheats as _cheats
+        _cheats.DEBUG_USERS.add(admin_id)
+
+        profile = _dnd_profile(**{"_debug_mode": True})
         msg = _make_message("/debugmode")
+        get_p, save_p = self._mock_profile_ops(profile)
 
         async def _coro():
             from core.cheats import cmd_debugmode
             await cmd_debugmode(msg, MagicMock(), admin_id, [])
 
-        with patch("core.cheats.ADMIN_TELEGRAM_IDS", [admin_id]):
+        with patch("core.cheats.ADMIN_TELEGRAM_IDS", [admin_id]), get_p, save_p:
+            _run(_coro())
+
+        assert profile.get("_debug_mode") is False, (
+            "profile['_debug_mode'] must be False after toggle-off"
+        )
+
+    # ── cold-start scenario: in-memory empty but profile flag True ─────────
+
+    def test_toggle_off_works_after_cold_start(self):
+        """Cold-start scenario: DEBUG_USERS is empty but profile['_debug_mode']=True.
+        Toggle must still detect ON state via profile flag and switch it OFF."""
+        admin_id = 494157543
+        import core.cheats as _cheats
+        # Simulate cold-start: in-memory set is empty
+        assert admin_id not in _cheats.DEBUG_USERS, "Pre-condition: must NOT be in set"
+
+        profile = _dnd_profile(**{"_debug_mode": True})  # flag survived restart
+        msg = _make_message("/debugmode")
+        get_p, save_p = self._mock_profile_ops(profile)
+
+        async def _coro():
+            from core.cheats import cmd_debugmode
+            await cmd_debugmode(msg, MagicMock(), admin_id, [])
+
+        with patch("core.cheats.ADMIN_TELEGRAM_IDS", [admin_id]), get_p, save_p:
+            _run(_coro())
+
+        assert profile.get("_debug_mode") is False, (
+            "Must detect ON via profile flag and toggle to False even after cold-start"
+        )
+        assert admin_id not in _cheats.DEBUG_USERS, (
+            "DEBUG_USERS must not gain admin_id when toggling off via profile flag path"
+        )
+
+    # ── confirmation messages ──────────────────────────────────────────────
+
+    def test_toggle_on_sends_confirmation_message(self):
+        """Toggle-on must send a confirmation message mentioning persist."""
+        admin_id = 494157543
+        profile = _dnd_profile()
+        msg = _make_message("/debugmode")
+        get_p, save_p = self._mock_profile_ops(profile)
+
+        async def _coro():
+            from core.cheats import cmd_debugmode
+            await cmd_debugmode(msg, MagicMock(), admin_id, [])
+
+        with patch("core.cheats.ADMIN_TELEGRAM_IDS", [admin_id]), get_p, save_p:
             _run(_coro())
 
         msg.answer.assert_called_once()
-        # Message must mention debug mode and pipeline
         call_text = str(msg.answer.call_args_list[0]).lower()
         assert "debug" in call_text or "увімкнено" in call_text, (
             f"Toggle-on message must confirm activation. Got: {call_text}"
         )
 
-    def test_toggle_off_sends_deactivation_message(self):
-        """Toggle-off must send a deactivation confirmation message."""
+    def test_toggle_on_message_no_cold_start_warning(self):
+        """Toggle-on message must NOT contain the old cold-start warning."""
         admin_id = 494157543
-
-        import core.cheats as _cheats
-        _cheats.DEBUG_USERS.add(admin_id)
-
+        profile = _dnd_profile()
         msg = _make_message("/debugmode")
+        get_p, save_p = self._mock_profile_ops(profile)
 
         async def _coro():
             from core.cheats import cmd_debugmode
             await cmd_debugmode(msg, MagicMock(), admin_id, [])
 
-        with patch("core.cheats.ADMIN_TELEGRAM_IDS", [admin_id]):
+        with patch("core.cheats.ADMIN_TELEGRAM_IDS", [admin_id]), get_p, save_p:
+            _run(_coro())
+
+        call_text = str(msg.answer.call_args_list[0])
+        assert "рестарт" not in call_text.lower() or "переживає рестарт" in call_text.lower(), (
+            "Old cold-start warning must be absent; persist message is acceptable"
+        )
+
+    def test_toggle_off_sends_deactivation_message(self):
+        """Toggle-off must send a deactivation confirmation message."""
+        admin_id = 494157543
+        import core.cheats as _cheats
+        _cheats.DEBUG_USERS.add(admin_id)
+
+        profile = _dnd_profile(**{"_debug_mode": True})
+        msg = _make_message("/debugmode")
+        get_p, save_p = self._mock_profile_ops(profile)
+
+        async def _coro():
+            from core.cheats import cmd_debugmode
+            await cmd_debugmode(msg, MagicMock(), admin_id, [])
+
+        with patch("core.cheats.ADMIN_TELEGRAM_IDS", [admin_id]), get_p, save_p:
             _run(_coro())
 
         msg.answer.assert_called_once()

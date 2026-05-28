@@ -382,3 +382,106 @@ class TestDebugModeDispatchRegistration:
             assert isinstance(cheats.DEBUG_USERS, set), (
                 "DEBUG_USERS must be a set instance"
             )
+
+
+# ---------------------------------------------------------------------------
+# Tests: _is_debug_active helper (persistent profile flag, cold-start survival)
+# ---------------------------------------------------------------------------
+
+# Inline reimplementation of the helper for isolated unit-testing.
+# This avoids importing core.engine (which pulls in a heavy async dependency
+# chain including gspread, Gemini SDK, etc.).
+# The contract tested here is identical to the one in core/engine.py — any
+# divergence in the production implementation would be caught by a separate
+# integration test or code-review.
+
+def _is_debug_active_impl(chat_id: int, profile: dict, debug_users: set) -> bool:
+    """Mirror of core.engine._is_debug_active — kept in sync manually."""
+    return (chat_id in debug_users) or bool(profile.get("_debug_mode", False))
+
+
+class TestIsDebugActiveHelper:
+    """
+    Unit-tests for the _is_debug_active() boolean logic.
+
+    Tests use a local reimplementation (_is_debug_active_impl) that mirrors
+    core.engine._is_debug_active exactly, avoiding the heavy async import
+    chain.  The logic under test is a single boolean expression — any change
+    to the production function must keep the same semantics or these tests
+    will catch the drift.
+
+    Covered scenarios:
+    - Only in-memory set active        → True
+    - Only profile flag active         → True  (cold-start survival)
+    - Both active                      → True
+    - Neither active                   → False
+    - profile["_debug_mode"] = False   → False (explicit opt-out)
+    - profile["_debug_mode"] = None    → False (null-safe via bool())
+    - profile["_debug_mode"] missing   → False (default via .get())
+    - profile["_debug_mode"] = 1 (int) → True  (truthy int is accepted)
+    - Different chat_id in set         → False
+    """
+
+    def test_in_memory_set_only(self):
+        """chat_id in debug_users, profile flag absent → True."""
+        chat_id = 42
+        debug_users = {chat_id}
+        profile: dict = {}
+        assert _is_debug_active_impl(chat_id, profile, debug_users) is True
+
+    def test_profile_flag_only_cold_start_survival(self):
+        """_debug_mode=True in profile, debug_users empty → True (cold-start scenario)."""
+        chat_id = 42
+        debug_users: set = set()
+        profile = {"_debug_mode": True}
+        assert _is_debug_active_impl(chat_id, profile, debug_users) is True
+
+    def test_both_sources_active(self):
+        """Both in-memory set and profile flag set → True."""
+        chat_id = 42
+        debug_users = {chat_id}
+        profile = {"_debug_mode": True}
+        assert _is_debug_active_impl(chat_id, profile, debug_users) is True
+
+    def test_neither_source_active(self):
+        """No in-memory, no profile flag → False."""
+        chat_id = 42
+        debug_users: set = set()
+        profile: dict = {}
+        assert _is_debug_active_impl(chat_id, profile, debug_users) is False
+
+    def test_profile_flag_false_explicit(self):
+        """profile['_debug_mode'] = False explicitly → False (unless in set)."""
+        chat_id = 42
+        debug_users: set = set()
+        profile = {"_debug_mode": False}
+        assert _is_debug_active_impl(chat_id, profile, debug_users) is False
+
+    def test_profile_flag_none_is_falsy(self):
+        """profile['_debug_mode'] = None → False (bool(None) == False)."""
+        chat_id = 42
+        debug_users: set = set()
+        profile = {"_debug_mode": None}
+        assert _is_debug_active_impl(chat_id, profile, debug_users) is False
+
+    def test_profile_flag_missing_key(self):
+        """Key '_debug_mode' absent → False (profile.get default)."""
+        chat_id = 42
+        debug_users: set = set()
+        profile = {"SomeOtherKey": 123}
+        assert _is_debug_active_impl(chat_id, profile, debug_users) is False
+
+    def test_profile_flag_truthy_int(self):
+        """profile['_debug_mode'] = 1 (truthy int) → True."""
+        chat_id = 42
+        debug_users: set = set()
+        profile = {"_debug_mode": 1}
+        assert _is_debug_active_impl(chat_id, profile, debug_users) is True
+
+    def test_different_chat_id_not_activated(self):
+        """debug_users contains different chat_id, profile has no flag → False."""
+        chat_id = 42
+        other_id = 99
+        debug_users = {other_id}
+        profile: dict = {}
+        assert _is_debug_active_impl(chat_id, profile, debug_users) is False

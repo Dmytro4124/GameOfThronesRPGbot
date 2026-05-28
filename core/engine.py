@@ -342,6 +342,17 @@ def _build_narrator_prompt(user_input, director_notes, npc_context_text,
     )
 
 
+def _is_debug_active(chat_id: int, profile: dict, debug_users: set) -> bool:
+    """Return True if debug mode is active for this user.
+
+    Two sources are OR-combined so that debug survives Render cold-starts
+    that wipe the in-memory DEBUG_USERS set:
+    - ``chat_id in debug_users``  — immediate in-memory toggle (/debugmode)
+    - ``profile["_debug_mode"]``  — persistent flag stored in Google Sheets
+    """
+    return (chat_id in debug_users) or bool(profile.get("_debug_mode", False))
+
+
 async def process_game_turn(chat_id, user_input, progress_callback=None, narrator_queue=None):
     """
     Головний ігровий цикл.
@@ -353,9 +364,29 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
     global_start = time.time()
     debug_log += f"🚀 [START] Хід гравця {chat_id}..."
 
+    # Early init so the crash-handler (except path) never hits NameError if an
+    # exception fires before these are assigned post get_user_data.
+    _debug_active = False
+    _debug_trace = None
+
+    user_id = chat_id
+    timing_details = []
+
+    t_start = time.time()
+
+    profile, row_id = await get_user_data(user_id)
+    if not profile: return "❌ Профіль не знайдено.", []
+
     # === DEBUG TRACE (admin-only, toggle via /debugmode) ===
+    # _debug_active placed AFTER get_user_data so profile is available for the
+    # persistent flag check.  Survives Render cold-start that wipes DEBUG_USERS.
     from core.cheats import DEBUG_USERS
-    _debug_active = chat_id in DEBUG_USERS
+    _debug_active = _is_debug_active(chat_id, profile, DEBUG_USERS)
+    if _debug_active:
+        logger.info(
+            f"[DEBUG_MODE] Active for chat_id={chat_id} "
+            f"(in_set={chat_id in DEBUG_USERS}, profile_flag={bool(profile.get('_debug_mode', False))})"
+        )
     _debug_trace: dict | None = None
     if _debug_active:
         _debug_trace = {
@@ -368,14 +399,6 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             "narrator": {"thoughts": [], "final_text": None},
             "logs": [],
         }
-
-    user_id = chat_id
-    timing_details = []
-
-    t_start = time.time()
-
-    profile, row_id = await get_user_data(user_id)
-    if not profile: return "❌ Профіль не знайдено.", []
 
     session = user_sessions.get(chat_id, {})
     if session.get("state") == "INITIALIZING":
@@ -512,6 +535,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                     _debug_trace["narrator"]["final_text"] = "[BLOCKED BY CENSOR — pipeline stopped]"
                     _debug_trace["logs"] = [f"Censor refusal: {refusal_reason}"]
                     user_sessions.setdefault(chat_id, {})["last_debug_trace"] = _debug_trace
+                    logger.info(f"[DEBUG_MODE] Trace saved to session (path=censor) for chat_id={chat_id}")
                 return refusal_reason + "\n\n📊 🛑 Дію заблоковано Цензором.", []
 
             if progress_callback:
@@ -1389,6 +1413,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             _debug_trace["logs"] = list(logs)
             # Store in session for handlers.py pickup
             user_sessions.setdefault(chat_id, {})["last_debug_trace"] = _debug_trace
+            logger.info(f"[DEBUG_MODE] Trace saved to session (path=success) for chat_id={chat_id}")
 
         t_start = time.time()
         npc_changes = ai_data.get("npc_updates", []) + mechanical_updates.get("npc_updates", [])
@@ -1616,6 +1641,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                     f"TRACEBACK (last 5 lines): {traceback.format_exc()[-500:]}",
                 ]
                 user_sessions.setdefault(chat_id, {})["last_debug_trace"] = _debug_trace
+                logger.info(f"[DEBUG_MODE] Trace saved to session (path=crash) for chat_id={chat_id}")
         except Exception:
             pass  # never block crash recovery for debug persistence
         return "📜 *Ворон згубив вашого листа... Спробуйте ще раз.*", []
