@@ -730,7 +730,7 @@ async def _send_debug_trace_file(bot: Bot, chat_id: int, trace: dict) -> None:
     lines.append("=" * 70)
 
     lines.append("\n## 1. PLAYER ACTION")
-    lines.append(trace.get("user_input", "<empty>"))
+    lines.append(trace.get("user_input") or "<empty>")
 
     # Censor
     censor = trace.get("censor", {})
@@ -752,7 +752,7 @@ async def _send_debug_trace_file(bot: Bot, chat_id: int, trace: dict) -> None:
     if not worker.get("thoughts"):
         lines.append("  (none)")
     lines.append("Raw LLM response:")
-    lines.append(worker.get("raw", "<not captured>"))
+    lines.append(worker.get("raw") or "<not captured>")
     lines.append("Parsed output:")
     parsed_w = worker.get("parsed")
     if parsed_w:
@@ -769,7 +769,7 @@ async def _send_debug_trace_file(bot: Bot, chat_id: int, trace: dict) -> None:
     if not gm.get("thoughts"):
         lines.append("  (none)")
     lines.append("Raw LLM response:")
-    lines.append(gm.get("raw", "<not captured>"))
+    lines.append(gm.get("raw") or "<not captured>")
     lines.append("Parsed output:")
     parsed_gm = gm.get("parsed")
     if parsed_gm:
@@ -786,7 +786,7 @@ async def _send_debug_trace_file(bot: Bot, chat_id: int, trace: dict) -> None:
     if not nar.get("thoughts"):
         lines.append("  (none)")
     lines.append("Final text:")
-    lines.append(nar.get("final_text", "<empty>"))
+    lines.append(nar.get("final_text") or "<empty>")
 
     # Mechanical impacts
     lines.append("\n## 6. MECHANICAL IMPACTS (logs)")
@@ -796,7 +796,9 @@ async def _send_debug_trace_file(bot: Bot, chat_id: int, trace: dict) -> None:
     lines.append("\n" + "=" * 70)
     lines.append("END OF TRACE")
 
-    content = "\n".join(lines).encode("utf-8")
+    # str() guard: any line that is None (e.g. trace fields explicitly set to None)
+    # would crash "\n".join — coerce all to str defensively.
+    content = "\n".join(str(line) for line in lines).encode("utf-8")
     ts = datetime.fromtimestamp(trace.get("timestamp", 0)).strftime("%Y%m%d_%H%M%S")
     filename = f"debug_{chat_id}_{ts}.txt"
 

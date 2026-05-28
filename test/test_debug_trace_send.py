@@ -410,3 +410,35 @@ def test_full_debug_flow_no_send_when_trace_absent(handlers_module):
     assert len(send_document_calls) == 0, (
         "send_document must NOT be called when last_debug_trace is absent from session"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 7: None values in trace fields do NOT crash the join (regression)
+# ---------------------------------------------------------------------------
+
+def test_send_debug_trace_file_tolerates_none_fields(handlers_module):
+    """Regression: trace fields explicitly set to None (worker.raw, narrator.final_text,
+    user_input) must NOT crash '\\n'.join(lines) with TypeError.
+
+    Real bug from prod: worker['raw'] is always None, so worker.get('raw', default)
+    returned None (key exists), and join() raised
+    'TypeError: sequence item N: expected str instance, NoneType found'.
+    """
+    hm = handlers_module
+    chat_id = 99
+    trace = _make_trace(chat_id)
+    # Force the None values that occur in real traces
+    trace["user_input"] = None
+    trace["worker"]["raw"] = None
+    trace["gm_logic"]["raw"] = None
+    trace["narrator"]["final_text"] = None
+
+    mock_bot = MagicMock()
+    mock_bot.send_document = AsyncMock()
+
+    # Must not raise TypeError
+    asyncio.run(hm._send_debug_trace_file(mock_bot, chat_id, trace))
+
+    assert mock_bot.send_document.called, (
+        "send_document must be called even when trace has None fields"
+    )
