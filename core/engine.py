@@ -12,6 +12,7 @@ from config import MODEL_NARRATOR_NAME
 from core.mechanics import apply_system_impacts, process_training_request, safe_int, validate_action
 from core.dnd_engine import resolve_normal_action, apply_dnd_impacts
 from core.dnd_classes import GOT_CLASSES
+from core.dnd_core import score_to_relation_text
 from core.dnd_progression import apply_pending_levelups
 from core.dnd_combat_engine import (
     execute_combat_round,
@@ -22,7 +23,6 @@ from core.dnd_combat_engine import (
 from core.prompts import (
     GAME_ERA_CONTEXT, build_summarize_turn_prompt, build_summarize_full_turn_prompt,
     build_narrator_prompt, build_gm_logic_prompt, build_history_summary_prompt,
-    build_gm_logic_schema,
 )
 from core.world_constants import VALID_LOCATIONS_ORDERED, VALID_REGIONS_ORDERED, TRAVEL_LOCATION, get_region_for_location, get_locations_for_region, LOCATION_DESCRIPTIONS, format_scenes_for_prompt
 from core.inventory import parse_inventory as _parse_inventory, format_inventory as _fmt_inventory
@@ -827,13 +827,23 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
 
     # FSM transition: combat_imminent=True → initiate COMBAT mode for next turn
     if mechanical_updates.get("combat_imminent") and profile.get("mode") != "COMBAT":
+        # Use real score-based relation for every NPC in the scene.
+        # Hardcoding "Ворожий" for all scene NPCs was wrong: a neutral bystander
+        # caught in someone else's fight should not enter COMBAT with "Ворожий".
+        # The actual aggressor will already have a hostile score in npc_reputation_context;
+        # if for some reason it doesn't, "Нейтральний" (score=0 fallback) is still safer
+        # than a blanket "Ворожий" for everybody.
         _scene_npcs_for_combat = [
-            {"Name": n, "Relation_Player": "Ворожий"}
+            {
+                "Name": n,
+                "Relation_Player": score_to_relation_text(
+                    (npc_reputation_context or {}).get(n, 0)
+                ),
+            }
             for n in legal_npc_names
         ]
         if _scene_npcs_for_combat:
             try:
-                from core.dnd_combat_engine import initiate_combat_from_normal
                 _new_cs = await initiate_combat_from_normal(chat_id, profile, _scene_npcs_for_combat)
                 # Initiative display: "Ім'я (roll), Ім'я (roll)"
                 _init_parts = [
@@ -990,9 +1000,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             await progress_callback("🌍 Оновлюємо стан світу...")
         t_gm_logic = time.time()
 
-        _gm_logic_cfg = build_strict_config(
-            model_gm_logic, build_gm_logic_schema(mode=_gm_mode)
-        )
+        _gm_logic_cfg = build_strict_config(model_gm_logic)
 
         if _debug_active:
             clear_thoughts()  # isolate GM_Logic thoughts from previous stages

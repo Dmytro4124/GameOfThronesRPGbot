@@ -1,61 +1,18 @@
 # database/canon_npc.py
 import copy
 
-# Маппінг текстових Relation_Player → числових Reputation_Score
-_RELATION_TO_SCORE = {
-    # ── 15-ступенева шкала ──
-    "смертельна ненависть":  -80,
-    "кривавий ворог":        -65,
-    "відкрита ворожість":    -50,
-    "ворожий":               -35,
-    "глибока підозра":       -25,
-    "підозрілий":            -15,
-    "холодний":               -5,
-    "нейтральний":             0,
-    "обережно відкритий":     10,
-    "тепле ставлення":        20,
-    "прихильний":             30,
-    "дружній":                45,
-    "довіряє":                60,
-    "глибока довіра":         70,
-    "абсолютна довіра":       85,
-    # ── Старі значення (backward compat для CANON_NPCS) ──
-    "дружня":                 30,
-    "дружня (фальшива)":      10,
-    "нейтральна":              0,
-    "обережна":              -10,
-    "зверхня":               -20,
-    "підозріла":             -30,
-    "агресивна":             -50,
-    "ворожа":                -60,
-}
+# Relation ↔ score mapping — single source of truth lives in core/dnd_core.py.
+# Re-imported here; backward-compat aliases preserve the _-prefixed names used by
+# external callers (core/cheats.py, core/world.py, database/operations.py).
+from core.dnd_core import (
+    RELATION_TO_SCORE,
+    map_relation_to_score,
+    score_to_relation_text,
+)
 
-
-def _map_relation_to_score(relation_text):
-    """Конвертує текстове ставлення до числового score."""
-    if not relation_text:
-        return 0
-    key = str(relation_text).strip().lower()
-    return _RELATION_TO_SCORE.get(key, 0)
-
-
-def _score_to_relation_text(score: int) -> str:
-    """Конвертує числовий Reputation_Score у текстовий ступінь 15-ступеневої шкали."""
-    if score >= 85: return "Абсолютна довіра"
-    if score >= 70: return "Глибока довіра"
-    if score >= 60: return "Довіряє"
-    if score >= 45: return "Дружній"
-    if score >= 30: return "Прихильний"
-    if score >= 20: return "Тепле ставлення"
-    if score >= 10: return "Обережно відкритий"
-    if score >= -5: return "Нейтральний"
-    if score >= -15: return "Холодний"
-    if score >= -25: return "Підозрілий"
-    if score >= -35: return "Глибока підозра"
-    if score >= -50: return "Ворожий"
-    if score >= -65: return "Відкрита ворожість"
-    if score >= -80: return "Кривавий ворог"
-    return "Смертельна ненависть"
+_RELATION_TO_SCORE = RELATION_TO_SCORE          # backward-compat alias
+_map_relation_to_score = map_relation_to_score  # backward-compat alias
+_score_to_relation_text = score_to_relation_text  # backward-compat alias
 
 
 def _ensure_reputation_scores(npcs_list):

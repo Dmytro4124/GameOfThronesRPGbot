@@ -842,7 +842,10 @@ def test_process_game_turn_combat_imminent_triggers_initiation():
         patch("core.engine.model_gm_logic.generate_content", return_value=gm_resp),
         patch("core.engine.model_narrator.generate_content", return_value=narrator_resp),
         patch("core.engine._run_bg_task", return_value=MagicMock()),
-        patch("core.dnd_combat_engine.initiate_combat_from_normal", new=initiate_mock),
+        # Patch the top-level binding in core.engine (not the source module).
+        # After the local lazy import inside try-block was removed, the call goes
+        # through the module-level name imported at the top of engine.py.
+        patch("core.engine.initiate_combat_from_normal", new=initiate_mock),
     ]
 
     async def _run_engine():

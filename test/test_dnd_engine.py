@@ -1106,6 +1106,91 @@ class TestProcessGameTurnIntegration:
         assert isinstance(result_text, str) and len(result_text) > 0
         assert isinstance(result_actions, list)
 
+    # 21. combat_imminent=True → scene NPCs use real score-based relation (not hardcoded "Ворожий")
+    def test_combat_init_uses_real_relation_not_hardcoded_hostile(self):
+        """COMBAT scene NPCs get score-based relation, not hardcoded 'Ворожий'.
+
+        Regression guard for WARN #1 from code-reviewer:
+        engine.py _scene_npcs_for_combat was built with hardcoded Relation_Player='Ворожий'
+        for ALL NPCs in the scene, even peaceful bystanders.
+
+        Scenario:
+        - Scene contains two NPCs: an aggressor (score=-50, 'Ворожий') and a
+          neutral bystander (score=0, 'Нейтральний').
+        - combat_imminent=True triggers COMBAT init.
+        - initiate_combat_from_normal must receive the neutral NPC with
+          Relation_Player='Нейтральний', NOT 'Ворожий'.
+        """
+        captured_scene_npcs: list = []
+
+        async def _spy_initiate(chat_id, profile, scene_npcs):
+            captured_scene_npcs.extend(scene_npcs)
+            # Return a minimal CombatState-like mock so engine can iterate initiative_order
+            mock_cs = MagicMock()
+            mock_cs.initiative_order = []
+            return mock_cs
+
+        worker_updates = dict(_PROCESS_WORKER_UPDATES)
+        worker_updates["combat_imminent"] = True
+
+        narrator_resp = MagicMock()
+        narrator_resp.text = _PROCESS_NARRATOR_TEXT
+
+        gm_resp = MagicMock()
+        gm_resp.text = _PROCESS_GM_JSON
+
+        # Two NPCs: one hostile (aggressor), one neutral (bystander)
+        npc_names = ["Агресор", "Мирний NPC"]
+        npc_reputation = {"Агресор": -50, "Мирний NPC": 0}
+
+        patches = [
+            patch("core.engine.get_user_data", new=AsyncMock(return_value=(dict(_PROCESS_PROFILE), 2))),
+            patch("core.engine.validate_action", new=AsyncMock(return_value=(True, ""))),
+            patch(
+                "core.engine.resolve_normal_action",
+                new=AsyncMock(return_value=("MECHANICAL VERDICT: SUCCESS", worker_updates)),
+            ),
+            patch(
+                "core.engine.get_location_npcs",
+                return_value=("Агресор стоїть тут. Мирний NPC теж.", npc_names, npc_reputation),
+            ),
+            patch("core.engine.get_relevant_context", new=AsyncMock(return_value="")),
+            patch("core.engine.get_dead_npc_names", return_value=set()),
+            patch("core.engine.model_gm_logic.generate_content", return_value=gm_resp),
+            patch("core.engine.model_narrator.generate_content", return_value=narrator_resp),
+            patch("core.engine._run_bg_task", return_value=MagicMock()),
+            patch("core.engine.initiate_combat_from_normal", new=AsyncMock(side_effect=_spy_initiate)),
+        ]
+
+        async def _run():
+            from core.engine import process_game_turn
+            return await process_game_turn(
+                chat_id=1099,
+                user_input="Агресор нападає!",
+                narrator_queue=None,
+            )
+
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            asyncio.run(_run())
+
+        assert len(captured_scene_npcs) == 2, (
+            f"Expected 2 scene NPCs passed to initiate_combat_from_normal. "
+            f"Got {len(captured_scene_npcs)}: {captured_scene_npcs}"
+        )
+
+        by_name = {npc["Name"]: npc["Relation_Player"] for npc in captured_scene_npcs}
+
+        assert by_name["Агресор"] == "Ворожий", (
+            f"Агресор (score=-50) must have Relation_Player='Ворожий'. "
+            f"Got {by_name['Агресор']!r}"
+        )
+        assert by_name["Мирний NPC"] == "Нейтральний", (
+            f"REGRESSION: Мирний NPC (score=0) must have Relation_Player='Нейтральний', "
+            f"NOT hardcoded 'Ворожий'. Got {by_name['Мирний NPC']!r}"
+        )
+
 
 # ===========================================================================
 # Tests: Item 2 — response_schema config passed to model_worker (Phase 11b)
@@ -1194,8 +1279,7 @@ class TestResolveNormalActionPassesSchema:
     def test_build_strict_config_inherits_temperature(self):
         """build_strict_config must use model_wrapper.temperature if no override given."""
         from core.ai_client import build_strict_config, model_worker
-        from core.prompts import build_normal_resolve_schema
-        cfg = build_strict_config(model_worker, build_normal_resolve_schema())
+        cfg = build_strict_config(model_worker)
         assert cfg.temperature == model_worker.temperature, (
             f"temperature must match model_worker.temperature={model_worker.temperature}, "
             f"got {cfg.temperature}"
@@ -1204,8 +1288,7 @@ class TestResolveNormalActionPassesSchema:
     def test_build_strict_config_temperature_override(self):
         """build_strict_config must use the provided temperature override."""
         from core.ai_client import build_strict_config, model_worker
-        from core.prompts import build_normal_resolve_schema
-        cfg = build_strict_config(model_worker, build_normal_resolve_schema(), temperature=0.42)
+        cfg = build_strict_config(model_worker, temperature=0.42)
         assert cfg.temperature == 0.42, (
             f"temperature override must be 0.42, got {cfg.temperature}"
         )
@@ -1216,9 +1299,7 @@ class TestResolveNormalActionPassesSchema:
         14-min hangs on gemma-4-31b-it preview (schema is accepted but ignored).
         """
         from core.ai_client import build_strict_config, model_worker
-        from core.prompts import build_validate_action_schema
-        schema = build_validate_action_schema()
-        cfg = build_strict_config(model_worker, schema)
+        cfg = build_strict_config(model_worker)
         assert cfg.response_mime_type == "application/json"
         assert not hasattr(cfg, "response_schema") or cfg.response_schema is None
 
@@ -2377,4 +2458,276 @@ class TestWorkerRetry:
         )
         assert updates["outcome"] == "SUCCESS", (
             f"AUTO_SUCCESS fallback outcome must be 'SUCCESS'. Got {updates['outcome']!r}"
+        )
+
+
+# ===========================================================================
+# Tests: npcs_in_scene uses real relation from npc_reputation_context
+# ===========================================================================
+
+class TestNpcsInSceneRelation:
+    """Regression suite: npcs_in_scene_dicts must use score_to_relation_text(reputation_score),
+    NOT the hardcoded string 'Нейтральний'.
+
+    Root cause (fixed): dnd_engine.py line 143-144 was:
+        [{"Name": n, "Relation_Player": "Нейтральний"} for n in ...]
+    Fix: loop over npc_names, look up score in npc_reputation_context, call score_to_relation_text.
+    """
+
+    def test_npc_with_high_score_gets_absolute_trust(self):
+        """npc_reputation_context={"Дейнеріс": 100} → npcs_in_scene Relation_Player='Абсолютна довіра'.
+        Verify via mock of build_normal_resolve_prompt: check npcs_in_scene kwarg."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data()
+
+        captured_npcs = []
+
+        def _mock_prompt(**kwargs):
+            captured_npcs.extend(kwargs.get("npcs_in_scene", []))
+            return "MOCK_PROMPT"
+
+        async def _run():
+            from core.dnd_engine import resolve_normal_action
+            return await resolve_normal_action(
+                user_input="Поговорити з Дейнерісою",
+                profile=profile,
+                npc_names=["Дейнеріс"],
+                npc_reputation_context={"Дейнеріс": 100},
+            )
+
+        gen_patch = patch(
+            "core.dnd_engine.model_worker.generate_content",
+            return_value=_make_llm_response(data),
+        )
+        parse_patch = patch("core.dnd_engine.clean_and_parse_json", return_value=data)
+        prompt_patch = patch(
+            "core.dnd_engine.build_normal_resolve_prompt",
+            side_effect=_mock_prompt,
+        )
+
+        with gen_patch, parse_patch, prompt_patch:
+            _run_async(_run())
+
+        assert len(captured_npcs) == 1, (
+            f"npcs_in_scene must have 1 entry for 1 NPC. Got {len(captured_npcs)}: {captured_npcs}"
+        )
+        rel = captured_npcs[0].get("Relation_Player")
+        assert rel == "Абсолютна довіра", (
+            f"score=100 must yield 'Абсолютна довіра', NOT hardcoded 'Нейтральний'. "
+            f"Got {rel!r}"
+        )
+
+    def test_npc_with_zero_score_gets_neutral(self):
+        """npc_reputation_context={"Ланністер": 0} → Relation_Player='Нейтральний'."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data()
+
+        captured_npcs = []
+
+        def _mock_prompt(**kwargs):
+            captured_npcs.extend(kwargs.get("npcs_in_scene", []))
+            return "MOCK_PROMPT"
+
+        async def _run():
+            from core.dnd_engine import resolve_normal_action
+            return await resolve_normal_action(
+                user_input="Дивлюсь на Ланністера",
+                profile=profile,
+                npc_names=["Ланністер"],
+                npc_reputation_context={"Ланністер": 0},
+            )
+
+        with (
+            patch("core.dnd_engine.model_worker.generate_content",
+                  return_value=_make_llm_response(data)),
+            patch("core.dnd_engine.clean_and_parse_json", return_value=data),
+            patch("core.dnd_engine.build_normal_resolve_prompt", side_effect=_mock_prompt),
+        ):
+            _run_async(_run())
+
+        assert captured_npcs[0]["Relation_Player"] == "Нейтральний", (
+            f"score=0 must yield 'Нейтральний'. Got {captured_npcs[0]['Relation_Player']!r}"
+        )
+
+    def test_npc_with_negative_score_gets_hostile(self):
+        """npc_reputation_context={"Серсея": -40} → score_to_relation_text(-40) = 'Ворожий'."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data()
+
+        captured_npcs = []
+
+        def _mock_prompt(**kwargs):
+            captured_npcs.extend(kwargs.get("npcs_in_scene", []))
+            return "MOCK_PROMPT"
+
+        async def _run():
+            from core.dnd_engine import resolve_normal_action
+            return await resolve_normal_action(
+                user_input="Дивлюсь на Серсею",
+                profile=profile,
+                npc_names=["Серсея"],
+                npc_reputation_context={"Серсея": -40},
+            )
+
+        with (
+            patch("core.dnd_engine.model_worker.generate_content",
+                  return_value=_make_llm_response(data)),
+            patch("core.dnd_engine.clean_and_parse_json", return_value=data),
+            patch("core.dnd_engine.build_normal_resolve_prompt", side_effect=_mock_prompt),
+        ):
+            _run_async(_run())
+
+        # score -40 falls in range [-50, -36) → "Ворожий"
+        assert captured_npcs[0]["Relation_Player"] == "Ворожий", (
+            f"score=-40 must yield 'Ворожий'. Got {captured_npcs[0]['Relation_Player']!r}"
+        )
+
+    def test_npc_absent_from_reputation_context_defaults_to_neutral(self):
+        """NPC not in npc_reputation_context → default score=0 → 'Нейтральний'."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data()
+
+        captured_npcs = []
+
+        def _mock_prompt(**kwargs):
+            captured_npcs.extend(kwargs.get("npcs_in_scene", []))
+            return "MOCK_PROMPT"
+
+        async def _run():
+            from core.dnd_engine import resolve_normal_action
+            return await resolve_normal_action(
+                user_input="Дивлюсь довкола",
+                profile=profile,
+                npc_names=["Невідомий"],
+                npc_reputation_context={},  # NPC not in dict
+            )
+
+        with (
+            patch("core.dnd_engine.model_worker.generate_content",
+                  return_value=_make_llm_response(data)),
+            patch("core.dnd_engine.clean_and_parse_json", return_value=data),
+            patch("core.dnd_engine.build_normal_resolve_prompt", side_effect=_mock_prompt),
+        ):
+            _run_async(_run())
+
+        assert captured_npcs[0]["Relation_Player"] == "Нейтральний", (
+            f"NPC absent from context must default to 'Нейтральний'. "
+            f"Got {captured_npcs[0]['Relation_Player']!r}"
+        )
+
+    def test_npc_absent_reputation_context_none_defaults_to_neutral(self):
+        """npc_reputation_context=None (not passed) → default score=0 → 'Нейтральний'."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data()
+
+        captured_npcs = []
+
+        def _mock_prompt(**kwargs):
+            captured_npcs.extend(kwargs.get("npcs_in_scene", []))
+            return "MOCK_PROMPT"
+
+        async def _run():
+            from core.dnd_engine import resolve_normal_action
+            return await resolve_normal_action(
+                user_input="Дивлюсь довкола",
+                profile=profile,
+                npc_names=["Хтось"],
+                # npc_reputation_context not passed → defaults to None
+            )
+
+        with (
+            patch("core.dnd_engine.model_worker.generate_content",
+                  return_value=_make_llm_response(data)),
+            patch("core.dnd_engine.clean_and_parse_json", return_value=data),
+            patch("core.dnd_engine.build_normal_resolve_prompt", side_effect=_mock_prompt),
+        ):
+            _run_async(_run())
+
+        assert captured_npcs[0]["Relation_Player"] == "Нейтральний", (
+            f"npc_reputation_context=None must default to 'Нейтральний'. "
+            f"Got {captured_npcs[0]['Relation_Player']!r}"
+        )
+
+    def test_multiple_npcs_each_get_correct_relation(self):
+        """Multiple NPCs with different scores each get the correct textual relation."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data()
+
+        captured_npcs = []
+
+        def _mock_prompt(**kwargs):
+            captured_npcs.extend(kwargs.get("npcs_in_scene", []))
+            return "MOCK_PROMPT"
+
+        npc_reputation = {
+            "Джон Сноу": 85,   # "Абсолютна довіра"
+            "Серсея":    -40,  # "Ворожий"
+            "Самвелл":   30,   # "Прихильний"
+        }
+
+        async def _run():
+            from core.dnd_engine import resolve_normal_action
+            return await resolve_normal_action(
+                user_input="Дивлюсь на всіх",
+                profile=profile,
+                npc_names=["Джон Сноу", "Серсея", "Самвелл"],
+                npc_reputation_context=npc_reputation,
+            )
+
+        with (
+            patch("core.dnd_engine.model_worker.generate_content",
+                  return_value=_make_llm_response(data)),
+            patch("core.dnd_engine.clean_and_parse_json", return_value=data),
+            patch("core.dnd_engine.build_normal_resolve_prompt", side_effect=_mock_prompt),
+        ):
+            _run_async(_run())
+
+        assert len(captured_npcs) == 3, (
+            f"npcs_in_scene must have 3 entries. Got {len(captured_npcs)}"
+        )
+        by_name = {npc["Name"]: npc["Relation_Player"] for npc in captured_npcs}
+
+        assert by_name["Джон Сноу"] == "Абсолютна довіра", (
+            f"Джон Сноу score=85: expected 'Абсолютна довіра', got {by_name['Джон Сноу']!r}"
+        )
+        assert by_name["Серсея"] == "Ворожий", (
+            f"Серсея score=-40: expected 'Ворожий', got {by_name['Серсея']!r}"
+        )
+        assert by_name["Самвелл"] == "Прихильний", (
+            f"Самвелл score=30: expected 'Прихильний', got {by_name['Самвелл']!r}"
+        )
+
+    def test_not_hardcoded_neutralnyi_for_trusted_npc(self):
+        """Regression: the old code always returned 'Нейтральний' regardless of score.
+        This test explicitly guards against that regression: a score of 100 must NOT
+        produce 'Нейтральний'."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data()
+
+        captured_npcs = []
+
+        def _mock_prompt(**kwargs):
+            captured_npcs.extend(kwargs.get("npcs_in_scene", []))
+            return "MOCK_PROMPT"
+
+        async def _run():
+            from core.dnd_engine import resolve_normal_action
+            return await resolve_normal_action(
+                user_input="Поговорити",
+                profile=profile,
+                npc_names=["Дейнеріс"],
+                npc_reputation_context={"Дейнеріс": 100},
+            )
+
+        with (
+            patch("core.dnd_engine.model_worker.generate_content",
+                  return_value=_make_llm_response(data)),
+            patch("core.dnd_engine.clean_and_parse_json", return_value=data),
+            patch("core.dnd_engine.build_normal_resolve_prompt", side_effect=_mock_prompt),
+        ):
+            _run_async(_run())
+
+        rel = captured_npcs[0]["Relation_Player"]
+        assert rel != "Нейтральний", (
+            f"REGRESSION: score=100 must NOT yield hardcoded 'Нейтральний'. Got {rel!r}"
         )

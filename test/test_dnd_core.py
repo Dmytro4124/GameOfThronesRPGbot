@@ -13,6 +13,9 @@ from core.dnd_core import (
     saving_throw,
     CheckResult,
     LEGAL_DCS,
+    score_to_relation_text,
+    map_relation_to_score,
+    RELATION_TO_SCORE,
 )
 from core.dnd_skills import SKILLS, is_valid_skill, get_ability_for_skill
 
@@ -434,3 +437,141 @@ def test_clamp_dc_25_now_returns_22():
     assert clamp_dc(25) == 22
     assert clamp_dc(28) == 22
     assert clamp_dc(30) == 22
+
+
+# ---------------------------------------------------------------------------
+# score_to_relation_text — 15-step relation scale
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("score,expected", [
+    # upper boundary
+    (100,  "Абсолютна довіра"),
+    (85,   "Абсолютна довіра"),
+    # each step, at exact threshold
+    (70,   "Глибока довіра"),
+    (60,   "Довіряє"),
+    (45,   "Дружній"),
+    (30,   "Прихильний"),
+    (20,   "Тепле ставлення"),
+    (10,   "Обережно відкритий"),
+    (0,    "Нейтральний"),
+    (-5,   "Нейтральний"),
+    (-6,   "Холодний"),
+    (-15,  "Холодний"),
+    (-16,  "Підозрілий"),
+    (-25,  "Підозрілий"),
+    (-26,  "Глибока підозра"),
+    (-35,  "Глибока підозра"),
+    (-36,  "Ворожий"),
+    (-50,  "Ворожий"),
+    (-51,  "Відкрита ворожість"),
+    (-65,  "Відкрита ворожість"),
+    (-66,  "Кривавий ворог"),
+    (-80,  "Кривавий ворог"),
+    # below minimum threshold
+    (-81,  "Смертельна ненависть"),
+    (-100, "Смертельна ненависть"),
+])
+def test_score_to_relation_text_boundaries(score, expected):
+    assert score_to_relation_text(score) == expected, (
+        f"score_to_relation_text({score}) expected {expected!r}, "
+        f"got {score_to_relation_text(score)!r}"
+    )
+
+
+def test_score_to_relation_text_zero_is_neutral():
+    assert score_to_relation_text(0) == "Нейтральний"
+
+
+def test_score_to_relation_text_high_positive_is_absolute_trust():
+    assert score_to_relation_text(100) == "Абсолютна довіра"
+
+
+def test_score_to_relation_text_very_negative_is_deadly_hate():
+    assert score_to_relation_text(-200) == "Смертельна ненависть"
+
+
+def test_score_to_relation_text_returns_string():
+    for score in range(-100, 101, 5):
+        result = score_to_relation_text(score)
+        assert isinstance(result, str) and len(result) > 0, (
+            f"score_to_relation_text({score}) must return non-empty string"
+        )
+
+
+# ---------------------------------------------------------------------------
+# map_relation_to_score — reverse mapping
+# ---------------------------------------------------------------------------
+
+def test_map_relation_to_score_neutral_returns_zero():
+    assert map_relation_to_score("нейтральний") == 0
+
+
+def test_map_relation_to_score_case_insensitive():
+    assert map_relation_to_score("НЕЙТРАЛЬНИЙ") == 0
+    assert map_relation_to_score("Нейтральний") == 0
+
+
+def test_map_relation_to_score_empty_returns_zero():
+    assert map_relation_to_score("") == 0
+    assert map_relation_to_score(None) == 0
+
+
+def test_map_relation_to_score_unknown_returns_zero():
+    assert map_relation_to_score("невідомо") == 0
+
+
+def test_map_relation_to_score_absolute_trust():
+    assert map_relation_to_score("абсолютна довіра") == 85
+
+
+def test_map_relation_to_score_deadly_hate():
+    assert map_relation_to_score("смертельна ненависть") == -80
+
+
+def test_map_relation_to_score_legacy_friendly():
+    """Backward compat: old "дружня" label must map to 30 (not 45 like canonical "дружній")."""
+    assert map_relation_to_score("дружня") == 30
+
+
+# ---------------------------------------------------------------------------
+# RELATION_TO_SCORE dict structure
+# ---------------------------------------------------------------------------
+
+def test_relation_to_score_has_canonical_15_step_labels():
+    canonical = {
+        "смертельна ненависть", "кривавий ворог", "відкрита ворожість",
+        "ворожий", "глибока підозра", "підозрілий", "холодний",
+        "нейтральний", "обережно відкритий", "тепле ставлення",
+        "прихильний", "дружній", "довіряє", "глибока довіра",
+        "абсолютна довіра",
+    }
+    for label in canonical:
+        assert label in RELATION_TO_SCORE, (
+            f"Canonical label {label!r} missing from RELATION_TO_SCORE"
+        )
+
+
+# ---------------------------------------------------------------------------
+# canon_npc re-export aliases point to the same objects as dnd_core public API
+# ---------------------------------------------------------------------------
+
+def test_canon_npc_reexports_score_to_relation_text():
+    """_score_to_relation_text alias in canon_npc must be the same object as dnd_core public fn."""
+    from database.canon_npc import _score_to_relation_text
+    from core.dnd_core import score_to_relation_text
+    assert _score_to_relation_text is score_to_relation_text
+
+
+def test_canon_npc_reexports_map_relation_to_score():
+    """_map_relation_to_score alias in canon_npc must be the same object as dnd_core public fn."""
+    from database.canon_npc import _map_relation_to_score
+    from core.dnd_core import map_relation_to_score
+    assert _map_relation_to_score is map_relation_to_score
+
+
+def test_canon_npc_reexports_relation_to_score_dict():
+    """_RELATION_TO_SCORE alias in canon_npc must be the same object as dnd_core public dict."""
+    from database.canon_npc import _RELATION_TO_SCORE
+    from core.dnd_core import RELATION_TO_SCORE
+    assert _RELATION_TO_SCORE is RELATION_TO_SCORE

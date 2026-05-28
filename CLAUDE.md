@@ -338,6 +338,7 @@ ENV-змінні: `TELEGRAM_TOKEN`, `GEMINI_API_KEY` (+ `GEMINI_API_KEY_TEST_*` 
 - Промпти inline у `prompts.py` як f-strings — складно діффити та рефакторити.
 - Migration script `scripts/dnd_migrate.py` — CLI tool для Phase 9; `Users_DB` вимагає wipe перед production launch (старі профілі несумісні з D&D pipeline).
 - `test_engine.py::test_process_game_turn_success` — замінено на `pytest.skip` (застарів після переходу на async + D&D pipeline). Перезапис — окрема задача qa-agent.
+- `core/world.py:generate_initial_stats_legacy` — orphan (2d50, deprecated). Більше не fallback (замінено на `_build_deterministic_dnd_profile`). Видалити повністю — окрема задача. Plus dead stub-атрибути `build_*_schema` у `test/test_debug_trace.py:648,709` (залишок після schema cleanup).
 - Death saving throws (3 fails = death) — deferred. На MVP HP=0 = `Status: Dead`.
 - Subclass archetypes (D&D L3 multi-class branches) — deferred.
 - Feats — deferred (наразі лише ASI при level-up).

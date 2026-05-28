@@ -1,6 +1,7 @@
 # core/world.py
 import difflib
 import json
+import logging
 import asyncio
 from database.sheets import db
 from database.operations import refresh_npc_database, find_best_match, ensure_user_npc_sheet, _npc_tab_name
@@ -8,10 +9,314 @@ from core.ai_client import model, model_gm_logic, ask_gemini, clean_and_parse_js
 from core.prompts import (
     GAME_ERA_CONTEXT, build_famous_characters_prompt,
     build_initial_stats_prompt, build_game_intro_prompt, build_populate_npcs_prompt,
-    build_initial_stats_schema,
 )
 from core.world_constants import get_region_for_location, get_locations_for_region, is_valid_location, VALID_LOCATIONS_ORDERED, format_scenes_for_prompt, LOCATION_SCENES
 from database.canon_npc import get_canon_npcs_copy
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Standard D&D ability array (PHB p.13).  Indices correspond to priority
+# slots: 0 = primary, 1 = secondary, 2-5 = remaining abilities.
+# ---------------------------------------------------------------------------
+_STANDARD_ARRAY: list[int] = [15, 14, 13, 12, 10, 8]
+
+# Default background per GoT class — used when LLM is unavailable.
+_CLASS_BACKGROUNDS: dict[str, str] = {
+    "Knight":         "Soldier",
+    "Hedge Knight":   "Outlander",
+    "Maester":        "Sage",
+    "Septon":         "Acolyte",
+    "Sellsword":      "Soldier",
+    "Spy/Whisperer":  "Criminal",
+    "Courtier":       "Noble",
+    "Bastard":        "Outlander",
+    "Wildling Raider":"Outlander",
+}
+
+
+def _build_deterministic_dnd_profile(
+    char_name: str,
+    house_name: str,
+    origin_region: str,
+    suggested_class: str = "Knight",
+    suggested_heritage: str = "Westerosi (Andal)",
+) -> dict:
+    """Return a valid D&D L1 profile without any LLM call.
+
+    Used as fallback when LLM stat generation fails at character creation.
+    The returned profile has the SAME keys as the successful LLM path in
+    generate_initial_stats — all downstream code (resolve_normal_action,
+    level_up, combat) receives a fully-formed profile.
+
+    Ability scores: D&D standard array [15,14,13,12,10,8] distributed by
+    class primary_abilities (primary → 15, secondary → 14, rest in order).
+    Heritage ability bonuses are applied on top (capped at 20 per D&D rules).
+
+    §5.2 invariants honoured:
+    - ability scores 1-20 (clamped after heritage bonuses)
+    - hp_max = hit_die + CON_mod (minimum 1)
+    - proficiency_bonus = 2 at L1
+    - Енергія = 1000 (legacy scale start)
+    - Здоров'я = hp_current (legacy UI sync)
+    """
+    import re as _re
+    from core.dnd_classes import GOT_CLASSES, get_class, get_starting_hp, build_class_starting_kit, get_class_features_at_level
+    from core.dnd_heritages import HERITAGES, apply_heritage_bonuses, get_heritage
+    from core.dnd_core import ability_modifier, proficiency_bonus
+
+    # --- Guard: unknown class / heritage ---
+    if suggested_class not in GOT_CLASSES:
+        logger.warning(f"[WORLD FALLBACK] Unknown class '{suggested_class}' → fallback to 'Knight'")
+        suggested_class = "Knight"
+    if suggested_heritage not in HERITAGES:
+        logger.warning(f"[WORLD FALLBACK] Unknown heritage '{suggested_heritage}' → fallback to 'Westerosi (Andal)'")
+        suggested_heritage = "Westerosi (Andal)"
+
+    cls_def = get_class(suggested_class)
+
+    # --- Distribute standard array by primary_abilities priority ---
+    all_abilities = ["STR", "DEX", "CON", "INT", "WIS", "CHA"]
+    primary = cls_def.primary_abilities  # e.g. ["STR", "CHA"] for Knight
+
+    # Build ordered slot list: primaries first, then remaining abilities
+    ordered_slots: list[str] = list(primary)
+    for ab in all_abilities:
+        if ab not in ordered_slots:
+            ordered_slots.append(ab)
+
+    raw_scores: dict[str, int] = {}
+    for idx, ab in enumerate(ordered_slots):
+        score = _STANDARD_ARRAY[idx] if idx < len(_STANDARD_ARRAY) else 8
+        raw_scores[ab] = score
+
+    # --- Apply heritage bonuses (mutates ability_scores, caps at 20) ---
+    _tmp_profile: dict = {"ability_scores": raw_scores}
+    _tmp_profile = apply_heritage_bonuses(
+        _tmp_profile,
+        suggested_heritage,
+        ability_choices=None,  # Westerosi Andal: fallback to STR, DEX per apply_heritage_bonuses logic
+    )
+    final_scores: dict[str, int] = _tmp_profile["ability_scores"]
+    languages: list[str] = _tmp_profile.get("languages", ["Common Tongue"])
+
+    # --- L1 D&D deterministic fields ---
+    level = 1
+    xp = 0
+    pb = proficiency_bonus(level)  # = 2 at L1
+    con_mod = ability_modifier(final_scores.get("CON", 10))
+    hp_max = get_starting_hp(suggested_class, con_mod)
+    hp_current = hp_max
+
+    # --- Equipment ---
+    kit = build_class_starting_kit(suggested_class)
+    armor_str: str = kit.get("armor") or ""
+    dex_mod = ability_modifier(final_scores.get("DEX", 10))
+
+    # Initial AC (same logic as generate_initial_stats)
+    if armor_str:
+        ac_match = _re.search(r'AC\s*(\d+)', armor_str)
+        if ac_match:
+            base_ac = int(ac_match.group(1))
+            if "DEX mod" in armor_str:
+                max_dex_bonus = 2 if any(kw in armor_str.lower() for kw in ("medium", "hide", "studded")) else 99
+                ac = base_ac + min(dex_mod, max_dex_bonus)
+            else:
+                ac = base_ac
+        else:
+            ac = 10 + dex_mod
+    else:
+        ac = 10 + dex_mod
+
+    if kit.get("shield"):
+        ac += 2
+
+    # --- Skill and save proficiencies ---
+    skill_choices_count = cls_def.skill_choices
+    skill_profs: list[str] = list(cls_def.skill_pool[:skill_choices_count])
+    saves_proficient: list[str] = list(cls_def.saves_proficient)
+
+    # --- L1 features ---
+    features: list[dict] = [
+        {"name": f.name, "desc": f.desc, "source": f.source}
+        for f in get_class_features_at_level(suggested_class, 1)
+    ]
+
+    # --- Inventory ---
+    from core.inventory import parse_inventory as _parse_inv
+    items_list: list[str] = list(kit.get("items", []))
+    if kit.get("weapon_main"):
+        items_list.insert(0, kit["weapon_main"])
+    if kit.get("weapon_off"):
+        items_list.insert(1, kit["weapon_off"])
+    inventory_str = _parse_inv(items_list)
+
+    gold_from_kit = int(kit.get("gold", 0))
+
+    # --- Heritage traits ---
+    heritage_obj = get_heritage(suggested_heritage)
+    heritage_trait_names = ", ".join(t.name for t in heritage_obj.traits)
+
+    # --- Location: first valid location for the origin region ---
+    region_locs = get_locations_for_region(origin_region)
+    if region_locs:
+        location = region_locs[0]
+    else:
+        location = VALID_LOCATIONS_ORDERED[0]
+
+    # Scene: hub[0] for location, or location name as fallback
+    loc_scenes = LOCATION_SCENES.get(location, {})
+    hub_scenes = loc_scenes.get("hub", [])
+    scene = hub_scenes[0] if hub_scenes else location
+
+    # --- Build profile (mirrors generate_initial_stats output exactly) ---
+    profile: dict = {
+        # D&D core fields
+        "level": level,
+        "xp": xp,
+        "class": suggested_class,
+        "heritage": suggested_heritage,
+        "background": _CLASS_BACKGROUNDS.get(suggested_class, "Soldier"),
+        "ability_scores": final_scores,
+        "proficiency_bonus": pb,
+        "hp_max": hp_max,
+        "hp_current": hp_current,
+        "hit_dice_total": 1,
+        "ac": ac,
+        "skill_profs": skill_profs,
+        "skill_expertise": [],
+        "saves_proficient": saves_proficient,
+        "features": features,
+        "conditions": [],
+        "mode": "NORMAL",
+        "combat_state_ref": None,
+        "asi_pending": False,
+        "languages": languages,
+
+        # Narrative / character fields
+        "Ім'я": char_name,
+        "Дім": house_name,
+        "Поточне місцезнаходження": location,
+        "Поточна сцена": scene,
+        "Регіон": get_region_for_location(location) or origin_region,
+        "Світогляд": "",
+        "Риси": heritage_trait_names,
+        "Вади": "",
+        "Особисті риси": [],
+        "Зв'язок": "",
+        "Вада персонажа": "",
+        "Вороги": "",
+        "Друзі": "",
+
+        # Legacy compatibility fields
+        "Здоров'я": hp_current,   # mirrors hp_current; §5.2 legacy UI sync
+        "Енергія": 1000,          # §5.2 energy scale 0-1000, start at 1000
+        "Інвентар": inventory_str,
+        "Особисте Золото": gold_from_kit,
+        "Зброя": kit.get("weapon_main", "-"),
+        "Броня": armor_str or "Без броні",
+        "Транспорт": "None",
+        "Ігровий час": "298 рік В.Е., 1-й місяць, День 1, 08:00",
+        "Час_хвилини": 8 * 60,
+        "Годинники": {},
+        "Репутація (Рідний регіон)": 0,
+        "temp_debuffs": {},
+        "training_cooldowns": {},
+        "reputation": {"regions": {}, "factions": {}},
+    }
+
+    # --- Structured equipped_weapon (same parsing as generate_initial_stats) ---
+    weapon_main_str: str = kit.get("weapon_main", "") or ""
+    if weapon_main_str:
+        _w_name = weapon_main_str.split("(")[0].strip()
+        _w_props: list[str] = []
+        _w_dice = "1d4"
+        _w_dmg_type = "bludgeoning"
+        _inner_match = _re.search(r'\(([^)]+)\)', weapon_main_str)
+        if _inner_match:
+            _inner = _inner_match.group(1)
+            _parts = [p.strip() for p in _inner.split(",")]
+            for _p in _parts:
+                _p_lower = _p.lower()
+                if _re.match(r'\d+d\d+', _p_lower):
+                    _dice_match = _re.match(r'(\d+d\d+)\s*(.*)', _p_lower)
+                    if _dice_match:
+                        _w_dice = _dice_match.group(1)
+                        _dmg_raw = _dice_match.group(2).strip()
+                        if _dmg_raw:
+                            _w_dmg_type = _dmg_raw
+                elif any(kw in _p_lower for kw in ("фінесс", "finesse")):
+                    _w_props.append("finesse")
+                elif any(kw in _p_lower for kw in ("дворуч", "two-handed")):
+                    _w_props.append("two-handed")
+                elif any(kw in _p_lower for kw in ("легка", "light")):
+                    _w_props.append("light")
+                elif any(kw in _p_lower for kw in ("метн", "thrown")):
+                    _w_props.append("thrown")
+                elif any(kw in _p_lower for kw in ("80/", "20/", "range")):
+                    _w_props.append("ranged")
+        profile["equipped_weapon"] = {
+            "name": _w_name,
+            "damage_dice": _w_dice,
+            "damage_type": _w_dmg_type,
+            "properties": _w_props,
+        }
+    else:
+        profile["equipped_weapon"] = None
+
+    # --- Structured equipped_armor (same pattern as generate_initial_stats) ---
+    _ARMOR_PATTERNS: list[tuple[str, int, str]] = [
+        ("кольчуга", 16, "heavy"),
+        ("chainmail", 16, "heavy"),
+        ("кольч", 16, "heavy"),
+        ("латн", 18, "heavy"),
+        ("plate", 18, "heavy"),
+        ("кіряса", 14, "medium"),
+        ("breastplate", 14, "medium"),
+        ("напів", 15, "medium"),
+        ("half plate", 15, "medium"),
+        ("hide", 12, "medium"),
+        ("шкура", 12, "medium"),
+        ("шкіра з клепками", 12, "medium"),
+        ("studded", 12, "medium"),
+        ("шкіра", 11, "light"),
+        ("leather", 11, "light"),
+        ("стьобан", 11, "light"),
+        ("padded", 11, "light"),
+    ]
+    armor_str_lower = armor_str.lower()
+    _equipped_armor = None
+    for _pat, _base, _atype in _ARMOR_PATTERNS:
+        if _pat in armor_str_lower:
+            _equipped_armor = {"ac_base": _base, "type": _atype}
+            break
+    if _equipped_armor is None and armor_str:
+        _ac_fallback = _re.search(r'(?:КЗ|AC)\s*(\d+)', armor_str, _re.IGNORECASE)
+        if _ac_fallback:
+            _base_fallback = int(_ac_fallback.group(1))
+            if _base_fallback >= 16:
+                _atype_fallback = "heavy"
+            elif _base_fallback >= 12:
+                _atype_fallback = "medium"
+            else:
+                _atype_fallback = "light"
+            _equipped_armor = {"ac_base": _base_fallback, "type": _atype_fallback}
+    profile["equipped_armor"] = _equipped_armor
+    profile["equipped_shield"] = bool(kit.get("shield", False))
+
+    # --- Recompute AC with structured data ---
+    try:
+        from core.dnd_engine import recompute_ac
+        recompute_ac(profile)
+    except Exception as _ac_err:
+        logger.warning(f"[WORLD FALLBACK] recompute_ac failed: {_ac_err}. Using ac={ac}.")
+
+    logger.warning(
+        f"[WORLD] Deterministic D&D fallback used for {char_name} | "
+        f"{suggested_class} L1 | {suggested_heritage} | HP {hp_current}/{hp_max}"
+    )
+    return profile
 
 
 async def get_canon_characters(house_name):
@@ -40,7 +345,13 @@ async def get_canon_characters(house_name):
 
 
 async def generate_initial_stats_legacy(char_name, house_name, house_data):
-    """Legacy 2d50-profile generator (збережено для rollback). Не використовується в Phase 5+."""
+    """Legacy 2d50-profile generator.
+
+    DEPRECATED: No longer used as a fallback in generate_initial_stats (Phase 5+).
+    generate_initial_stats now falls back to _build_deterministic_dnd_profile which
+    returns a valid D&D-compatible profile without LLM.  This function is preserved
+    for rollback purposes only — do NOT call it from new code.
+    """
     origin_region = house_data.get('Регіон', 'Вестерос')
     print(f"🎲 [LEGACY] Генерую статистику для {char_name}...")
 
@@ -104,7 +415,7 @@ async def generate_initial_stats(char_name, house_name, house_data):
 
     # Gemma 4 31B — одноразова генерація, якість важливіша за швидкість
     try:
-        _stats_cfg = build_strict_config(model_gm_logic, build_initial_stats_schema())
+        _stats_cfg = build_strict_config(model_gm_logic)
         def _sync_gen_profile():
             try:
                 return model_gm_logic.generate_content(prompt, config=_stats_cfg)
@@ -121,8 +432,14 @@ async def generate_initial_stats(char_name, house_name, house_data):
         llm_data = None
 
     if not llm_data:
-        print("⚠️ [D&D] LLM повернув None — fallback до legacy generator")
-        return await generate_initial_stats_legacy(char_name, house_name, house_data)
+        logger.warning("[WORLD] LLM stat generation failed — using deterministic D&D fallback")
+        return _build_deterministic_dnd_profile(
+            char_name=char_name,
+            house_name=house_name,
+            origin_region=origin_region,
+            suggested_class="Hedge Knight",   # safe default: martial, broadly compatible
+            suggested_heritage="Westerosi (Andal)",
+        )
 
     # --- Validate location and scene (same as legacy) ---
     llm_data["Ім'я"] = char_name

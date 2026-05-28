@@ -8,7 +8,6 @@ import asyncio
 from core.ai_client import model_worker, clean_and_parse_json, build_strict_config
 from core.prompts import (
     build_validate_action_prompt, build_training_request_prompt,
-    build_validate_action_schema, build_training_request_schema,
 )
 import difflib
 from core.world_constants import (
@@ -381,7 +380,7 @@ async def validate_action(user_input, profile, debug_trace: dict | None = None):
     if debug_trace is not None:
         debug_trace["censor"]["prompt"] = prompt
     try:
-        _schema_cfg = build_strict_config(model_worker, build_validate_action_schema())
+        _schema_cfg = build_strict_config(model_worker)
         def _sync_gen_val():
             try:
                 return model_worker.generate_content(prompt, config=_schema_cfg)
@@ -478,7 +477,7 @@ async def process_training_request(
 
     resp = None
     try:
-        _train_cfg = build_strict_config(model_worker, build_training_request_schema())
+        _train_cfg = build_strict_config(model_worker)
         def _sync_gen_train():
             try:
                 return model_worker.generate_content(prompt, config=_train_cfg)

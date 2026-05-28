@@ -37,8 +37,6 @@ from core.dnd_conditions import has_condition
 from core.prompts import (
     build_combat_round_prompt,
     build_npc_combat_action_prompt,
-    build_combat_round_schema,
-    build_npc_combat_action_schema,
 )
 
 # ---------------------------------------------------------------------------
@@ -89,7 +87,7 @@ async def parse_player_combat_intent(
 
     result: Optional[dict] = None
     try:
-        _combat_round_cfg = build_strict_config(model_worker, build_combat_round_schema())
+        _combat_round_cfg = build_strict_config(model_worker)
         def _call():
             try:
                 return model_worker.generate_content(prompt, config=_combat_round_cfg)
@@ -201,7 +199,7 @@ async def execute_npc_actions(
 
     llm_actions: list[dict] = []
     try:
-        _npc_action_cfg = build_strict_config(model_worker, build_npc_combat_action_schema())
+        _npc_action_cfg = build_strict_config(model_worker)
         def _call():
             try:
                 return model_worker.generate_content(prompt, config=_npc_action_cfg)

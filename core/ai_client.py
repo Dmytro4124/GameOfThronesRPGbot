@@ -287,22 +287,22 @@ model_narrator = AIWrapper(
 
 def build_strict_config(
     model_wrapper: "AIWrapper",
-    schema,
+    schema=None,
     temperature: float = None,
 ) -> "types.GenerateContentConfig":
     """Build a GenerateContentConfig with JSON mode (response_mime_type only).
 
-    DEPRECATED: schema is ignored. Strict constrained decoding (response_schema)
-    caused 14-minute hangs on gemma-4-31b-it preview — removed. The model still
+    schema param removed — response_schema caused hangs on gemma preview;
+    kept optional for call-site compat during cleanup. The model still
     returns correct JSON keys because prompts instruct it to do so (see CLAUDE.md
-    §5.3). Callers retain the schema parameter for forward-compat but it is a no-op.
+    §5.3). schema is a no-op and call-sites should omit it.
 
     Inherits safety_settings and cached_content/system_instruction from the
     wrapper so callers don't have to repeat boilerplate.
 
     Args:
         model_wrapper: The AIWrapper whose safety / cache settings to inherit.
-        schema: Accepted but ignored (see deprecation note above).
+        schema: Optional, ignored. Kept for backward compat during cleanup phase.
         temperature: Override temperature. If None, uses model_wrapper.temperature.
 
     Returns:

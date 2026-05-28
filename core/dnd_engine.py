@@ -4,7 +4,8 @@ Phase 5: D&D 5e engine adapter for NORMAL pipeline.
 
 Роль: замінює resolve_action_mechanics (старий 2d50 Worker) для NORMAL mode.
 apply_dnd_impacts — wrapper поверх старого apply_system_impacts для нових D&D-тегів.
-COMBAT pipeline — Phase 7, тут не реалізовано.
+COMBAT pipeline реалізовано окремо у core/dnd_combat_engine.py (execute_combat_round).
+Цей модуль (dnd_engine) — лише NORMAL pipeline (resolve_normal_action).
 """
 
 import asyncio
@@ -17,6 +18,7 @@ from core.ai_client import model_worker, clean_and_parse_json, build_strict_conf
 from core.dnd_core import (
     roll_d20, ability_modifier, proficiency_bonus, clamp_dc,
     LEGAL_DCS, skill_check, ability_check, saving_throw, CheckResult,
+    score_to_relation_text,
 )
 from core.dnd_skills import SKILLS, get_ability_for_skill, is_valid_skill
 from core.dnd_classes import GOT_CLASSES, get_class_features_at_level
@@ -24,7 +26,7 @@ from core.dnd_progression import award_xp, level_up, apply_asi, get_level_for_xp
 from core.dnd_conditions import (
     apply_condition, remove_condition, has_condition, condition_modifies,
 )
-from core.prompts import build_normal_resolve_prompt, build_normal_resolve_schema
+from core.prompts import build_normal_resolve_prompt
 from core.world_constants import (
     get_region_for_location, get_locations_for_region,
     LOCATION_TO_REGION, VALID_REGIONS_ORDERED,
@@ -139,9 +141,16 @@ async def resolve_normal_action(
     )
 
     # npcs_in_scene: для build_normal_resolve_prompt потрібен список dict-ів NPC.
-    # npc_names — лише список рядків (із get_location_npcs). Для Phase 5 обгортаємо у мінімальний dict.
-    npcs_in_scene_dicts = [{"Name": n, "Relation_Player": "Нейтральний"}
-                           for n in (npc_names or [])]
+    # npc_names — лише список рядків (із get_location_npcs).
+    # npc_reputation_context містить числовий score per NPC (0 = neutral за замовчуванням).
+    # score_to_relation_text конвертує score у текстовий ступінь 15-крокової шкали.
+    npcs_in_scene_dicts = []
+    for _n in (npc_names or []):
+        _score = (npc_reputation_context or {}).get(_n, 0)
+        npcs_in_scene_dicts.append({
+            "Name": _n,
+            "Relation_Player": score_to_relation_text(_score),
+        })
 
     clocks_info = profile.get("Годинники", {})
 
@@ -163,7 +172,7 @@ async def resolve_normal_action(
     # --- 2. Call LLM with 1 retry (gemma sometimes returns MALFORMED/None text;
     #        retry before degrading to AUTO_SUCCESS which removes the dice roll).
     #        §5.1 async invariant: all LLM calls via asyncio.to_thread. ---
-    _worker_cfg = build_strict_config(model_worker, build_normal_resolve_schema())
+    _worker_cfg = build_strict_config(model_worker)
 
     def _sync_gen():
         try:

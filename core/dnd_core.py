@@ -10,6 +10,92 @@ LEGAL_DCS: tuple[int, ...] = (2, 5, 10, 12, 15, 17, 20, 22)
 
 _ABILITY_KEYS = ("STR", "DEX", "CON", "INT", "WIS", "CHA")
 
+# ---------------------------------------------------------------------------
+# Relation ↔ Score mapping (15-step scale)
+# Shared API for dnd_engine.py and database/canon_npc.py.
+# Relation↔score mapping is the single source of truth here.
+# database/canon_npc.py re-imports these (RELATION_TO_SCORE, map_relation_to_score,
+# score_to_relation_text) — do not duplicate the table elsewhere.
+# ---------------------------------------------------------------------------
+
+# Reverse mapping: canonical lowercase label → numeric score.
+# The "старі значення" block preserves backward compat with legacy CANON_NPCS entries.
+RELATION_TO_SCORE: dict[str, int] = {
+    # ── 15-ступенева шкала ──
+    "смертельна ненависть":  -80,
+    "кривавий ворог":        -65,
+    "відкрита ворожість":    -50,
+    "ворожий":               -35,
+    "глибока підозра":       -25,
+    "підозрілий":            -15,
+    "холодний":               -5,
+    "нейтральний":             0,
+    "обережно відкритий":     10,
+    "тепле ставлення":        20,
+    "прихильний":             30,
+    "дружній":                45,
+    "довіряє":                60,
+    "глибока довіра":         70,
+    "абсолютна довіра":       85,
+    # ── Старі значення (backward compat для CANON_NPCS) ──
+    "дружня":                 30,
+    "дружня (фальшива)":      10,
+    "нейтральна":              0,
+    "обережна":              -10,
+    "зверхня":               -20,
+    "підозріла":             -30,
+    "агресивна":             -50,
+    "ворожа":                -60,
+}
+
+
+def map_relation_to_score(relation_text: str) -> int:
+    """Convert a textual relation label to a numeric Reputation_Score.
+
+    Case-insensitive.  Unknown labels return 0 (Neutral).
+    """
+    if not relation_text:
+        return 0
+    key = str(relation_text).strip().lower()
+    return RELATION_TO_SCORE.get(key, 0)
+
+
+def score_to_relation_text(score: int) -> str:
+    """Convert a numeric Reputation_Score to a 15-step textual relation label.
+
+    Thresholds (inclusive lower bound, descending):
+      ≥  85 → "Абсолютна довіра"
+      ≥  70 → "Глибока довіра"
+      ≥  60 → "Довіряє"
+      ≥  45 → "Дружній"
+      ≥  30 → "Прихильний"
+      ≥  20 → "Тепле ставлення"
+      ≥  10 → "Обережно відкритий"
+      ≥  -5 → "Нейтральний"
+      ≥ -15 → "Холодний"
+      ≥ -25 → "Підозрілий"
+      ≥ -35 → "Глибока підозра"
+      ≥ -50 → "Ворожий"
+      ≥ -65 → "Відкрита ворожість"
+      ≥ -80 → "Кривавий ворог"
+           < -80 → "Смертельна ненависть"
+    """
+    if score >= 85:  return "Абсолютна довіра"
+    if score >= 70:  return "Глибока довіра"
+    if score >= 60:  return "Довіряє"
+    if score >= 45:  return "Дружній"
+    if score >= 30:  return "Прихильний"
+    if score >= 20:  return "Тепле ставлення"
+    if score >= 10:  return "Обережно відкритий"
+    if score >= -5:  return "Нейтральний"
+    if score >= -15: return "Холодний"
+    if score >= -25: return "Підозрілий"
+    if score >= -35: return "Глибока підозра"
+    if score >= -50: return "Ворожий"
+    if score >= -65: return "Відкрита ворожість"
+    if score >= -80: return "Кривавий ворог"
+    return "Смертельна ненависть"
+
 
 def roll_d20(advantage: bool = False, disadvantage: bool = False) -> tuple[int, list[int]]:
     """Roll d20 with optional advantage/disadvantage; both True cancels out to normal roll."""

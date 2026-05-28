@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Optional, Callable
 
 from core.ai_client import model_worker, clean_and_parse_json, build_strict_config
-from core.prompts import build_npc_regen_prompt, build_npc_regen_schema
+from core.prompts import build_npc_regen_prompt
 
 # ── Constants ───────────────────────────────────────────────────────────────
 
@@ -204,7 +204,7 @@ async def regenerate_one_npc(
     prompt = build_npc_regen_prompt(npc)
 
     try:
-        _regen_cfg = build_strict_config(active_model, build_npc_regen_schema())
+        _regen_cfg = build_strict_config(active_model)
         def _sync_call():
             try:
                 return active_model.generate_content(prompt, config=_regen_cfg)
