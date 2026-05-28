@@ -108,6 +108,7 @@ async def resolve_normal_action(
     last_turn_summary: str = None,
     user_id: int = None,
     current_location: str = None,
+    debug_trace: dict | None = None,
 ) -> tuple[str, dict]:
     """
     Async D&D Worker — замінює resolve_action_mechanics для NORMAL mode.
@@ -156,30 +157,46 @@ async def resolve_normal_action(
         nearby_canonical_locs=nearby_locs,
         all_canonical_locs_grouped=all_locs_grouped,
     )
+    if debug_trace is not None:
+        debug_trace["worker"]["prompt"] = prompt
 
-    # --- 2. Call LLM via asyncio.to_thread (§5.1 async invariant) ---
-    try:
-        _worker_cfg = build_strict_config(model_worker, build_normal_resolve_schema())
-        def _sync_gen():
-            try:
-                return model_worker.generate_content(prompt, config=_worker_cfg)
-            except Exception as _schema_err:
-                if "INVALID_ARGUMENT" in str(_schema_err) or "schema" in str(_schema_err).lower():
-                    print(f"⚠️ [DND_ENGINE] Schema rejected, falling back to free JSON: {_schema_err}")
-                    return model_worker.generate_content(
-                        prompt + "\n\nIMPORTANT: Reply ONLY with valid JSON."
-                    )
-                raise
+    # --- 2. Call LLM with 1 retry (gemma sometimes returns MALFORMED/None text;
+    #        retry before degrading to AUTO_SUCCESS which removes the dice roll).
+    #        §5.1 async invariant: all LLM calls via asyncio.to_thread. ---
+    _worker_cfg = build_strict_config(model_worker, build_normal_resolve_schema())
 
-        resp = await asyncio.to_thread(_sync_gen)
-        data = clean_and_parse_json(resp.text)
-    except Exception as e:
-        logger.warning(f"[DND_ENGINE] LLM call failed: {e}")
-        data = None
+    def _sync_gen():
+        try:
+            return model_worker.generate_content(prompt, config=_worker_cfg)
+        except Exception as _schema_err:
+            if "INVALID_ARGUMENT" in str(_schema_err) or "schema" in str(_schema_err).lower():
+                print(f"⚠️ [DND_ENGINE] Schema rejected, falling back to free JSON: {_schema_err}")
+                return model_worker.generate_content(
+                    prompt + "\n\nIMPORTANT: Reply ONLY with valid JSON."
+                )
+            raise
 
-    # --- 3. Fallback: LLM failure → AUTO_SUCCESS ---
+    data = None
+    for _w_attempt in range(2):  # 1 initial + 1 retry
+        try:
+            resp = await asyncio.to_thread(_sync_gen)
+        except Exception as e:
+            logger.warning(f"[DND_ENGINE] LLM call failed (attempt {_w_attempt + 1}/2): {e}")
+            continue
+        _raw_text = resp.text if resp else None
+        if debug_trace is not None:
+            debug_trace["worker"]["raw"] = _raw_text
+        _parsed = clean_and_parse_json(_raw_text) if _raw_text else None
+        if _parsed:
+            data = _parsed
+            break
+        logger.warning(
+            f"[DND_ENGINE] empty/unparseable Worker response (attempt {_w_attempt + 1}/2) — retrying"
+        )
+
+    # --- 3. Fallback: LLM failure after retries → AUTO_SUCCESS ---
     if not data:
-        logger.warning("[DND_ENGINE] JSON parse failed — falling back to AUTO_SUCCESS")
+        logger.warning("[DND_ENGINE] JSON parse failed after retries — falling back to AUTO_SUCCESS")
         fallback_updates = {
             "action_type": "standard",
             "skill_used": "None",

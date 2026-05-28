@@ -5,6 +5,7 @@ import time
 import random
 import asyncio
 import unicodedata
+import contextvars
 from typing import Optional
 from google import genai
 from core.prompts import JSON_ONLY_INSTRUCTION
@@ -178,7 +179,7 @@ class AIWrapper:
                     try:
                         thoughts, content = split_thoughts(raw)
                         if thoughts:
-                            _thoughts_log.append({"model": self.model_name, "thought": thoughts})
+                            record_thought(self.model_name, thoughts)
                         return _AIResponse(content)
                     except Exception as e:
                         logger.warning(
@@ -339,22 +340,47 @@ class _AIResponse:
         self.text = text
 
 
-# ─── Глобальний лог роздумів (очищається на початку кожного ходу) ───
-_thoughts_log: list = []
+# ─── Per-task лог роздумів (ізольований між гравцями через ContextVar) ──────
+# ContextVar ізолює стан між asyncio Tasks. Кожен Telegram update = окремий Task
+# = окремий context. asyncio.to_thread propagates context у worker thread (Python 3.9+),
+# тому record_thought, що викликається з generate_content (через to_thread), бачить
+# правильний per-task list.
+#
+# Принцип роботи:
+#   clear_thoughts() → _thoughts_log_var.set([]) — створює list binding у ЦЬОМУ task context.
+#   asyncio.to_thread копіює поточний context у worker thread.
+#   record_thought у thread: .get() → той самий list object (mutable) → .append() мутує його.
+#   get_thoughts_log() у task context → той самий list → бачить всі appends.
+#   Player B's Task має ОКРЕМИЙ context → окремий list binding → clear_thoughts() B не
+#   торкається list гравця A.
+_thoughts_log_var: contextvars.ContextVar[list] = contextvars.ContextVar("thoughts_log")
 
 
 def clear_thoughts() -> None:
-    global _thoughts_log
-    _thoughts_log = []
+    _thoughts_log_var.set([])
 
 
 def get_thoughts_log() -> list:
-    return list(_thoughts_log)
+    try:
+        return list(_thoughts_log_var.get())
+    except LookupError:
+        return []
 
 
 def record_thought(model_name: str, thought: str) -> None:
-    if thought:
-        _thoughts_log.append({"model": model_name, "thought": thought})
+    if not thought:
+        return
+    try:
+        log = _thoughts_log_var.get()
+    except LookupError:
+        # Defensive fallback: clear_thoughts() не було викликано у цьому context.
+        # process_game_turn завжди викликає clear_thoughts() на старті — цей branch
+        # спрацьовує тільки якщо record_thought викликали обхідним шляхом поза turn-ом.
+        # NOTE: .set() тут не propagate назад з to_thread worker (копія context),
+        # але цей branch лише для edge-cases поза нормальним pipeline.
+        log = []
+        _thoughts_log_var.set(log)
+    log.append({"model": model_name, "thought": thought})
 
 
 def split_thoughts(response) -> tuple:

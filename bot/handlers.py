@@ -720,84 +720,126 @@ async def back_to_houses_handler(call: CallbackQuery):
                                  parse_mode='Markdown')
 
 
+def _section_header(num: int, title: str) -> str:
+    """Box-style section header for debug trace file."""
+    bar = "═" * 68
+    return f"\n{bar}\n║ STAGE {num}: {title}\n{bar}"
+
+
+def _subsection(label: str) -> str:
+    """Sub-section divider for INPUT / THOUGHTS / OUTPUT blocks."""
+    dashes = "─" * max(0, 64 - len(label))
+    return f"\n┌─ {label} {dashes}"
+
+
 async def _send_debug_trace_file(bot: Bot, chat_id: int, trace: dict) -> None:
     """Send full pipeline trace as a .txt file attachment (admin debug mode only)."""
+    ts_iso = datetime.fromtimestamp(trace.get("timestamp", 0)).isoformat()
     lines = []
-    lines.append("=" * 70)
-    lines.append("DEBUG TRACE — Game Turn Pipeline")
-    lines.append(f"Chat ID: {trace.get('chat_id')}")
-    lines.append(f"Timestamp: {datetime.fromtimestamp(trace.get('timestamp', 0)).isoformat()}")
-    lines.append("=" * 70)
 
-    lines.append("\n## 1. PLAYER ACTION")
+    # ── Title block ──────────────────────────────────────────────────────────
+    outer = "╔" + "═" * 68 + "╗"
+    inner_title = "║" + "              DEBUG TRACE — Game Turn Pipeline".center(68) + "║"
+    inner_meta = "║" + f"  Chat ID: {trace.get('chat_id')}  |  {ts_iso}".ljust(68) + "║"
+    bottom = "╚" + "═" * 68 + "╝"
+    lines.extend([outer, inner_title, inner_meta, bottom])
+
+    # ── Stage 1: Player action ────────────────────────────────────────────────
+    lines.append(_section_header(1, "PLAYER ACTION (input)"))
     lines.append(trace.get("user_input") or "<empty>")
 
-    # Censor
-    censor = trace.get("censor", {})
-    lines.append("\n## 2. CENSOR")
-    lines.append("Thoughts:")
-    for t in censor.get("thoughts", []):
-        lines.append(f"  - {t}")
-    if not censor.get("thoughts"):
+    # ── Stage 2: Censor ───────────────────────────────────────────────────────
+    censor = trace.get("censor") or {}
+    lines.append(_section_header(2, "CENSOR"))
+
+    lines.append(_subsection("INPUT (prompt to model)"))
+    lines.append(censor.get("prompt") or "<not captured>")
+
+    lines.append(_subsection("REASONING (model thoughts)"))
+    thoughts_c = censor.get("thoughts") or []
+    if thoughts_c:
+        for t in thoughts_c:
+            lines.append(f"  - {t}")
+    else:
         lines.append("  (no thoughts captured — Censor uses model_worker, see Worker section)")
-    lines.append("Parsed output:")
-    lines.append(json.dumps(censor.get("parsed", {}), ensure_ascii=False, indent=2))
 
-    # Worker
-    worker = trace.get("worker", {})
-    lines.append("\n## 3. WORKER (NORMAL pipeline)")
-    lines.append("Thoughts:")
-    for t in worker.get("thoughts", []):
-        lines.append(f"  - {t}")
-    if not worker.get("thoughts"):
+    lines.append(_subsection("OUTPUT (parsed JSON)"))
+    lines.append(json.dumps(censor.get("parsed") or {}, ensure_ascii=False, indent=2))
+
+    # ── Stage 3: Worker ───────────────────────────────────────────────────────
+    worker = trace.get("worker") or {}
+    lines.append(_section_header(3, "WORKER (NORMAL pipeline)"))
+
+    lines.append(_subsection("INPUT (prompt to model)"))
+    lines.append(worker.get("prompt") or "<not captured>")
+
+    lines.append(_subsection("REASONING (model thoughts)"))
+    thoughts_w = worker.get("thoughts") or []
+    if thoughts_w:
+        for t in thoughts_w:
+            lines.append(f"  - {t}")
+    else:
         lines.append("  (none)")
-    lines.append("Raw LLM response:")
-    lines.append(worker.get("raw") or "<not captured>")
-    lines.append("Parsed output:")
+
+    lines.append(_subsection("OUTPUT (parsed JSON)"))
     parsed_w = worker.get("parsed")
-    if parsed_w:
-        lines.append(json.dumps(parsed_w, ensure_ascii=False, indent=2))
-    else:
-        lines.append("<None — Worker skipped or failed>")
+    lines.append(json.dumps(parsed_w, ensure_ascii=False, indent=2) if parsed_w else "<None — Worker skipped or failed>")
 
-    # GM_Logic
-    gm = trace.get("gm_logic", {})
-    lines.append("\n## 4. GM_LOGIC")
-    lines.append("Thoughts:")
-    for t in gm.get("thoughts", []):
-        lines.append(f"  - {t}")
-    if not gm.get("thoughts"):
+    lines.append(_subsection("RAW LLM RESPONSE"))
+    lines.append(worker.get("raw") or "<not captured>")
+
+    # ── Stage 4: GM_Logic ─────────────────────────────────────────────────────
+    gm = trace.get("gm_logic") or {}
+    lines.append(_section_header(4, "GM_LOGIC"))
+
+    lines.append(_subsection("INPUT (prompt to model)"))
+    lines.append(gm.get("prompt") or "<not captured>")
+
+    lines.append(_subsection("REASONING (model thoughts)"))
+    thoughts_gm = gm.get("thoughts") or []
+    if thoughts_gm:
+        for t in thoughts_gm:
+            lines.append(f"  - {t}")
+    else:
         lines.append("  (none)")
-    lines.append("Raw LLM response:")
-    lines.append(gm.get("raw") or "<not captured>")
-    lines.append("Parsed output:")
+
+    lines.append(_subsection("OUTPUT (parsed JSON)"))
     parsed_gm = gm.get("parsed")
-    if parsed_gm:
-        lines.append(json.dumps(parsed_gm, ensure_ascii=False, indent=2))
-    else:
-        lines.append("<None — GM_Logic skipped or failed>")
+    lines.append(json.dumps(parsed_gm, ensure_ascii=False, indent=2) if parsed_gm else "<None — GM_Logic skipped or failed>")
 
-    # Narrator
-    nar = trace.get("narrator", {})
-    lines.append("\n## 5. NARRATOR")
-    lines.append("Thoughts:")
-    for t in nar.get("thoughts", []):
-        lines.append(f"  - {t}")
-    if not nar.get("thoughts"):
+    lines.append(_subsection("RAW LLM RESPONSE"))
+    lines.append(gm.get("raw") or "<not captured>")
+
+    # ── Stage 5: Narrator ─────────────────────────────────────────────────────
+    nar = trace.get("narrator") or {}
+    lines.append(_section_header(5, "NARRATOR"))
+
+    lines.append(_subsection("INPUT (prompt to model)"))
+    lines.append(nar.get("prompt") or "<not captured>")
+
+    lines.append(_subsection("REASONING (model thoughts)"))
+    thoughts_n = nar.get("thoughts") or []
+    if thoughts_n:
+        for t in thoughts_n:
+            lines.append(f"  - {t}")
+    else:
         lines.append("  (none)")
-    lines.append("Final text:")
+
+    lines.append(_subsection("FINAL TEXT"))
     lines.append(nar.get("final_text") or "<empty>")
 
-    # Mechanical impacts
-    lines.append("\n## 6. MECHANICAL IMPACTS (logs)")
-    for log in trace.get("logs", []):
+    # ── Stage 6: Mechanical impacts ───────────────────────────────────────────
+    lines.append(_section_header(6, "MECHANICAL IMPACTS"))
+    for log in trace.get("logs") or []:
         lines.append(f"  - {log}")
 
-    lines.append("\n" + "=" * 70)
+    # ── Footer ────────────────────────────────────────────────────────────────
+    bar = "═" * 68
+    lines.append(f"\n{bar}")
     lines.append("END OF TRACE")
+    lines.append(bar)
 
-    # str() guard: any line that is None (e.g. trace fields explicitly set to None)
-    # would crash "\n".join — coerce all to str defensively.
+    # str() guard: any line that is None would crash "\n".join — coerce defensively.
     content = "\n".join(str(line) for line in lines).encode("utf-8")
     ts = datetime.fromtimestamp(trace.get("timestamp", 0)).strftime("%Y%m%d_%H%M%S")
     filename = f"debug_{chat_id}_{ts}.txt"

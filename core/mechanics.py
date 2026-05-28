@@ -360,10 +360,13 @@ def apply_system_impacts(profile, ai_impacts):
     return profile, logs
 
 
-async def validate_action(user_input, profile):
+async def validate_action(user_input, profile, debug_trace: dict | None = None):
     """
     Асинхронна функція-фільтр (Цензор).
     Перевіряє, чи не намагається гравець зламати гру чітами, анахронізмами чи діями за когось іншого.
+
+    debug_trace: якщо передано (тільки у debug sequential path), заповнює
+                 debug_trace["censor"]["prompt"] = str (§5.3 side-channel, не output-ключ).
     """
     # Жорстка перевірка смерті ДО виклику ШІ
     if safe_int(profile.get("Здоров'я", 100), 100) <= 0:
@@ -375,6 +378,8 @@ async def validate_action(user_input, profile):
     inventory_list = format_inventory(_inv_items) if _inv_items else "порожній"
 
     prompt = build_validate_action_prompt(char_name, user_input, inventory_list)
+    if debug_trace is not None:
+        debug_trace["censor"]["prompt"] = prompt
     try:
         _schema_cfg = build_strict_config(model_worker, build_validate_action_schema())
         def _sync_gen_val():
@@ -386,6 +391,8 @@ async def validate_action(user_input, profile):
                     return model_worker.generate_content(prompt)
                 raise
         response = await asyncio.to_thread(_sync_gen_val)
+        if debug_trace is not None:
+            debug_trace["censor"]["raw"] = response.text if response else None
         result = clean_and_parse_json(response.text)
 
         if not result:

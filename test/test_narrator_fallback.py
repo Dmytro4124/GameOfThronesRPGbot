@@ -24,6 +24,7 @@ Async-тести запускаються через asyncio.run() (без pytes
 """
 
 import asyncio
+import logging
 import pytest
 from contextlib import ExitStack
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -669,5 +670,139 @@ def test_stream_consumer_edit_text_exception_uses_logger_warning(caplog):
         for record in caplog.records
     ), (
         f"Expected WARNING with '[CONSUMER_EDIT]', got records: "
+        f"{[r.message for r in caplog.records]}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ТЕСТ 10: GM_Logic response.text=None → no crash, minimal fallback used
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_gm_logic_none_text_does_not_crash():
+    """
+    GM_Logic response.text=None (MALFORMED_RESPONSE) — не повинен викидати
+    AttributeError. Очікуємо мінімальний fallback ai_data з director_notes.
+    Хід завершується без crash.
+    """
+    # GM_Logic повертає об'єкт з .text=None — обидві спроби
+    none_gm_resp = MagicMock()
+    none_gm_resp.text = None
+
+    good_narrator = _make_narrator_response(_VALID_NARRATOR_TEXT)
+    narrator_mock = MagicMock(return_value=good_narrator)
+
+    patches = [
+        patch(
+            "core.engine.get_user_data",
+            new=AsyncMock(return_value=(_PROFILE.copy(), 2)),
+        ),
+        patch(
+            "core.engine.validate_action",
+            new=AsyncMock(return_value=(True, "")),
+        ),
+        patch(
+            "core.engine.resolve_normal_action",
+            new=AsyncMock(return_value=("MECHANICAL VERDICT: SUCCESS", _WORKER_UPDATES.copy())),
+        ),
+        patch("core.engine.get_location_npcs", return_value=("", [], {})),
+        patch("core.engine.get_relevant_context", new=AsyncMock(return_value="")),
+        patch("core.engine.get_dead_npc_names", return_value=set()),
+        # GM_Logic повертає None текст на обидві спроби
+        patch(
+            "core.engine.model_gm_logic.generate_content",
+            return_value=none_gm_resp,
+        ),
+        patch("core.engine.model_narrator.generate_content", narrator_mock),
+        patch("core.engine._run_bg_task", return_value=MagicMock()),
+    ]
+
+    async def _run():
+        from core.engine import process_game_turn
+        # Не повинен кинути AttributeError
+        return await process_game_turn(
+            chat_id=200,
+            user_input="Look around",
+            narrator_queue=None,
+        )
+
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        # Основна перевірка: не crash
+        result_text, result_actions = asyncio.run(_run())
+
+    # Хід завершився — результат є
+    assert result_text is not None, "process_game_turn must return text, not None"
+    assert isinstance(result_actions, list), "suggested_actions must be a list"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ТЕСТ 11: GM_Logic empty text both attempts → 2 calls made, fallback used
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_gm_logic_empty_text_retries_then_fallback(caplog):
+    """
+    Якщо GM_Logic повертає порожній рядок "" на обидві спроби:
+    - generate_content викликається рівно 2 рази (retry відбувся)
+    - fallback ai_data використаний (Narrator отримує мінімальний director_notes)
+    - Хід завершується без crash
+    - WARNING логується для обох порожніх спроб
+    """
+    empty_gm_resp = MagicMock()
+    empty_gm_resp.text = ""
+
+    good_narrator = _make_narrator_response(_VALID_NARRATOR_TEXT)
+    narrator_mock = MagicMock(return_value=good_narrator)
+
+    gm_mock = MagicMock(return_value=empty_gm_resp)
+
+    patches = [
+        patch(
+            "core.engine.get_user_data",
+            new=AsyncMock(return_value=(_PROFILE.copy(), 2)),
+        ),
+        patch(
+            "core.engine.validate_action",
+            new=AsyncMock(return_value=(True, "")),
+        ),
+        patch(
+            "core.engine.resolve_normal_action",
+            new=AsyncMock(return_value=("MECHANICAL VERDICT: SUCCESS", _WORKER_UPDATES.copy())),
+        ),
+        patch("core.engine.get_location_npcs", return_value=("", [], {})),
+        patch("core.engine.get_relevant_context", new=AsyncMock(return_value="")),
+        patch("core.engine.get_dead_npc_names", return_value=set()),
+        patch("core.engine.model_gm_logic.generate_content", gm_mock),
+        patch("core.engine.model_narrator.generate_content", narrator_mock),
+        patch("core.engine._run_bg_task", return_value=MagicMock()),
+    ]
+
+    async def _run():
+        from core.engine import process_game_turn
+        return await process_game_turn(
+            chat_id=201,
+            user_input="Inspect the gate",
+            narrator_queue=None,
+        )
+
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        with caplog.at_level(logging.WARNING, logger="core.engine"):
+            result_text, result_actions = asyncio.run(_run())
+
+    # Хід завершився без crash
+    assert result_text is not None, "process_game_turn must return text, not None"
+
+    # generate_content викликано рівно 2 рази (initial + 1 retry)
+    assert gm_mock.call_count == 2, (
+        f"GM_Logic generate_content must be called exactly 2 times (1 initial + 1 retry). "
+        f"Got: {gm_mock.call_count}"
+    )
+
+    # WARNING про empty/None логується
+    gm_warnings = [r.message for r in caplog.records if "[GM_Logic]" in r.message]
+    assert len(gm_warnings) >= 1, (
+        f"Expected at least one [GM_Logic] WARNING. Got caplog records: "
         f"{[r.message for r in caplog.records]}"
     )

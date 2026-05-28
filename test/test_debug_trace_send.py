@@ -110,21 +110,25 @@ def _make_trace(chat_id: int = 111) -> dict:
         "user_input": "Test action",
         "timestamp": time.time(),
         "censor": {
+            "prompt": "You are a content censor. User action: Test action",
             "raw": None,
             "parsed": {"is_valid": True, "refusal_reason": ""},
             "thoughts": ["censor thought"],
         },
         "worker": {
+            "prompt": "You are the Worker. Resolve: Test action",
             "raw": '{"difficulty": 10}',
             "parsed": {"difficulty": 10, "xp_award": 25},
             "thoughts": ["worker thought"],
         },
         "gm_logic": {
+            "prompt": "You are GM_Logic. Context: ...",
             "raw": '{"director_notes": []}',
             "parsed": {"director_notes": ["Scene beat 1"]},
             "thoughts": ["gm thought"],
         },
         "narrator": {
+            "prompt": "You are the Narrator. Write scene: ...",
             "thoughts": ["narrator thought"],
             "final_text": "The raven lands on the parapet.",
         },
@@ -180,6 +184,7 @@ def test_send_debug_trace_file_content_contains_all_sections(handlers_module):
     The generated .txt content must contain all 6 section headers
     (PLAYER ACTION, CENSOR, WORKER, GM_LOGIC, NARRATOR, MECHANICAL IMPACTS)
     and key values from each trace field.
+    Section headers now use box-style format: 'STAGE N: <TITLE>'.
     """
     hm = handlers_module
     chat_id = 77
@@ -194,17 +199,24 @@ def test_send_debug_trace_file_content_contains_all_sections(handlers_module):
     doc_arg = mock_bot.send_document.call_args.kwargs.get("document")
     content = doc_arg.data.decode("utf-8")
 
-    assert "## 1. PLAYER ACTION" in content
+    # Box-style headers (new format)
+    assert "STAGE 1:" in content
+    assert "PLAYER ACTION" in content
     assert "Test action" in content
-    assert "## 2. CENSOR" in content
+    assert "STAGE 2:" in content
+    assert "CENSOR" in content
     assert "censor thought" in content
-    assert "## 3. WORKER" in content
+    assert "STAGE 3:" in content
+    assert "WORKER" in content
     assert "worker thought" in content
-    assert "## 4. GM_LOGIC" in content
+    assert "STAGE 4:" in content
+    assert "GM_LOGIC" in content
     assert "gm thought" in content
-    assert "## 5. NARRATOR" in content
+    assert "STAGE 5:" in content
+    assert "NARRATOR" in content
     assert "The raven lands on the parapet." in content
-    assert "## 6. MECHANICAL IMPACTS" in content
+    assert "STAGE 6:" in content
+    assert "MECHANICAL IMPACTS" in content
     assert "HP: 10 -> 8" in content
     assert "XP: 0 -> 25" in content
 
@@ -441,4 +453,87 @@ def test_send_debug_trace_file_tolerates_none_fields(handlers_module):
 
     assert mock_bot.send_document.called, (
         "send_document must be called even when trace has None fields"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 8: INPUT prompt appears in file content for all 4 stages
+# ---------------------------------------------------------------------------
+
+def test_send_debug_trace_file_content_contains_input_prompts(handlers_module):
+    """
+    The generated .txt must include INPUT (prompt to model) sub-sections
+    for all 4 model stages (Censor, Worker, GM_Logic, Narrator) and the
+    prompt text from _make_trace must appear in the file content.
+    """
+    hm = handlers_module
+    chat_id = 88
+    trace = _make_trace(chat_id)
+
+    mock_bot = MagicMock()
+    mock_bot.send_document = AsyncMock()
+
+    asyncio.run(hm._send_debug_trace_file(mock_bot, chat_id, trace))
+
+    from aiogram.types import BufferedInputFile
+    doc_arg = mock_bot.send_document.call_args.kwargs.get("document")
+    content = doc_arg.data.decode("utf-8")
+
+    # Sub-section labels must be present
+    assert "INPUT (prompt to model)" in content, (
+        "Each stage must have an INPUT sub-section header"
+    )
+
+    # Actual prompt text from _make_trace must appear
+    assert "You are a content censor" in content, (
+        "Censor prompt text must appear in trace content"
+    )
+    assert "You are the Worker" in content, (
+        "Worker prompt text must appear in trace content"
+    )
+    assert "You are GM_Logic" in content, (
+        "GM_Logic prompt text must appear in trace content"
+    )
+    assert "You are the Narrator" in content, (
+        "Narrator prompt text must appear in trace content"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 9: None prompt fields do NOT crash (regression — mechanics-dev may not
+#         yet have filled prompt keys for all stages)
+# ---------------------------------------------------------------------------
+
+def test_send_debug_trace_file_tolerates_none_prompt_fields(handlers_module):
+    """
+    Regression: trace[stage]['prompt'] may be None (mechanics-dev not yet
+    populated for this stage, or non-debug turn). Must NOT crash join() and
+    must emit '<not captured>' placeholder instead.
+    """
+    hm = handlers_module
+    chat_id = 101
+    trace = _make_trace(chat_id)
+    # Simulate mechanics-dev not having filled prompt keys yet
+    trace["censor"]["prompt"] = None
+    trace["worker"]["prompt"] = None
+    trace["gm_logic"]["prompt"] = None
+    trace["narrator"]["prompt"] = None
+
+    mock_bot = MagicMock()
+    mock_bot.send_document = AsyncMock()
+
+    # Must not raise
+    asyncio.run(hm._send_debug_trace_file(mock_bot, chat_id, trace))
+
+    from aiogram.types import BufferedInputFile
+    doc_arg = mock_bot.send_document.call_args.kwargs.get("document")
+    content = doc_arg.data.decode("utf-8")
+
+    assert mock_bot.send_document.called, (
+        "send_document must be called even when all prompt fields are None"
+    )
+    # Placeholder must appear at least once for each None prompt
+    assert content.count("<not captured>") >= 4, (
+        "Each None prompt must produce a '<not captured>' placeholder; "
+        f"found {content.count('<not captured>')} occurrences"
     )

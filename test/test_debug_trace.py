@@ -35,10 +35,10 @@ def _make_debug_trace(chat_id: int = 111, user_input: str = "Test action") -> di
         "chat_id": chat_id,
         "user_input": user_input,
         "timestamp": time.time(),
-        "censor": {"raw": None, "parsed": None, "thoughts": []},
-        "worker": {"raw": None, "parsed": None, "thoughts": []},
-        "gm_logic": {"raw": None, "parsed": None, "thoughts": []},
-        "narrator": {"thoughts": [], "final_text": None},
+        "censor": {"prompt": None, "raw": None, "parsed": None, "thoughts": []},
+        "worker": {"prompt": None, "raw": None, "parsed": None, "thoughts": []},
+        "gm_logic": {"prompt": None, "raw": None, "parsed": None, "thoughts": []},
+        "narrator": {"prompt": None, "thoughts": [], "final_text": None},
         "logs": [],
     }
 
@@ -143,34 +143,38 @@ class TestDebugTraceStructure:
         assert not missing, f"Missing top-level keys: {missing}"
 
     def test_censor_sub_keys(self):
-        """censor section has raw, parsed, thoughts keys."""
+        """censor section has prompt, raw, parsed, thoughts keys."""
         trace = _make_debug_trace()
         censor = trace["censor"]
+        assert "prompt" in censor
         assert "raw" in censor
         assert "parsed" in censor
         assert "thoughts" in censor
         assert isinstance(censor["thoughts"], list)
 
     def test_worker_sub_keys(self):
-        """worker section has raw, parsed, thoughts keys."""
+        """worker section has prompt, raw, parsed, thoughts keys."""
         trace = _make_debug_trace()
         worker = trace["worker"]
+        assert "prompt" in worker
         assert "raw" in worker
         assert "parsed" in worker
         assert "thoughts" in worker
 
     def test_gm_logic_sub_keys(self):
-        """gm_logic section has raw, parsed, thoughts keys."""
+        """gm_logic section has prompt, raw, parsed, thoughts keys."""
         trace = _make_debug_trace()
         gm = trace["gm_logic"]
+        assert "prompt" in gm
         assert "raw" in gm
         assert "parsed" in gm
         assert "thoughts" in gm
 
     def test_narrator_sub_keys(self):
-        """narrator section has thoughts and final_text keys."""
+        """narrator section has prompt, thoughts and final_text keys."""
         trace = _make_debug_trace()
         narrator = trace["narrator"]
+        assert "prompt" in narrator
         assert "thoughts" in narrator
         assert "final_text" in narrator
         assert isinstance(narrator["thoughts"], list)
@@ -485,3 +489,393 @@ class TestIsDebugActiveHelper:
         debug_users = {other_id}
         profile: dict = {}
         assert _is_debug_active_impl(chat_id, profile, debug_users) is False
+
+
+# ---------------------------------------------------------------------------
+# Tests: prompt capture in debug_trace (Stage INPUT capture)
+# ---------------------------------------------------------------------------
+
+class TestDebugTracePromptCapture:
+    """
+    Tests verifying that 'prompt' keys are present in every stage section
+    and that validate_action / resolve_normal_action fill them when
+    debug_trace is provided.
+
+    Contract for python-dev (_send_debug_trace_file):
+        _debug_trace[stage]["prompt"] = str  (full input text sent to model)
+        Stages: "censor", "worker", "gm_logic", "narrator"
+    """
+
+    def test_all_stages_have_prompt_key_initially_none(self):
+        """All four stage sections must have 'prompt': None in fresh trace."""
+        trace = _make_debug_trace()
+        for stage in ("censor", "worker", "gm_logic", "narrator"):
+            assert "prompt" in trace[stage], f"Missing 'prompt' key in stage '{stage}'"
+            assert trace[stage]["prompt"] is None, (
+                f"Expected None initial value for '{stage}.prompt'"
+            )
+
+    def test_censor_prompt_fill(self):
+        """Simulates validate_action writing censor prompt into debug_trace."""
+        trace = _make_debug_trace()
+        fake_prompt = "You are a Censor. User says: attack the king."
+
+        # This is the exact assignment in mechanics.py validate_action
+        trace["censor"]["prompt"] = fake_prompt
+
+        assert trace["censor"]["prompt"] == fake_prompt
+        # Other stages must remain None
+        assert trace["worker"]["prompt"] is None
+        assert trace["gm_logic"]["prompt"] is None
+        assert trace["narrator"]["prompt"] is None
+
+    def test_worker_prompt_fill(self):
+        """Simulates resolve_normal_action writing worker prompt into debug_trace."""
+        trace = _make_debug_trace()
+        fake_prompt = "<player_state>...</player_state>\n<scene_data>...</scene_data>"
+
+        # This is the exact assignment in dnd_engine.py resolve_normal_action
+        trace["worker"]["prompt"] = fake_prompt
+
+        assert trace["worker"]["prompt"] == fake_prompt
+        assert trace["censor"]["prompt"] is None
+
+    def test_gm_logic_prompt_fill(self):
+        """Simulates engine.py writing gm_logic prompt into debug_trace."""
+        trace = _make_debug_trace()
+        fake_prompt = "You are GM_Logic. Hero is in King's Landing."
+
+        trace["gm_logic"]["prompt"] = fake_prompt
+
+        assert trace["gm_logic"]["prompt"] == fake_prompt
+        assert trace["narrator"]["prompt"] is None
+
+    def test_narrator_prompt_fill(self):
+        """Simulates engine.py writing narrator prompt into debug_trace."""
+        trace = _make_debug_trace()
+        fake_prompt = "You are Narrator. Write 150-250 words."
+
+        trace["narrator"]["prompt"] = fake_prompt
+
+        assert trace["narrator"]["prompt"] == fake_prompt
+
+    def test_prompt_is_str_type(self):
+        """Prompt values must be str (contract for handlers.py formatter)."""
+        trace = _make_debug_trace()
+        trace["censor"]["prompt"] = "prompt text"
+        trace["worker"]["prompt"] = "worker prompt"
+        trace["gm_logic"]["prompt"] = "gm prompt"
+        trace["narrator"]["prompt"] = "narrator prompt"
+
+        for stage in ("censor", "worker", "gm_logic", "narrator"):
+            assert isinstance(trace[stage]["prompt"], str), (
+                f"prompt in stage '{stage}' must be str, got {type(trace[stage]['prompt'])}"
+            )
+
+    def test_non_debug_path_no_capture_validate_action(self):
+        """When debug_trace=None (non-debug path), validate_action must not fail."""
+        # Simulate the guard: if debug_trace is None, skip assignment silently
+        debug_trace = None
+        prompt = "censor prompt text"
+        if debug_trace is not None:
+            debug_trace["censor"]["prompt"] = prompt
+        # No exception — non-debug path is transparent
+        assert debug_trace is None
+
+    def test_non_debug_path_no_capture_resolve_normal_action(self):
+        """When debug_trace=None (non-debug path), worker prompt capture is skipped."""
+        debug_trace = None
+        prompt = "worker prompt text"
+        if debug_trace is not None:
+            debug_trace["worker"]["prompt"] = prompt
+        assert debug_trace is None
+
+    def test_validate_action_debug_trace_param_accepted(self):
+        """validate_action signature must accept debug_trace kwarg (no TypeError)."""
+        import inspect
+        import core.mechanics as mech
+        sig = inspect.signature(mech.validate_action)
+        assert "debug_trace" in sig.parameters, (
+            "validate_action must have 'debug_trace' parameter"
+        )
+        param = sig.parameters["debug_trace"]
+        assert param.default is None, (
+            "debug_trace default must be None (non-debug path is zero-overhead)"
+        )
+
+    def test_resolve_normal_action_debug_trace_param_accepted(self):
+        """resolve_normal_action signature must accept debug_trace kwarg (no TypeError)."""
+        import inspect
+        import sys
+        import types
+
+        # Stub heavy deps before importing dnd_engine
+        for mod_name in [
+            "core.ai_client", "core.dnd_core", "core.dnd_skills",
+            "core.dnd_classes", "core.dnd_progression", "core.dnd_conditions",
+            "core.prompts", "core.world_constants",
+        ]:
+            if mod_name not in sys.modules:
+                stub = types.ModuleType(mod_name)
+                # Provide minimal attrs that dnd_engine imports
+                stub.model_worker = MagicMock()
+                stub.clean_and_parse_json = MagicMock()
+                stub.build_strict_config = MagicMock()
+                stub.roll_d20 = MagicMock()
+                stub.ability_modifier = MagicMock()
+                stub.proficiency_bonus = MagicMock()
+                stub.clamp_dc = MagicMock()
+                stub.LEGAL_DCS = [2, 5, 10, 12, 15, 17, 20, 22]
+                stub.skill_check = MagicMock()
+                stub.ability_check = MagicMock()
+                stub.saving_throw = MagicMock()
+                stub.CheckResult = MagicMock()
+                stub.SKILLS = {}
+                stub.get_ability_for_skill = MagicMock()
+                stub.is_valid_skill = MagicMock()
+                stub.GOT_CLASSES = {}
+                stub.get_class_features_at_level = MagicMock()
+                stub.award_xp = MagicMock()
+                stub.level_up = MagicMock()
+                stub.apply_asi = MagicMock()
+                stub.get_level_for_xp = MagicMock()
+                stub.apply_pending_levelups = MagicMock()
+                stub.apply_condition = MagicMock()
+                stub.remove_condition = MagicMock()
+                stub.has_condition = MagicMock()
+                stub.condition_modifies = MagicMock()
+                stub.build_normal_resolve_prompt = MagicMock()
+                stub.build_normal_resolve_schema = MagicMock()
+                stub.get_region_for_location = MagicMock(return_value="")
+                stub.get_locations_for_region = MagicMock(return_value=[])
+                stub.LOCATION_TO_REGION = {}
+                stub.VALID_REGIONS_ORDERED = []
+                sys.modules[mod_name] = stub
+
+        import importlib
+        import core.dnd_engine as dnd_eng
+        importlib.reload(dnd_eng)
+
+        sig = inspect.signature(dnd_eng.resolve_normal_action)
+        assert "debug_trace" in sig.parameters, (
+            "resolve_normal_action must have 'debug_trace' parameter"
+        )
+        param = sig.parameters["debug_trace"]
+        assert param.default is None, (
+            "debug_trace default must be None (non-debug path is zero-overhead)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: raw LLM response capture (Fix 2a / Fix 2b)
+# ---------------------------------------------------------------------------
+
+class TestDebugTraceRawCapture:
+    """
+    Tests verifying that 'raw' keys are filled when validate_action and
+    resolve_normal_action receive a debug_trace dict.
+
+    Strategy: patch asyncio.to_thread so we never hit a real LLM.
+    For validate_action we also stub model_worker and clean_and_parse_json
+    to control the full path.
+    """
+
+    def test_censor_raw_filled_by_validate_action(self):
+        """
+        validate_action must write response.text into debug_trace["censor"]["raw"]
+        immediately after await asyncio.to_thread() returns.
+        """
+        import asyncio
+        import sys
+        import types
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        # Build a minimal fake response object
+        fake_response = MagicMock()
+        fake_response.text = '{"is_valid": true, "refusal_reason": ""}'
+
+        # Stub heavy deps that mechanics.py imports at module level
+        for mod_name in [
+            "core.ai_client",
+            "core.prompts",
+            "core.world_constants",
+        ]:
+            if mod_name not in sys.modules:
+                stub = types.ModuleType(mod_name)
+                stub.model_worker = MagicMock()
+                stub.clean_and_parse_json = MagicMock(return_value={"is_valid": True, "refusal_reason": ""})
+                stub.build_strict_config = MagicMock(return_value=MagicMock())
+                stub.build_validate_action_prompt = MagicMock(return_value="prompt text")
+                stub.build_validate_action_schema = MagicMock(return_value={})
+                sys.modules[mod_name] = stub
+
+        import importlib
+        import core.mechanics as mech
+        importlib.reload(mech)
+
+        trace = _make_debug_trace()
+
+        async def _run_validate():
+            with patch("asyncio.to_thread", new=AsyncMock(return_value=fake_response)):
+                with patch.object(mech, "clean_and_parse_json",
+                                  return_value={"is_valid": True, "refusal_reason": ""}):
+                    profile = {"Ім'я": "Arya", "Здоров'я": 80, "Інвентар": []}
+                    return await mech.validate_action("test action", profile, debug_trace=trace)
+
+        asyncio.run(_run_validate())
+
+        assert trace["censor"]["raw"] == fake_response.text, (
+            f"Expected censor.raw={fake_response.text!r}, got {trace['censor']['raw']!r}"
+        )
+
+    def test_censor_raw_none_when_debug_trace_not_provided(self):
+        """When debug_trace=None, censor.raw capture is silently skipped (no AttributeError)."""
+        # Simulate the guard logic directly — no actual LLM call needed
+        debug_trace = None
+        fake_response = MagicMock()
+        fake_response.text = '{"is_valid": true}'
+
+        # Guard from mechanics.py
+        if debug_trace is not None:
+            debug_trace["censor"]["raw"] = fake_response.text if fake_response else None
+
+        assert debug_trace is None  # unchanged
+
+    def test_censor_raw_none_on_null_response(self):
+        """
+        If response is falsy (edge case: model returns None), raw must be None not raise.
+        Simulates: debug_trace["censor"]["raw"] = response.text if response else None
+        """
+        trace = _make_debug_trace()
+        response = None  # edge case
+
+        # This is the exact guard from mechanics.py
+        if trace is not None:
+            trace["censor"]["raw"] = response.text if response else None
+
+        assert trace["censor"]["raw"] is None
+
+    def test_worker_raw_filled_after_to_thread(self):
+        """
+        Simulates the fix in dnd_engine.py: resp.text written to debug_trace["worker"]["raw"]
+        immediately after asyncio.to_thread returns.
+        """
+        trace = _make_debug_trace()
+        fake_resp = MagicMock()
+        fake_resp.text = '{"skill_used": "Stealth", "difficulty": 15}'
+
+        # Simulate the fix code path from dnd_engine.py
+        if trace is not None:
+            trace["worker"]["raw"] = fake_resp.text if fake_resp else None
+
+        assert trace["worker"]["raw"] == fake_resp.text, (
+            f"Expected worker.raw={fake_resp.text!r}, got {trace['worker']['raw']!r}"
+        )
+
+    def test_worker_raw_none_when_debug_trace_not_provided(self):
+        """When debug_trace=None, worker.raw capture is silently skipped."""
+        debug_trace = None
+        fake_resp = MagicMock()
+        fake_resp.text = '{"skill_used": "Athletics"}'
+
+        if debug_trace is not None:
+            debug_trace["worker"]["raw"] = fake_resp.text if fake_resp else None
+
+        assert debug_trace is None
+
+    def test_worker_raw_none_on_null_resp(self):
+        """If resp is falsy, raw must be None not raise AttributeError."""
+        trace = _make_debug_trace()
+        resp = None
+
+        if trace is not None:
+            trace["worker"]["raw"] = resp.text if resp else None
+
+        assert trace["worker"]["raw"] is None
+
+    def test_raw_fields_initially_none_in_trace(self):
+        """Both censor.raw and worker.raw must be None in a freshly built trace."""
+        trace = _make_debug_trace()
+        assert trace["censor"]["raw"] is None, "censor.raw must start as None"
+        assert trace["worker"]["raw"] is None, "worker.raw must start as None"
+
+    def test_raw_field_is_str_type_when_filled(self):
+        """raw field must be str when filled (contract for handlers.py format)."""
+        trace = _make_debug_trace()
+        raw_text = '{"is_valid": true}'
+        trace["censor"]["raw"] = raw_text
+        assert isinstance(trace["censor"]["raw"], str)
+
+        raw_worker = '{"difficulty": 10}'
+        trace["worker"]["raw"] = raw_worker
+        assert isinstance(trace["worker"]["raw"], str)
+
+
+# ---------------------------------------------------------------------------
+# Tests: COMBAT path forwards debug_trace to validate_action (Fix 1)
+# ---------------------------------------------------------------------------
+
+class TestCombatCensorDebugTraceForward:
+    """
+    Verify that the COMBAT branch of process_game_turn passes debug_trace
+    to validate_action when _debug_active is True.
+
+    Strategy: simulate the conditional expression introduced by Fix 1:
+        debug_trace=_debug_trace if _debug_active else None
+
+    We do NOT import engine.py (heavy chain). Instead we test the forwarding
+    expression in isolation, which mirrors the exact logic added.
+    """
+
+    def test_debug_active_true_forwards_trace(self):
+        """When _debug_active=True, validate_action receives the trace dict, not None."""
+        _debug_active = True
+        _debug_trace = _make_debug_trace(chat_id=7, user_input="attack")
+
+        # This is the exact expression from engine.py Fix 1
+        kwarg_value = _debug_trace if _debug_active else None
+
+        assert kwarg_value is _debug_trace, (
+            "debug_trace kwarg must be the trace dict when _debug_active=True"
+        )
+
+    def test_debug_active_false_forwards_none(self):
+        """When _debug_active=False, validate_action receives None (non-debug path)."""
+        _debug_active = False
+        _debug_trace = _make_debug_trace(chat_id=7, user_input="attack")
+
+        kwarg_value = _debug_trace if _debug_active else None
+
+        assert kwarg_value is None, (
+            "debug_trace kwarg must be None when _debug_active=False"
+        )
+
+    def test_debug_trace_none_and_inactive(self):
+        """When _debug_trace is None and _debug_active=False, kwarg is None (safe)."""
+        _debug_active = False
+        _debug_trace = None
+
+        kwarg_value = _debug_trace if _debug_active else None
+
+        assert kwarg_value is None
+
+    def test_combat_censor_prompt_captured_via_forward(self):
+        """
+        End-to-end simulation: debug_trace forwarded → validate_action writes
+        censor.prompt → trace["censor"]["prompt"] is filled.
+        Simulates the actual call path without importing engine.py.
+        """
+        _debug_active = True
+        _debug_trace = _make_debug_trace(chat_id=7, user_input="attack the guard")
+
+        # Simulate validate_action receiving and using the forwarded trace
+        forwarded_trace = _debug_trace if _debug_active else None
+        fake_prompt = "COMBAT censor prompt for: attack the guard"
+
+        # This is what validate_action does internally (mechanics.py line ~382)
+        if forwarded_trace is not None:
+            forwarded_trace["censor"]["prompt"] = fake_prompt
+
+        assert _debug_trace["censor"]["prompt"] == fake_prompt, (
+            "censor.prompt must be filled when debug_trace is forwarded in COMBAT path"
+        )

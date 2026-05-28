@@ -393,10 +393,10 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             "chat_id": chat_id,
             "user_input": user_input,
             "timestamp": time.time(),
-            "censor": {"raw": None, "parsed": None, "thoughts": []},
-            "worker": {"raw": None, "parsed": None, "thoughts": []},
-            "gm_logic": {"raw": None, "parsed": None, "thoughts": []},
-            "narrator": {"thoughts": [], "final_text": None},
+            "censor": {"prompt": None, "raw": None, "parsed": None, "thoughts": []},
+            "worker": {"prompt": None, "raw": None, "parsed": None, "thoughts": []},
+            "gm_logic": {"prompt": None, "raw": None, "parsed": None, "thoughts": []},
+            "narrator": {"prompt": None, "thoughts": [], "final_text": None},
             "logs": [],
         }
 
@@ -516,7 +516,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             logger.info("[DEBUG_SEQ] Sequential Censor+Worker for debug trace")
             clear_thoughts()
             try:
-                is_valid, refusal_reason = await validate_action(user_input, profile)
+                is_valid, refusal_reason = await validate_action(user_input, profile, debug_trace=_debug_trace)
             except Exception as _censor_exc:
                 logger.warning(f"[CENSOR] failed, fail-open: {_censor_exc}")
                 is_valid, refusal_reason = True, ""
@@ -549,6 +549,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                     current_scene=curr_scene, npc_names=legal_npc_names,
                     last_turn_summary=last_turn, user_id=chat_id,
                     current_location=curr_loc,
+                    debug_trace=_debug_trace,
                 )
             except Exception as _worker_exc:
                 logger.error(f"[WORKER] sequential debug failed: {_worker_exc}", exc_info=True)
@@ -581,9 +582,9 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             if not is_valid:
                 # Censor заблокував — скасовуємо Worker
                 # NOTE: cancel() does NOT stop the underlying thread inside asyncio.to_thread.
-                # The Worker LLM call will continue in background and may append to _thoughts_log
-                # after the turn returns. clear_thoughts() at next turn start overwrites stale data.
-                # This is acceptable cost for ~5% of blocked actions.
+                # The Worker LLM call will continue in background and may append to the
+                # context-local thoughts log after the turn returns. clear_thoughts() at next
+                # turn start overwrites stale data. Acceptable cost for ~5% of blocked actions.
                 worker_task.cancel()
                 try:
                     await worker_task
@@ -604,7 +605,10 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
 
     elif _game_mode == "COMBAT":
         # Sequential Censor для COMBAT (combat_state lock несумісний з cancel)
-        is_valid, refusal_reason = await validate_action(user_input, profile)
+        is_valid, refusal_reason = await validate_action(
+            user_input, profile,
+            debug_trace=_debug_trace if _debug_active else None,
+        )
         if not is_valid:
             return refusal_reason + "\n\n📊 🛑 Дію заблоковано Цензором.", []
 
@@ -992,6 +996,8 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
 
         if _debug_active:
             clear_thoughts()  # isolate GM_Logic thoughts from previous stages
+            if _debug_trace is not None:
+                _debug_trace["gm_logic"]["prompt"] = gm_logic_prompt
 
         def _sync_gen_gm_logic():
             try:
@@ -1002,12 +1008,27 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                     return model_gm_logic.generate_content(gm_logic_prompt)
                 raise
 
-        gm_logic_response = await asyncio.to_thread(_sync_gen_gm_logic)
-        gm_logic_raw = gm_logic_response.text.strip()
-        ai_data = clean_and_parse_json(gm_logic_raw)
+        # GM_Logic call with None-text guard + one retry (gemma sometimes returns
+        # MALFORMED/empty .text=None, which is not an exception — guard against crash).
+        gm_logic_raw = ""
+        for _gm_attempt in range(2):  # 1 initial + 1 retry
+            try:
+                gm_logic_response = await asyncio.to_thread(_sync_gen_gm_logic)
+            except Exception as _gm_exc:
+                logger.warning(f"[GM_Logic] call failed (attempt {_gm_attempt+1}/2): {_gm_exc}")
+                continue
+            _raw = gm_logic_response.text if gm_logic_response else None
+            if _raw:
+                gm_logic_raw = _raw.strip()
+                if gm_logic_raw:
+                    break  # got usable text
+            logger.warning(f"[GM_Logic] empty/None text (attempt {_gm_attempt+1}/2) — retrying")
 
-        # GM_Logic fallback якщо JSON не парситься
+        ai_data = clean_and_parse_json(gm_logic_raw) if gm_logic_raw else None
+
+        # GM_Logic fallback якщо JSON не парситься або текст порожній (MALFORMED after retries)
         if not ai_data:
+            logger.warning("[GM_Logic] using minimal fallback (empty/unparseable after retries)")
             ai_data = {"director_notes": ["Дія мала неоднозначний результат."],
                        "npc_updates": [], "suggested_actions": []}
 
@@ -1109,6 +1130,8 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
 
         if _debug_active:
             clear_thoughts()  # isolate Narrator thoughts from GM_Logic
+            if _debug_trace is not None:
+                _debug_trace["narrator"]["prompt"] = narrator_prompt
 
         if narrator_queue is not None:
             # === STREAMING MODE: стрімимо narrator-текст чанками через queue ===
@@ -1610,6 +1633,10 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         debug_msg += "\n━━━━━━━━━━━━━━━━"
         debug_msg += f"\n🏁 ВСЬОГО: {total_time:.2f}s"
         user_sessions[chat_id]['last_debug_time'] = debug_msg
+        # Snapshot thoughts into session so /thoughts cheat can read them.
+        # ContextVar isolates _thoughts_log per-task, so the cheat handler (a
+        # different asyncio Task) cannot see them via get_thoughts_log() directly.
+        user_sessions[chat_id]['last_thoughts'] = get_thoughts_log()
 
         # _narrator_failed=True означає, що story містить детерміністичний last-resort абзац
         # від _build_deterministic_narrative. Це художній текст — повертаємо з impact-summary як завжди.

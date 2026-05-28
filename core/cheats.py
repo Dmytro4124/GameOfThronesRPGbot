@@ -685,8 +685,12 @@ async def cmd_puppet(message, bot, chat_id, args):
 
 
 async def cmd_thoughts(message, bot, chat_id, args):
-    from core.ai_client import get_thoughts_log
-    entries = get_thoughts_log()
+    # Read the per-turn snapshot stored in the session by process_game_turn.
+    # NOTE: _thoughts_log is ContextVar-isolated per asyncio Task, so calling
+    # get_thoughts_log() here (a separate handler Task) returns []. The engine
+    # snapshots thoughts into user_sessions[chat_id]['last_thoughts'] at turn end.
+    from core.engine import user_sessions
+    entries = user_sessions.get(chat_id, {}).get("last_thoughts", [])
     if not entries:
         await message.answer("💭 Роздумів немає — зробіть хід спочатку.")
         return

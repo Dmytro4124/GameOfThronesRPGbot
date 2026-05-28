@@ -349,7 +349,7 @@ if __name__ == "__main__":
 
 7. **`active_processing: set` як lock** — на in-memory словнику + чекаються сирі mutation. Якщо процес впаде під час ходу, lock не звільниться, і користувач не зможе ходити до рестарту бота. Жодних `try/finally` навколо нього на самому верхньому рівні немає (тільки навколо внутрішнього блоку).
 
-8. **Конкурентність:** `_thoughts_log: list` — модуль-глобальна змінна без lock-у. `clear_thoughts()` викликається на старті кожного ходу, але якщо ходи паралельні (різні чати) — лог змішається.
+8. **Конкурентність (ВИРІШЕНО):** `_thoughts_log` тепер `contextvars.ContextVar[list]` (`core/ai_client.py`) — per-async-task ізоляція. Паралельні ходи різних чатів більше НЕ змішують логи (кожен Telegram update = окремий Task = окремий context; `asyncio.to_thread` propagate context у worker thread). `/thoughts` cheat читає snapshot з `user_sessions[chat_id]['last_thoughts']`.
 
 9. **Один `Router()`** для всього + один файл `handlers.py` на 501 рядок — рости буде боляче.
 

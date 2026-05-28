@@ -2256,3 +2256,125 @@ class TestRestIntegration:
         assert profile.get(health_key) == 100, (
             f"Long rest must set legacy {health_key} to 100. Got {profile.get(health_key)}"
         )
+
+
+# ===========================================================================
+# Tests: Worker retry logic (1 initial + 1 retry before AUTO_SUCCESS fallback)
+# ===========================================================================
+
+class TestWorkerRetry:
+    """Verify that resolve_normal_action retries once on empty/None LLM response
+    before degrading to AUTO_SUCCESS fallback."""
+
+    def test_worker_retries_once_on_empty_then_succeeds(self):
+        """First call returns resp.text=None, second call returns valid JSON.
+        Result must use the valid data (not AUTO_SUCCESS fallback).
+        generate_content must be called exactly 2 times."""
+        profile = _dnd_profile()
+        valid_data = _minimal_worker_data(
+            ability_used="STR",
+            skill_used="Athletics",
+            difficulty=15,
+            xp_award=25,
+        )
+        import json as _json
+
+        call_count = []
+
+        def _mock_gen(prompt, max_retries=6, config=None):
+            call_count.append(1)
+            m = MagicMock()
+            if len(call_count) == 1:
+                m.text = None  # first attempt: MALFORMED/None
+            else:
+                m.text = _json.dumps(valid_data, ensure_ascii=False)  # second attempt: valid
+            return m
+
+        prompt_patch = patch(
+            "core.dnd_engine.build_normal_resolve_prompt",
+            return_value="MOCK_PROMPT",
+        )
+        # clean_and_parse_json: return None for None text (guarded in loop), valid dict for valid text
+        original_parse = None
+
+        def _smart_parse(text):
+            if not text:
+                return None
+            return valid_data
+
+        parse_patch = patch(
+            "core.dnd_engine.clean_and_parse_json",
+            side_effect=_smart_parse,
+        )
+
+        async def _run():
+            from core.dnd_engine import resolve_normal_action
+            return await resolve_normal_action(
+                user_input="Climb the wall",
+                profile=profile,
+            )
+
+        with prompt_patch, parse_patch:
+            with patch(
+                "core.dnd_engine.model_worker.generate_content",
+                side_effect=_mock_gen,
+            ):
+                verdict, updates = _run_async(_run())
+
+        assert len(call_count) == 2, (
+            f"generate_content must be called 2 times (1 initial + 1 retry). Got {len(call_count)}"
+        )
+        assert "AUTO_SUCCESS" not in verdict, (
+            f"Retry must succeed — verdict must NOT contain AUTO_SUCCESS. Got: {verdict!r}"
+        )
+        assert updates["outcome"] in {"SUCCESS", "FAILURE", "CRITICAL SUCCESS", "CRITICAL FAILURE"}, (
+            f"Outcome must be a real dice result after retry. Got {updates['outcome']!r}"
+        )
+
+    def test_worker_both_attempts_empty_falls_back_auto_success(self):
+        """Both attempts return resp.text=None → AUTO_SUCCESS fallback.
+        generate_content must be called exactly 2 times."""
+        profile = _dnd_profile()
+
+        call_count = []
+
+        def _mock_gen_empty(prompt, max_retries=6, config=None):
+            call_count.append(1)
+            m = MagicMock()
+            m.text = None  # always None — MALFORMED
+            return m
+
+        prompt_patch = patch(
+            "core.dnd_engine.build_normal_resolve_prompt",
+            return_value="MOCK_PROMPT",
+        )
+        # clean_and_parse_json is never called (guarded by `if _raw_text else None`)
+        # but patch it for safety to ensure no unexpected calls
+        parse_patch = patch(
+            "core.dnd_engine.clean_and_parse_json",
+            return_value=None,
+        )
+
+        async def _run():
+            from core.dnd_engine import resolve_normal_action
+            return await resolve_normal_action(
+                user_input="Look around",
+                profile=profile,
+            )
+
+        with prompt_patch, parse_patch:
+            with patch(
+                "core.dnd_engine.model_worker.generate_content",
+                side_effect=_mock_gen_empty,
+            ):
+                verdict, updates = _run_async(_run())
+
+        assert len(call_count) == 2, (
+            f"Both attempts must be made before fallback. generate_content called {len(call_count)} times"
+        )
+        assert "AUTO_SUCCESS" in verdict, (
+            f"Both attempts empty → fallback verdict must contain 'AUTO_SUCCESS'. Got: {verdict!r}"
+        )
+        assert updates["outcome"] == "SUCCESS", (
+            f"AUTO_SUCCESS fallback outcome must be 'SUCCESS'. Got {updates['outcome']!r}"
+        )

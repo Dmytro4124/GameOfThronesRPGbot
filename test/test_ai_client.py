@@ -718,3 +718,69 @@ def test_split_thoughts_success_returns_ai_response():
     assert mock_gen.call_count == 1, (
         f"generate_content must be called exactly once. Got: {mock_gen.call_count}"
     )
+
+
+# ─── ContextVar isolation (concurrency fix) ──────────────────────────────────
+
+def test_thoughts_isolated_between_contexts():
+    """Two separate contexts (simulating concurrent player turns) have isolated thoughts.
+
+    asyncio.gather runs coroutines in separate Tasks → separate ContextVar contexts.
+    Player A's clear_thoughts() must NOT affect Player B's log, and vice-versa.
+    """
+    from core.ai_client import clear_thoughts, record_thought, get_thoughts_log
+
+    async def player_turn(name):
+        clear_thoughts()
+        record_thought("model", f"{name} thought 1")
+        await asyncio.sleep(0)  # yield — interleave with other task
+        record_thought("model", f"{name} thought 2")
+        return get_thoughts_log()
+
+    async def run_both():
+        # gather runs both in separate tasks → separate contexts
+        results = await asyncio.gather(player_turn("A"), player_turn("B"))
+        return results
+
+    results = asyncio.run(run_both())
+    a_thoughts = [t["thought"] for t in results[0]]
+    b_thoughts = [t["thought"] for t in results[1]]
+
+    # A's log must contain ONLY A's thoughts, B's ONLY B's
+    assert all("A" in t for t in a_thoughts), \
+        f"A's log must contain only A's thoughts, got: {a_thoughts}"
+    assert all("B" in t for t in b_thoughts), \
+        f"B's log must contain only B's thoughts, got: {b_thoughts}"
+    assert len(a_thoughts) == 2, \
+        f"A must have exactly 2 thoughts, got: {a_thoughts}"
+    assert len(b_thoughts) == 2, \
+        f"B must have exactly 2 thoughts, got: {b_thoughts}"
+
+
+def test_thoughts_to_thread_propagation():
+    """record_thought called from asyncio.to_thread appends to caller's context list.
+
+    asyncio.to_thread copies the current context (Python 3.9+), so mutations
+    to the same list object (via .append) are visible in the caller's context.
+    This test confirms that generate_content (called via to_thread) correctly
+    appends thoughts to the task-local list.
+    """
+    from core.ai_client import clear_thoughts, record_thought, get_thoughts_log
+
+    async def turn():
+        clear_thoughts()
+        record_thought("m", "main thread thought")
+        # Simulate generate_content calling record_thought from a to_thread worker
+        def _in_thread():
+            record_thought("m", "worker thread thought")
+        await asyncio.to_thread(_in_thread)
+        return get_thoughts_log()
+
+    result = asyncio.run(turn())
+    thoughts = [t["thought"] for t in result]
+    assert "main thread thought" in thoughts, \
+        f"main thread thought must be present, got: {thoughts}"
+    assert "worker thread thought" in thoughts, \
+        f"to_thread record_thought must reach caller context, got: {thoughts}"
+    assert len(thoughts) == 2, \
+        f"Must have exactly 2 thoughts (main + worker thread), got: {thoughts}"

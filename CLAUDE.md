@@ -283,7 +283,7 @@ In-memory структури без локів — навмисний компр
 - `user_sessions: dict` (engine.py)
 - `PROCESSED_MESSAGES: set` (handlers.py)
 - `active_processing: set` (handlers.py) — це user lock проти паралельних ходів
-- `_thoughts_log: list` (модуль-глобальна)
+- `_thoughts_log_var: ContextVar[list]` (`core/ai_client.py`) — per-async-task ізоляція thoughts (ContextVar, НЕ global list). Кожен Telegram update = окремий Task = окремий context, тож логи паралельних гравців НЕ змішуються. `process_game_turn` робить snapshot у `user_sessions[chat_id]['last_thoughts']` для `/thoughts` cheat (інший Task context не бачить ContextVar напряму).
 - `combat_state._combat_states: dict[chat_id, CombatState]` (`core/combat_state.py`) — стан активного бою
 - `combat_state._state_locks: dict[chat_id, asyncio.Lock]` (`core/combat_state.py`) — атомарність COMBAT pipeline
 
