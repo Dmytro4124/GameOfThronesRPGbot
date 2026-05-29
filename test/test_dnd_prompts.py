@@ -630,3 +630,218 @@ def test_feature_desc_121_chars_is_truncated():
     assert truncated_expected in result, "121-char desc must be truncated to first 117 chars + '...'"
     # Full 121-char string must NOT appear
     assert desc_121 not in result, "Full 121-char desc must not be present after truncation"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. Heritage traits in Worker prompt (Round 2 fire resistance activation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _valyrian_profile():
+    """Minimal Valyrian Descent profile — no class features, only heritage traits."""
+    return {
+        "Ім'я": "Дейнеріс",
+        "Дім": "Таргарієн",
+        "level": 2,
+        "class": "Courtier",
+        "heritage": "Valyrian Descent",
+        "ability_scores": {"STR": 8, "DEX": 10, "CON": 10, "INT": 14, "WIS": 12, "CHA": 18},
+        "proficiency_bonus": 2,
+        "skill_profs": ["Persuasion"],
+        "conditions": [],
+        "hp_current": 14,
+        "hp_max": 14,
+        "ac": 11,
+        "features": [],  # no class features — only heritage traits
+    }
+
+
+def test_heritage_traits_in_prompt():
+    """Valyrian heritage traits appear in Worker prompt — Опір вогню must be present."""
+    profile = _valyrian_profile()
+    prompt = build_normal_resolve_prompt(
+        user_input="Хапаю розпечене вугілля голою рукою",
+        profile=profile,
+        current_scene="Базарна площа",
+        npcs_in_scene=[],
+        last_turn_summary="Гра почалась.",
+        current_location="Пентос",
+        npc_reputation_context=None,
+        clocks_info=None,
+    )
+    # Heritage trait name must be present
+    assert "Опір вогню" in prompt, "Expected 'Опір вогню' Valyrian trait in Worker prompt"
+    # At least one of the fire-related keywords must appear in desc or GATE instruction
+    assert "fire" in prompt.lower() or "вогн" in prompt.lower(), (
+        "Expected fire-related keyword in prompt for Valyrian fire resistance trait"
+    )
+    # Heritage section header must appear
+    assert "Heritage" in prompt, "Expected 'Heritage' section label in <class_features> block"
+
+
+def test_heritage_traits_visible_even_without_class_features():
+    """<class_features> block must appear when heritage has traits but class features list is empty."""
+    profile = _valyrian_profile()
+    profile["features"] = []  # explicitly empty
+    prompt = build_normal_resolve_prompt(
+        user_input="Дивлюся на вогонь",
+        profile=profile,
+        current_scene="Таверна",
+        npcs_in_scene=[],
+        last_turn_summary="Старт",
+        current_location="Пентос",
+        npc_reputation_context=None,
+        clocks_info=None,
+    )
+    assert "<class_features>" in prompt, (
+        "Expected <class_features> block even when class features=[] if heritage traits exist"
+    )
+    assert "Valyrian Descent" in prompt, "Expected heritage name in features block"
+
+
+def test_hp_damage_type_in_output_schema():
+    """hp_damage_type must be documented in output_schema block."""
+    prompt = build_normal_resolve_prompt(
+        user_input="Атакую варту",
+        profile=_valyrian_profile(),
+        current_scene="Зал",
+        npcs_in_scene=[],
+        last_turn_summary="Старт",
+        current_location="Пентос",
+        npc_reputation_context=None,
+        clocks_info=None,
+    )
+    assert "hp_damage_type" in prompt, (
+        "Expected 'hp_damage_type' key in output_schema and/or GATE 6 instruction"
+    )
+
+
+def test_hp_damage_type_in_json_template():
+    """hp_damage_type must appear in the JSON output template at end of prompt."""
+    prompt = build_normal_resolve_prompt(
+        user_input="Стрибаю з вежі",
+        profile=_valyrian_profile(),
+        current_scene="Вежа",
+        npcs_in_scene=[],
+        last_turn_summary="Старт",
+        current_location="Пентос",
+        npc_reputation_context=None,
+        clocks_info=None,
+    )
+    # The JSON template block contains the key with its default value
+    assert '"hp_damage_type": "physical"' in prompt, (
+        "Expected '\"hp_damage_type\": \"physical\"' in JSON output template"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 12. Reputation delta two-field schema (outcome-based selection bug fix)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_reputation_delta_two_fields_in_schema(minimal_profile):
+    """§5.3 contract: both reputation_delta_success and reputation_delta_failure
+    must be present in the Worker prompt output_schema.
+
+    Worker evaluates BOTH scenarios because it cannot know the roll outcome.
+    Engine selects the correct field after the d20 roll.
+    """
+    prompt = build_normal_resolve_prompt(
+        user_input="Намагаюся переконати Кхала Дрого",
+        profile=minimal_profile,
+        current_scene="Шатро",
+        npcs_in_scene=[],
+        last_turn_summary="Старт",
+        current_location="Пентос",
+        npc_reputation_context=None,
+        clocks_info=None,
+    )
+    assert "reputation_delta_success" in prompt, (
+        "Expected 'reputation_delta_success' key in output_schema — Worker must evaluate success case."
+    )
+    assert "reputation_delta_failure" in prompt, (
+        "Expected 'reputation_delta_failure' key in output_schema — Worker must evaluate failure case."
+    )
+
+
+def test_reputation_delta_old_single_field_absent(minimal_profile):
+    """The old single 'reputation_delta' field must NOT appear as a top-level output key
+    (only the two new split fields should be in the schema definition).
+
+    Note: the substring 'reputation_delta' still appears as part of
+    'reputation_delta_success' / 'reputation_delta_failure' — this is expected.
+    We assert the bare exact key pattern is absent from the schema definition.
+    """
+    import re
+    prompt = build_normal_resolve_prompt(
+        user_input="Тестова дія",
+        profile=minimal_profile,
+        current_scene="Двір",
+        npcs_in_scene=[],
+        last_turn_summary="Старт",
+        current_location="Вінтерфелл",
+        npc_reputation_context=None,
+        clocks_info=None,
+    )
+    # The pattern 'reputation_delta :' or '"reputation_delta":' as standalone key
+    # (not followed by _success or _failure) must be absent from output_schema.
+    # We check the <output_schema> block only to avoid false positives from
+    # backward-compat comments elsewhere in the prompt.
+    schema_start = prompt.find("<output_schema>")
+    schema_end = prompt.find("</output_schema>")
+    if schema_start != -1 and schema_end != -1:
+        schema_block = prompt[schema_start:schema_end]
+        # Match 'reputation_delta' not followed by _success or _failure
+        bare_delta = re.search(r'reputation_delta(?!_success|_failure)', schema_block)
+        assert bare_delta is None, (
+            "Old single 'reputation_delta' key must not appear in <output_schema> — "
+            "replaced by reputation_delta_success and reputation_delta_failure."
+        )
+
+
+def test_reputation_gate_instruction_present(minimal_profile):
+    """GATE REP instruction (asymmetry examples) must be in <thinking_directives>."""
+    prompt = build_normal_resolve_prompt(
+        user_input="Тестова дія",
+        profile=minimal_profile,
+        current_scene="Двір",
+        npcs_in_scene=[],
+        last_turn_summary="Старт",
+        current_location="Вінтерфелл",
+        npc_reputation_context=None,
+        clocks_info=None,
+    )
+    assert "GATE REP" in prompt, (
+        "Expected 'GATE REP' reputation instruction in <thinking_directives>."
+    )
+    assert "reputation_delta_success" in prompt, (
+        "Expected 'reputation_delta_success' in GATE REP instruction."
+    )
+    assert "reputation_delta_failure" in prompt, (
+        "Expected 'reputation_delta_failure' in GATE REP instruction."
+    )
+
+
+def test_reputation_delta_range_7_in_schema(minimal_profile):
+    """Schema documents -7..+7 range (extended from -5..+5 in Round 2)."""
+    prompt = build_normal_resolve_prompt(
+        user_input="Намагаюся переконати Кхала Дрого",
+        profile=minimal_profile,
+        current_scene="Шатро",
+        npcs_in_scene=[],
+        last_turn_summary="Старт",
+        current_location="Пентос",
+        npc_reputation_context=None,
+        clocks_info=None,
+    )
+    assert "-7" in prompt, "Expected '-7' lower bound in reputation_delta schema"
+    assert "+7" in prompt, "Expected '+7' upper bound in reputation_delta schema"
+    # Old narrow range must no longer be the stated boundary
+    assert "-5..+5" not in prompt, (
+        "Old '-5..+5' range must not appear in prompt — replaced by -7..+7"
+    )
+    # TRIVIAL → 0 rule must be present
+    assert "trivial" in prompt.lower() or "тривіальна" in prompt.lower() or "TRIVIAL" in prompt, (
+        "Expected TRIVIAL→0 rule in prompt (anti-farming guard)"
+    )
+    # Calibration anchors must be present
+    assert "бенкет" in prompt, "Expected 'бенкет' calibration anchor in prompt"
+    assert "посадив на трон" in prompt, "Expected 'посадив на трон' calibration anchor in prompt"

@@ -260,3 +260,66 @@ def apply_heritage_bonuses(
 def list_heritages() -> list[str]:
     """Return sorted list of all available heritage names."""
     return sorted(HERITAGES.keys())
+
+
+def is_fire_resistant(profile: dict) -> bool:
+    """Return True if the profile's heritage grants fire resistance.
+
+    Primary check: reads profile["heritage"] and looks up the HeritageDef.
+    A heritage grants fire resistance when it has a Trait whose name contains
+    "опір вогню" (Ukrainian "fire resistance") OR whose desc contains
+    "half damage from fire" (English canonical phrasing). This precise matching
+    avoids false positives for fire-DEALING traits (e.g. Red Priest "Піромантія").
+
+    Fallback for legacy profiles without a "heritage" key: checks
+    profile["Риси"] for the literal text "Опір вогню" so that old profiles
+    written before the D&D migration are handled correctly.
+
+    Returns True only for Valyrian Descent (currently the sole heritage with
+    fire resistance).  The implementation is definition-driven so that adding
+    fire resistance to another heritage in HERITAGES automatically propagates
+    here without any code change.
+    """
+    heritage_name: str = profile.get("heritage", "")
+    if heritage_name and heritage_name in HERITAGES:
+        hdef = HERITAGES[heritage_name]
+        for trait in hdef.traits:
+            # Check for fire *resistance* specifically — not any fire-related trait.
+            # A trait grants fire resistance when:
+            #   - its name contains "опір вогню" (Ukrainian "fire resistance"), OR
+            #   - its desc contains "half damage from fire" (English canonical phrasing).
+            # This avoids false positives for traits that merely deal fire damage
+            # (e.g. Red Priest "Піромантія" which contains "fire damage" in desc).
+            name_lower = trait.name.lower()
+            desc_lower = trait.desc.lower()
+            if "опір вогню" in name_lower or "half damage from fire" in desc_lower:
+                return True
+        return False
+
+    # Legacy fallback: profile has no "heritage" key — check free-text "Риси" field.
+    # This supports profiles created before the D&D migration.
+    traits_text: str = str(profile.get("Риси", "")).lower()
+    return "опір вогню" in traits_text
+
+
+def get_heritage_traits(heritage_name: str) -> list[Trait]:
+    """Return the list of Trait objects for the named heritage.
+
+    Args:
+        heritage_name: Exact name as stored in profile["heritage"] and HERITAGES keys.
+
+    Returns:
+        List of Trait(name: str, desc: str) objects.
+        Returns an empty list for unknown or empty heritage names — never raises.
+
+    Usage by prompt-engineer (Round 2):
+        traits = get_heritage_traits(profile.get("heritage", ""))
+        # Each Trait has .name (str) and .desc (str).
+        # Render into <class_features> block alongside class features.
+    """
+    if not heritage_name:
+        return []
+    hdef = HERITAGES.get(heritage_name)
+    if hdef is None:
+        return []
+    return list(hdef.traits)  # return a copy so callers cannot mutate the registry

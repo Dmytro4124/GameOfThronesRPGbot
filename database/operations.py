@@ -1,4 +1,5 @@
 # database/operations.py
+import copy as _copy
 import json
 import difflib
 import re
@@ -11,6 +12,7 @@ from google import genai
 
 from database.sheets import db
 from core.world_constants import is_valid_location, is_valid_region, TRAVEL_LOCATION
+from core.reputation import apply_reputation_step
 from config import (
     TAB_USERS,
     TAB_HOUSES,
@@ -659,6 +661,80 @@ def get_location_npcs(user_id, current_location, current_scene, current_region=N
     return npc_block, legal_names, reputation_context
 
 
+# ================= КАНОНІЧНИЙ STATBLOCK LOOKUP (COMBAT INIT ONLY) =================
+#
+# get_canon_npc_statblock() is the single entry-point for the combat engine to obtain
+# a full D&D statblock for a named canon NPC.  It is PURE Python / in-memory:
+# no gspread calls, no Gemini calls, no asyncio.to_thread needed.
+#
+# The module-level cache _CANON_STATBLOCK_INDEX is built lazily on first call and
+# never mutated afterwards.  Each cache entry is a FILTERED (shallow) dict of only
+# the fields in _STATBLOCK_FIELDS — NOT a full deep-copy of the canon record.
+# Deep-copy is applied only at lookup time in get_canon_npc_statblock() so combat
+# mutations cannot corrupt the index.
+
+# Statblock fields the combat engine needs.  Narrative / lore fields are stripped so
+# the engine receives a clean, minimal dict.
+_STATBLOCK_FIELDS = frozenset({
+    "Name",
+    "ability_scores",
+    "hp_max",
+    "hp_current",
+    "ac",
+    "attacks",
+    "saves",
+    "skills",
+    "cr",
+    "conditions",
+    "speed",
+    "tags",
+})
+
+# Lazy cache: None means "not built yet".
+# safe: asyncio is single-threaded; no await between check and assignment.
+_CANON_STATBLOCK_INDEX: dict | None = None
+
+
+def _build_canon_statblock_index() -> dict:
+    """Build a Name → statblock dict from the canon registry (called once)."""
+    from database.canon_npc import get_canon_npcs_copy
+    index: dict = {}
+    for npc in get_canon_npcs_copy():
+        name = npc.get("Name", "").strip()
+        if not name:
+            continue
+        statblock = {k: v for k, v in npc.items() if k in _STATBLOCK_FIELDS}
+        index[name] = statblock
+    return index
+
+
+def get_canon_npc_statblock(name: str) -> dict | None:
+    """Return a deep-copied D&D statblock dict for the canon NPC with this name.
+
+    Looks up ``name`` in the canon registry (``database.canon_npc.get_canon_npcs_copy()``).
+    Returns a dict containing AT LEAST these fields (when present in canon data):
+        ability_scores, hp_max, hp_current, ac, attacks, saves, skills,
+        cr, conditions, speed, tags, Name.
+    Returns None if no canon NPC with this name exists.
+
+    Matching is case-sensitive on the canonical 'Name' field.
+
+    Returns a deep copy so callers (combat engine) cannot mutate the canon
+    registry through the returned object.
+
+    NOTE: Pure-Python, in-memory only.  No gspread / Gemini I/O.
+    Intended for COMBAT INITIALIZATION; do not use for narrative/lore queries.
+    """
+    global _CANON_STATBLOCK_INDEX
+    if _CANON_STATBLOCK_INDEX is None:
+        _CANON_STATBLOCK_INDEX = _build_canon_statblock_index()
+
+    entry = _CANON_STATBLOCK_INDEX.get(name)
+    if entry is None:
+        return None
+    return _copy.deepcopy(entry)
+
+
 # ================= ДОПОМІЖНІ ФУНКЦІЇ ДЛЯ БАЗИ =================
 
 def find_best_match(query_name, distinct_names, threshold=0.75):
@@ -726,6 +802,9 @@ async def update_npcs_in_db(user_id, updates, legal_names_list_deprecated=None,
 
         headers = [h.strip().lower() for h in all_values[0]]
         col_map = {}
+        # hp_current intentionally NOT here — during COMBAT, combat_state is authoritative;
+        # persisting GM-emitted hp_current would clobber it.  To re-enable, ensure all
+        # callers respect the COMBAT-strip invariant in core/engine.py.
         target_cols = ["status", "location", "scene", "memory_anchor", "goal", "secrets",
                        "description", "character",
                        "relation_npcs", "inventory", "reputation_score", "region"]
@@ -927,9 +1006,9 @@ async def update_npc_reputation(user_id, npc_name, delta):
                     old_val = int(str(row[rep_col - 1]).strip()) if str(row[rep_col - 1]).strip() else 0
                 except (ValueError, TypeError):
                     old_val = 0
-                new_val = max(-100, min(100, old_val + delta))
+                new_val = apply_reputation_step(old_val, delta)
                 worksheet.update_cell(i, rep_col, new_val)
-                print(f"[REP] {raw_name}: {old_val} -> {new_val} (delta {delta:+d})")
+                print(f"[REP] {raw_name}: {old_val} -> {new_val} (raw delta {delta:+d})")
                 # Автоматично синхронізуємо текстовий ярлик із новим Score
                 from database.canon_npc import _score_to_relation_text
                 if "relation_player" in headers:

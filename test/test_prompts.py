@@ -54,12 +54,13 @@ def test_normal_resolve_prompt_has_reputation_reasoning_key():
     )
 
 
-# ─── Тест 2: build_normal_resolve_prompt містить 'reputation_delta' ──────────
+# ─── Тест 2: build_normal_resolve_prompt містить два outcome-залежні поля репутації ───
 
-def test_normal_resolve_prompt_has_reputation_delta_key():
+def test_reputation_delta_two_fields_in_schema():
     """
-    build_normal_resolve_prompt повинен містити 'reputation_delta'
-    (парний ключ до reputation_reasoning).
+    §5.3 контракт: build_normal_resolve_prompt повинен містити обидва поля
+    'reputation_delta_success' та 'reputation_delta_failure' в output_schema.
+    Worker оцінює ОБИДВА сценарії; engine вибирає правильне поле після кидка кубика.
     """
     from core.prompts import build_normal_resolve_prompt
 
@@ -86,8 +87,11 @@ def test_normal_resolve_prompt_has_reputation_delta_key():
         clocks_info=None,
     )
 
-    assert "reputation_delta" in prompt, (
-        "build_normal_resolve_prompt must contain 'reputation_delta' key in output schema."
+    assert "reputation_delta_success" in prompt, (
+        "build_normal_resolve_prompt must contain 'reputation_delta_success' key in output schema."
+    )
+    assert "reputation_delta_failure" in prompt, (
+        "build_normal_resolve_prompt must contain 'reputation_delta_failure' key in output schema."
     )
 
 

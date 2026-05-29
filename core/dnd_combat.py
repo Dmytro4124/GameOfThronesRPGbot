@@ -48,11 +48,41 @@ _CR_XP: dict[str, int] = {
     "10": 5900,
 }
 
-# Heritage names that grant fire resistance (Valyrian Descent)
-_FIRE_RESISTANT_HERITAGES: frozenset[str] = frozenset({"Valyrian Descent"})
-
 # Heritage names that grant cold immunity (Free Folk)
 _COLD_IMMUNE_HERITAGES: frozenset[str] = frozenset({"Free Folk"})
+
+# ---------------------------------------------------------------------------
+# Tier-based NPC fallback table (used when canon statblock is absent)
+# Mirrors D&D 5e Monster Manual archetypes scaled for ASoIaF tone.
+# Each entry: (hp, ac, to_hit, attack_name, attack_dmg)
+# ---------------------------------------------------------------------------
+_NPC_TIER_DEFAULTS: dict[str, dict] = {
+    "commoner": {
+        "hp":       4,
+        "ac":       10,
+        "to_hit":   2,
+        "attack":   {"name": "Кулак",              "to_hit": 2, "dmg": "1d4 bludgeoning",  "range": 5},
+    },
+    "guard": {
+        "hp":       11,
+        "ac":       16,
+        "to_hit":   3,
+        "attack":   {"name": "Спис",               "to_hit": 3, "dmg": "1d8+1 piercing",   "range": 5},
+    },
+    "sellsword": {
+        "hp":       16,
+        "ac":       14,
+        "to_hit":   4,
+        "attack":   {"name": "Меч",                "to_hit": 4, "dmg": "1d8+2 slashing",   "range": 5},
+    },
+    "veteran": {
+        "hp":       58,
+        "ac":       17,
+        "to_hit":   5,
+        "attack":   {"name": "Дволезовий меч",     "to_hit": 5, "dmg": "1d8+3 slashing",   "range": 5},
+    },
+}
+_NPC_TIER_DEFAULT_KEY = "guard"  # used when tier cannot be resolved
 
 # Relentless Endurance feature (Ironborn / half-orc equivalent)
 _RELENTLESS_ENDURANCE_FEATURE = "Relentless Endurance"
@@ -141,9 +171,13 @@ def _get_heritage(profile: dict) -> str:
 
 
 def _is_fire_resistant(profile: dict) -> bool:
-    """Return True if profile has Valyrian fire resistance."""
-    heritage = _get_heritage(profile)
-    return heritage in _FIRE_RESISTANT_HERITAGES
+    """Return True if profile has fire resistance.
+
+    Delegates to core.dnd_heritages.is_fire_resistant (shared source of truth).
+    Kept as a private alias so existing call-sites within this module are unchanged.
+    """
+    from core.dnd_heritages import is_fire_resistant
+    return is_fire_resistant(profile)
 
 
 def _is_cold_immune(profile: dict) -> bool:
@@ -157,6 +191,45 @@ def _npc_is_alive(npc: dict) -> bool:
     status = npc.get("Status", "Active")
     hp = npc.get("hp_current", 1)
     return status not in ("Dead", "Fled", "Unconscious") and hp > 0
+
+
+def _guess_npc_tier(npc: dict) -> str:
+    """Heuristically derive combat tier from NPC tags and Name.
+
+    Returns one of: 'commoner', 'guard', 'sellsword', 'veteran'.
+    Default (unrecognised tag + unrecognised name) → 'guard'.
+    Tags and Name are checked together in each tier; the first tier whose
+    tag-or-name pattern matches wins, in order: veteran, sellsword, guard, commoner.
+    """
+    tags: list[str] = [t.lower() for t in npc.get("tags", [])]
+    name: str = npc.get("Name", npc.get("name", "")).lower()
+
+    # veteran / knight — check first (most specific)
+    if any(t in tags for t in ("veteran", "knight")) or "лицар" in name:
+        return "veteran"
+
+    # sellsword / mercenary / bandit
+    if (
+        any(t in tags for t in ("sellsword", "mercenary"))
+        or any(w in name for w in ("найман", "бандит"))
+    ):
+        return "sellsword"
+
+    # guard / watch / captain
+    if (
+        any(t in tags for t in ("guard", "watch"))
+        or any(w in name for w in ("варта", "стражник", "капітан"))
+    ):
+        return "guard"
+
+    # commoner — check last so specific roles aren't mistakenly demoted
+    if (
+        "commoner" in tags
+        or any(w in name for w in ("слуга", "торговець", "селянин"))
+    ):
+        return "commoner"
+
+    return _NPC_TIER_DEFAULT_KEY
 
 
 # ---------------------------------------------------------------------------
@@ -198,11 +271,15 @@ def initiate_combat(
         combatants.append(CombatantRef(kind="npc", name=npc_name, init_roll=npc_init))
 
         snapshot = copy.deepcopy(npc)
-        # Guarantee required combat fields
+        # Guarantee required combat fields; use tier-based fallback for non-canon NPCs.
+        _tier = _guess_npc_tier(snapshot)
+        _tier_data = _NPC_TIER_DEFAULTS[_tier]
+        if "hp_max" not in snapshot:
+            snapshot["hp_max"] = _tier_data["hp"]
         if "hp_current" not in snapshot:
-            snapshot["hp_current"] = snapshot.get("hp_max", 10)
+            snapshot["hp_current"] = snapshot["hp_max"]
         if "ac" not in snapshot:
-            snapshot["ac"] = 10
+            snapshot["ac"] = _tier_data["ac"]
         if "conditions" not in snapshot:
             snapshot["conditions"] = []
         if "Status" not in snapshot:
@@ -585,8 +662,9 @@ def npc_attack(
 
     attacks = npc.get("attacks", [])
     if not attacks:
-        # Fallback: unarmed 1d4 bludgeoning with +0 to hit
-        attack_data = {"name": "Unarmed", "to_hit": 0, "dmg": "1d4 bludgeoning", "range": 5}
+        # Fallback: tier-appropriate weapon instead of flat unarmed +0 / 1d4
+        _tier_key = _guess_npc_tier(npc)
+        attack_data = dict(_NPC_TIER_DEFAULTS[_tier_key]["attack"])
     else:
         attack_data = attacks[0]
 

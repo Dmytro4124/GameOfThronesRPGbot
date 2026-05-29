@@ -43,6 +43,14 @@ AUTO_SUCCESS_MAX_DC: int = 2
 # Legal XP award values (from prompts output_schema)
 _LEGAL_XP: frozenset[int] = frozenset({0, 25, 50, 100, 200})
 
+# Reputation delta clamp range (Worker may suggest beyond; engine clamps).
+# Extended from -5..+5 to -7..+7 to mirror the 15-step Relation_Player scale
+# and support asymmetric magnitude-gated progression (core/reputation.py).
+# Raw delta -7..+7 is stored in updates["reputation_delta"] and consumed by
+# update_npc_reputation (data-rag-agent Round 2) which calls apply_reputation_step.
+REPUTATION_DELTA_MIN: int = -7
+REPUTATION_DELTA_MAX: int = 7
+
 # Physical danger keywords triggering DC floor (D&D PHB: falling ≥ 10 ft → 1d6 per 10 ft)
 _DANGER_KEYWORDS = [
     "стриб", "паді", "зістриб", "зіскоч", "стін", "вікн", "дха",
@@ -94,6 +102,16 @@ def _roll_dice_str(dice_str: str) -> int:
         return 0
     num, sides = entry
     return sum(random.randint(1, sides) for _ in range(num))
+
+
+def _clamp_reputation_delta(value: int) -> int:
+    """Clamp reputation_delta to [REPUTATION_DELTA_MIN, REPUTATION_DELTA_MAX].
+
+    Single source of truth for the clamp — replaces the four inline
+    max(-3, min(3, ...)) expressions that were flagged by code-reviewer
+    as a divergence risk when adding new code paths.
+    """
+    return max(REPUTATION_DELTA_MIN, min(REPUTATION_DELTA_MAX, value))
 
 
 def _has_danger_keyword(text: str) -> bool:
@@ -248,7 +266,14 @@ async def resolve_normal_action(
     combat_imminent: bool = bool(data.get("combat_imminent", False))
     verdict_text_llm: str = str(data.get("verdict_text", "")).strip()
     raw_xp: int = safe_int(data.get("xp_award", 0), 0)
-    reputation_delta: int = safe_int(data.get("reputation_delta", 0), 0)
+    # Worker provides separate deltas for success/failure outcomes.
+    # Engine picks the correct one AFTER the roll (Worker can't know outcome upfront).
+    # Backward compat: if new fields absent, fall back to legacy reputation_delta (treated as
+    # success-case); failure defaults to 0. Old Worker responses are safe.
+    _rep_success_raw: int = safe_int(
+        data.get("reputation_delta_success", data.get("reputation_delta", 0)), 0
+    )
+    _rep_failure_raw: int = safe_int(data.get("reputation_delta_failure", 0), 0)
     reputation_target_npc: str = str(data.get("reputation_target_npc", "")).strip()
 
     # --- 4b. P2: Rest resolution (override skill-check flow) ---
@@ -293,6 +318,8 @@ async def resolve_normal_action(
         verdict_text_llm = (verdict_text_llm or "") + verdict_addendum
 
         # Rest actions bypass skill check flow entirely
+        # REST outcome is always SUCCESS — use success delta
+        _rest_rep_delta = _clamp_reputation_delta(_rep_success_raw)
         updates = _build_updates(
             raw_updates=raw_updates,
             action_type="standard",
@@ -306,7 +333,7 @@ async def resolve_normal_action(
             disadvantage_reason="",
             combat_imminent=combat_imminent,
             xp_award=raw_xp if raw_xp in _LEGAL_XP else 0,
-            reputation_delta=reputation_delta,
+            reputation_delta=_rest_rep_delta,
             reputation_target_npc=reputation_target_npc,
         )
         verdict_str = f"MECHANICAL VERDICT: REST ({rest_type.upper()}). GM INFO: {verdict_text_llm}"
@@ -364,6 +391,10 @@ async def resolve_normal_action(
         # XP validation (needed before _build_updates)
         xp_award_save: int = raw_xp if raw_xp in _LEGAL_XP else 0
 
+        # Select reputation_delta based on save outcome (post-roll)
+        _save_is_success = save_outcome in ("SUCCESS", "CRITICAL SUCCESS")
+        _save_rep_delta = _clamp_reputation_delta(_rep_success_raw if _save_is_success else _rep_failure_raw)
+
         verdict_str = (
             f"MECHANICAL VERDICT: SAVING THROW {save_outcome}! "
             f"({save_used} save vs DC {save_dc}, Roll: {save_roll_str}, "
@@ -383,7 +414,7 @@ async def resolve_normal_action(
             disadvantage_reason="",
             combat_imminent=combat_imminent,
             xp_award=xp_award_save,
-            reputation_delta=reputation_delta,
+            reputation_delta=_save_rep_delta,
             reputation_target_npc=reputation_target_npc,
         )
         updates["dice_roll"] = save_roll_str
@@ -457,6 +488,8 @@ async def resolve_normal_action(
             f"MECHANICAL VERDICT: AUTO_SUCCESS (Free action / DC {difficulty}). "
             f"GM INFO: {verdict_text_llm}"
         )
+        # Free action is always SUCCESS — use success delta
+        _free_rep_delta = _clamp_reputation_delta(_rep_success_raw)
         updates = _build_updates(
             raw_updates=raw_updates,
             action_type="standard",
@@ -470,7 +503,7 @@ async def resolve_normal_action(
             disadvantage_reason="",
             combat_imminent=combat_imminent,
             xp_award=0,
-            reputation_delta=reputation_delta,
+            reputation_delta=_free_rep_delta,
             reputation_target_npc=reputation_target_npc,
         )
         return verdict_str, updates
@@ -558,6 +591,14 @@ async def resolve_normal_action(
     detected_action_type = str(data.get("action_type", "standard")).strip().lower()
     if detected_action_type not in ("standard", "training"):
         detected_action_type = "standard"
+
+    # Select reputation_delta based on actual roll outcome (post-roll).
+    # Worker provided separate deltas for success/failure outcomes because it
+    # can't know the outcome at generation time (roll happens here in the engine).
+    # Backward compat: old Worker output has only 'reputation_delta' → treated as
+    # success-case; failure defaults to 0. See §5.3 / reputation_delta_success/failure.
+    _is_success = outcome in ("SUCCESS", "CRITICAL SUCCESS")
+    reputation_delta = _clamp_reputation_delta(_rep_success_raw if _is_success else _rep_failure_raw)
 
     updates = _build_updates(
         raw_updates=raw_updates,
@@ -819,6 +860,17 @@ def apply_dnd_impacts(profile: dict, updates: dict) -> tuple[dict, list[str]]:
             hp_dmg = 9999  # guaranteed death
         else:
             hp_dmg = _roll_dice_str(hp_damage_dice_tag)
+        # Heritage fire resistance: halve fire damage for Valyrian Descent.
+        # hp_damage_type defaults to "physical" — backward safe (старі профілі без ключа).
+        hp_damage_type = str(updates.get("hp_damage_type", "physical")).strip().lower()
+        if hp_dmg > 0 and hp_damage_type == "fire":
+            from core.dnd_heritages import is_fire_resistant
+            if is_fire_resistant(profile):
+                _orig_dmg = hp_dmg
+                hp_dmg = max(1, hp_dmg // 2)
+                logs.append(
+                    f"Вогнестійкість (Валірійська кров): {_orig_dmg} → {hp_dmg} HP (вдвічі менше)"
+                )
         if hp_dmg > 0:
             if "hp_current" in profile:
                 # D&D profile: hp_current / hp_max fields
@@ -927,7 +979,7 @@ def apply_dnd_impacts(profile: dict, updates: dict) -> tuple[dict, list[str]]:
     # are NOT in the exclusion list — they MUST reach apply_system_impacts for every
     # outcome including CRITICAL SUCCESS.  Never add them to this exclusion list.
     legacy_updates = {k: v for k, v in updates.items() if k not in (
-        "hp_damage_dice", "hp_heal_dice",
+        "hp_damage_dice", "hp_heal_dice", "hp_damage_type",
         "condition_apply", "condition_remove",
         "xp_award", "natural_roll", "total_score",
         "advantage_reason", "disadvantage_reason",

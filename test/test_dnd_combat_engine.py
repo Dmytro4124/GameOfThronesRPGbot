@@ -784,24 +784,36 @@ def test_process_game_turn_combat_mode_uses_combat_pipeline():
 # ===========================================================================
 
 def test_process_game_turn_combat_imminent_triggers_initiation():
-    """combat_imminent=true з NORMAL pipeline → initiate_combat_from_normal викликається."""
+    """combat_imminent=true з NORMAL pipeline → initiate_combat_from_normal викликається.
+
+    UPDATED (Package-1 friend/foe fix): the new engine logic requires either
+      (a) reputation_target_npc is set AND in legal_npc_names, OR
+      (b) at least one NPC with negative reputation score exists.
+    The old version of this test used reputation_target_npc=None and a neutral NPC
+    (score=0), so the friend/foe resolver correctly found no target and did not
+    call initiate_combat_from_normal — which was the new CORRECT behaviour,
+    not a bug.
+
+    This updated version supplies reputation_target_npc='Guard' so that
+    resolution path 1 (primary: named target in legal list) fires.
+    """
     from core.combat_state import clear_combat_state
 
     chat_id = 5002
     profile = _minimal_player_profile(mode="NORMAL")
 
     # Worker відповідь з combat_imminent=True
+    # reputation_target_npc MUST be set to a name present in legal_npc_names
+    # so that the friend/foe resolver (path 1) selects it as the combat target.
     worker_updates = {
         "action_type": "standard",
         "skill_used": "None",
-        "difficulty": 70,
+        "difficulty": 10,
         "circumstance": "NORMAL",
         "outcome": "SUCCESS",
-        "dice_roll": "50",
-        "skill_val": 20,
-        "total_score": 70,
-        "reputation_delta": 0,
-        "reputation_target_npc": None,
+        "reputation_target_npc": "Guard",   # ← named target, present in legal list
+        "reputation_delta_success": 0,
+        "reputation_delta_failure": 0,
         "minutes_passed": 5,
         "location_impact": "none",
         "scene_impact": "none",
@@ -812,6 +824,18 @@ def test_process_game_turn_combat_imminent_triggers_initiation():
         "inventory_lost": [],
         "clocks_impact": {},
         "combat_imminent": True,
+        "xp_award": 0,
+        "ability_used": "None",
+        "advantage_reason": "",
+        "disadvantage_reason": "",
+        "verdict_text": "Провокує охоронця до бою.",
+        "hp_damage_dice": "none",
+        "hp_heal_dice": "none",
+        "condition_apply": [],
+        "condition_remove": [],
+        "save_used": "None",
+        "save_dc": 5,
+        "rest_type": "none",
     }
 
     _gm_json = {

@@ -1106,20 +1106,28 @@ class TestProcessGameTurnIntegration:
         assert isinstance(result_text, str) and len(result_text) > 0
         assert isinstance(result_actions, list)
 
-    # 21. combat_imminent=True → scene NPCs use real score-based relation (not hardcoded "Ворожий")
+    # 21. combat_imminent=True → ONLY the single hostile NPC is enrolled (Package-1 friend/foe fix)
     def test_combat_init_uses_real_relation_not_hardcoded_hostile(self):
-        """COMBAT scene NPCs get score-based relation, not hardcoded 'Ворожий'.
+        """COMBAT initiation enrolls ONLY the single resolved hostile NPC.
 
-        Regression guard for WARN #1 from code-reviewer:
-        engine.py _scene_npcs_for_combat was built with hardcoded Relation_Player='Ворожий'
-        for ALL NPCs in the scene, even peaceful bystanders.
+        UPDATED for Package-1 friend/foe single-target fix:
+        The old version of this test expected ALL scene NPCs (both hostile and neutral)
+        to be passed to initiate_combat_from_normal with score-based relations.
+        That was the pre-Package-1 behaviour.
+
+        New approved behaviour (Package-1):
+        - The engine resolves exactly ONE target (the most-hostile NPC, score < 0).
+        - Only that NPC is passed to initiate_combat_from_normal.
+        - Neutral bystanders ('Мирний NPC', score=0) are NOT enrolled.
+        - The enrolled NPC carries the correct score-based Relation_Player
+          (not hardcoded 'Ворожий' for everyone).
 
         Scenario:
-        - Scene contains two NPCs: an aggressor (score=-50, 'Ворожий') and a
-          neutral bystander (score=0, 'Нейтральний').
-        - combat_imminent=True triggers COMBAT init.
-        - initiate_combat_from_normal must receive the neutral NPC with
-          Relation_Player='Нейтральний', NOT 'Ворожий'.
+        - Scene contains two NPCs: Агресор (score=-50) and Мирний NPC (score=0).
+        - Worker returns reputation_target_npc=None (path-2 fallback fires).
+        - Only Агресор qualifies (score < 0).
+        - initiate_combat_from_normal receives exactly [Агресор] with the
+          score_to_relation_text(-50) value.
         """
         captured_scene_npcs: list = []
 
@@ -1132,6 +1140,8 @@ class TestProcessGameTurnIntegration:
 
         worker_updates = dict(_PROCESS_WORKER_UPDATES)
         worker_updates["combat_imminent"] = True
+        # No named target → path-2 fallback (most-hostile by reputation score)
+        worker_updates["reputation_target_npc"] = None
 
         narrator_resp = MagicMock()
         narrator_resp.text = _PROCESS_NARRATOR_TEXT
@@ -1139,7 +1149,7 @@ class TestProcessGameTurnIntegration:
         gm_resp = MagicMock()
         gm_resp.text = _PROCESS_GM_JSON
 
-        # Two NPCs: one hostile (aggressor), one neutral (bystander)
+        # Two NPCs: one hostile (aggressor, score < 0), one neutral (bystander, score=0)
         npc_names = ["Агресор", "Мирний NPC"]
         npc_reputation = {"Агресор": -50, "Мирний NPC": 0}
 
@@ -1175,20 +1185,32 @@ class TestProcessGameTurnIntegration:
                 stack.enter_context(p)
             asyncio.run(_run())
 
-        assert len(captured_scene_npcs) == 2, (
-            f"Expected 2 scene NPCs passed to initiate_combat_from_normal. "
+        # Package-1 change: only ONE NPC (the hostile target) is enrolled
+        assert len(captured_scene_npcs) == 1, (
+            f"Package-1 friend/foe: expected exactly 1 NPC passed to "
+            f"initiate_combat_from_normal (only the hostile target). "
             f"Got {len(captured_scene_npcs)}: {captured_scene_npcs}"
         )
 
-        by_name = {npc["Name"]: npc["Relation_Player"] for npc in captured_scene_npcs}
+        enrolled = captured_scene_npcs[0]
 
-        assert by_name["Агресор"] == "Ворожий", (
-            f"Агресор (score=-50) must have Relation_Player='Ворожий'. "
-            f"Got {by_name['Агресор']!r}"
+        # The enrolled NPC must be the hostile aggressor
+        assert enrolled["Name"] == "Агресор", (
+            f"The enrolled NPC must be 'Агресор' (score=-50, only hostile candidate). "
+            f"Got Name={enrolled['Name']!r}"
         )
-        assert by_name["Мирний NPC"] == "Нейтральний", (
-            f"REGRESSION: Мирний NPC (score=0) must have Relation_Player='Нейтральний', "
-            f"NOT hardcoded 'Ворожий'. Got {by_name['Мирний NPC']!r}"
+
+        # The relation must be score-based (not hardcoded 'Ворожий' for all)
+        # score_to_relation_text(-50) should return some hostile-flavoured text
+        assert enrolled["Relation_Player"] is not None, (
+            "Enrolled NPC must have a non-None Relation_Player (score-based, not hardcoded)."
+        )
+
+        # Neutral bystander must NOT be enrolled
+        enrolled_names = {npc["Name"] for npc in captured_scene_npcs}
+        assert "Мирний NPC" not in enrolled_names, (
+            "REGRESSION: Мирний NPC (score=0) must NOT be enrolled in combat. "
+            f"enrolled_names={enrolled_names}"
         )
 
 
@@ -2731,3 +2753,410 @@ class TestNpcsInSceneRelation:
         assert rel != "Нейтральний", (
             f"REGRESSION: score=100 must NOT yield hardcoded 'Нейтральний'. Got {rel!r}"
         )
+
+
+# ===========================================================================
+# Tests: Heritage fire resistance in apply_dnd_impacts (Round 1)
+# ===========================================================================
+
+class TestFireResistanceInApplyDndImpacts:
+    """Verify heritage fire resistance in NORMAL pipeline (apply_dnd_impacts).
+
+    Round 1 — engine side only.  Worker does not yet send hp_damage_type (that is
+    Round 2 prompt-engineer task); default "physical" preserves backward compat.
+    """
+
+    def _base_updates(self, hp_damage_dice: str = "1d8", hp_damage_type: str = "fire") -> dict:
+        base = {
+            "hp_damage_dice": hp_damage_dice,
+            "hp_damage_type": hp_damage_type,
+            "hp_heal_dice": "none",
+            "condition_apply": [],
+            "condition_remove": [],
+            "xp_award": 0,
+            "minutes_passed": 5,
+            "location_impact": "none",
+            "scene_impact": "none",
+            "health_impact": "none",
+            "energy_impact": "none",
+            "gold_impact": "none",
+            "inventory_new": [],
+            "inventory_lost": [],
+            "clocks_impact": {},
+        }
+        return base
+
+    @staticmethod
+    def _hp_profile(heritage: str, hp_current: int, hp_max: int) -> dict:
+        """Build a profile with explicit hp_current/hp_max and heritage."""
+        p = _dnd_profile()
+        p["heritage"] = heritage
+        p["hp_current"] = hp_current
+        p["hp_max"] = hp_max
+        return p
+
+    def test_fire_damage_halved_for_valyrian(self):
+        """hp_damage_type='fire' + Valyrian Descent heritage → damage halved (floor 1).
+        Roll=8 → halved=4 → hp_current 10-4=6."""
+        profile = self._hp_profile("Valyrian Descent", hp_current=10, hp_max=10)
+        updates = self._base_updates(hp_damage_dice="1d8", hp_damage_type="fire")
+
+        with patch("core.dnd_engine.random.randint", return_value=8):
+            from core.dnd_engine import apply_dnd_impacts
+            result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        assert result_profile["hp_current"] == 6, (
+            f"Valyrian fire resistance: roll=8 halved to 4, 10-4=6. "
+            f"Got hp_current={result_profile['hp_current']}"
+        )
+        assert any("вогнестійкість" in log.lower() or "валірій" in log.lower() for log in logs), (
+            f"Logs must mention fire resistance. Got: {logs}"
+        )
+
+    def test_fire_damage_full_for_non_valyrian(self):
+        """Non-Valyrian heritage → full fire damage applied, no halving."""
+        profile = self._hp_profile("Westerosi (Andal)", hp_current=10, hp_max=10)
+        updates = self._base_updates(hp_damage_dice="1d8", hp_damage_type="fire")
+
+        with patch("core.dnd_engine.random.randint", return_value=8):
+            from core.dnd_engine import apply_dnd_impacts
+            result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        assert result_profile["hp_current"] == 2, (
+            f"Non-Valyrian must take full fire damage: 10-8=2. "
+            f"Got hp_current={result_profile['hp_current']}"
+        )
+        # No resistance log
+        assert not any("вогнестійкість" in log.lower() for log in logs), (
+            f"No resistance log expected for Westerosi. Got: {logs}"
+        )
+
+    def test_physical_damage_not_halved_for_valyrian(self):
+        """hp_damage_type='physical' → fire resistance does NOT apply even for Valyrian."""
+        profile = self._hp_profile("Valyrian Descent", hp_current=10, hp_max=10)
+        updates = self._base_updates(hp_damage_dice="1d8", hp_damage_type="physical")
+
+        with patch("core.dnd_engine.random.randint", return_value=8):
+            from core.dnd_engine import apply_dnd_impacts
+            result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        assert result_profile["hp_current"] == 2, (
+            f"Physical damage not halved for Valyrian: 10-8=2. "
+            f"Got hp_current={result_profile['hp_current']}"
+        )
+
+    def test_fire_damage_default_type_physical_backward_compat(self):
+        """When hp_damage_type is absent (backward compat), default='physical'.
+        Valyrian takes full damage (fire resistance NOT triggered)."""
+        profile = self._hp_profile("Valyrian Descent", hp_current=10, hp_max=10)
+        updates = {
+            "hp_damage_dice": "1d8",
+            # hp_damage_type intentionally absent
+            "hp_heal_dice": "none",
+            "condition_apply": [],
+            "condition_remove": [],
+            "xp_award": 0,
+            "minutes_passed": 5,
+            "location_impact": "none",
+            "scene_impact": "none",
+            "health_impact": "none",
+            "energy_impact": "none",
+            "gold_impact": "none",
+            "inventory_new": [],
+            "inventory_lost": [],
+            "clocks_impact": {},
+        }
+
+        with patch("core.dnd_engine.random.randint", return_value=8):
+            from core.dnd_engine import apply_dnd_impacts
+            result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        # No hp_damage_type → default "physical" → no fire resistance → full 8 damage
+        assert result_profile["hp_current"] == 2, (
+            f"Without hp_damage_type key (backward compat), Valyrian takes full damage: 10-8=2. "
+            f"Got hp_current={result_profile['hp_current']}"
+        )
+
+    def test_fire_resistance_minimum_one_damage(self):
+        """Halving floor is 1: even 1-point fire damage stays at 1 (not 0)."""
+        profile = self._hp_profile("Valyrian Descent", hp_current=10, hp_max=10)
+        updates = self._base_updates(hp_damage_dice="1d4", hp_damage_type="fire")
+
+        # 1d4 roll=1 → halved = max(1, 1//2) = max(1, 0) = 1
+        with patch("core.dnd_engine.random.randint", return_value=1):
+            from core.dnd_engine import apply_dnd_impacts
+            result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        assert result_profile["hp_current"] == 9, (
+            f"min damage after halving = 1, so 10-1=9. Got hp_current={result_profile['hp_current']}"
+        )
+
+    def test_fire_damage_not_below_zero(self):
+        """HP must never go below 0 even with fire damage for non-resistant profile."""
+        profile = self._hp_profile("Ironborn", hp_current=2, hp_max=50)
+        updates = self._base_updates(hp_damage_dice="2d8", hp_damage_type="fire")
+
+        with patch("core.dnd_engine.random.randint", return_value=8):
+            from core.dnd_engine import apply_dnd_impacts
+            result_profile, logs = apply_dnd_impacts(profile, updates)
+
+        # 2d8=16 > hp_current=2 → clamped at 0
+        assert result_profile["hp_current"] == 0, (
+            f"HP must be clamped to 0, not negative. Got {result_profile['hp_current']}"
+        )
+
+
+# ===========================================================================
+# Tests: reputation_delta outcome-based selection (Round 1 bug fix)
+# ===========================================================================
+
+class TestReputationDeltaOutcomeSelection:
+    """Regression suite for the reputation_delta dissonance bug.
+
+    Root cause: Worker calculated reputation_delta for the success case, but engine
+    applied it regardless of roll outcome.  Engine now reads reputation_delta_success
+    and reputation_delta_failure and picks the correct one after the roll.
+
+    Bug scenario (Khal Drogo):
+        Worker returns reputation_delta_success=1, reputation_delta_failure=-1.
+        d20 roll is low → FAILURE.
+        BEFORE fix: updates["reputation_delta"] == 1  (wrong — Drogo despises failure)
+        AFTER fix:  updates["reputation_delta"] == -1 (correct)
+    """
+
+    def test_reputation_delta_success_used_on_success(self):
+        """outcome SUCCESS → reputation_delta_success applied, not failure."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data(
+            ability_used="CHA",
+            skill_used="Persuasion",
+            difficulty=10,
+        )
+        data["reputation_delta_success"] = 2
+        data["reputation_delta_failure"] = -1
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            # Roll high → SUCCESS (total = roll + modifier >= 10)
+            with patch("core.dnd_core.random.randint", return_value=18):
+                async def _run():
+                    from core.dnd_engine import resolve_normal_action
+                    return await resolve_normal_action(
+                        user_input="Я переконую Кхала",
+                        profile=profile,
+                    )
+                _, updates = _run_async(_run())
+
+        assert updates["outcome"] in ("SUCCESS", "CRITICAL SUCCESS"), (
+            f"Roll=18 must yield SUCCESS or CRITICAL SUCCESS. Got {updates['outcome']!r}"
+        )
+        assert updates["reputation_delta"] == 2, (
+            f"SUCCESS → reputation_delta_success=2 must be applied. "
+            f"Got reputation_delta={updates['reputation_delta']}"
+        )
+
+    def test_reputation_delta_failure_used_on_failure(self):
+        """outcome FAILURE → reputation_delta_failure applied (the exact bug scenario).
+
+        Khal Drogo respects success (+1) but despises failure (-1).
+        BEFORE fix: reputation_delta was always +1 regardless of roll.
+        AFTER fix:  reputation_delta == -1 when roll fails.
+        """
+        profile = _dnd_profile()
+        data = _minimal_worker_data(
+            ability_used="CHA",
+            skill_used="Persuasion",
+            difficulty=15,
+        )
+        data["reputation_delta_success"] = 1   # Drogo respects if succeeds
+        data["reputation_delta_failure"] = -1  # Drogo despises if fails
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            # Roll natural 2 — even with +CHA modifier this fails DC 15
+            with patch("core.dnd_core.random.randint", return_value=2):
+                async def _run():
+                    from core.dnd_engine import resolve_normal_action
+                    return await resolve_normal_action(
+                        user_input="Я переконую Кхала Дрого",
+                        profile=profile,
+                    )
+                _, updates = _run_async(_run())
+
+        assert updates["outcome"] in ("FAILURE", "CRITICAL FAILURE"), (
+            f"Roll=2 vs DC15 must yield FAILURE or CRITICAL FAILURE. Got {updates['outcome']!r}"
+        )
+        assert updates["reputation_delta"] == -1, (
+            f"FAILURE → reputation_delta_failure=-1 must be applied (NOT +1). "
+            f"Got reputation_delta={updates['reputation_delta']} "
+            f"(this was the bug: success-value applied on failure)"
+        )
+
+    def test_reputation_delta_backward_compat_old_field(self):
+        """Old Worker output (only reputation_delta, no _success/_failure fields).
+
+        Backward compatibility contract:
+        - On SUCCESS: applies the legacy reputation_delta value.
+        - On FAILURE: applies 0 (safe default, no unwarranted reputation penalty).
+        """
+        profile = _dnd_profile()
+
+        # HIGH roll scenario: SUCCESS path
+        data_success = _minimal_worker_data(
+            ability_used="CHA",
+            skill_used="Persuasion",
+            difficulty=10,
+        )
+        data_success["reputation_delta"] = 2  # old field only, no _success/_failure
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data_success):
+                stack.enter_context(p)
+            with patch("core.dnd_core.random.randint", return_value=18):
+                async def _run_success():
+                    from core.dnd_engine import resolve_normal_action
+                    return await resolve_normal_action(
+                        user_input="Успішно переконую",
+                        profile=_dnd_profile(),
+                    )
+                _, updates_success = _run_async(_run_success())
+
+        assert updates_success["reputation_delta"] == 2, (
+            f"Backward compat (SUCCESS): legacy reputation_delta=2 must be used. "
+            f"Got {updates_success['reputation_delta']}"
+        )
+
+        # LOW roll scenario: FAILURE path
+        data_failure = _minimal_worker_data(
+            ability_used="CHA",
+            skill_used="Persuasion",
+            difficulty=15,
+        )
+        data_failure["reputation_delta"] = 2  # old field only — failure must default to 0
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data_failure):
+                stack.enter_context(p)
+            with patch("core.dnd_core.random.randint", return_value=2):
+                async def _run_failure():
+                    from core.dnd_engine import resolve_normal_action
+                    return await resolve_normal_action(
+                        user_input="Провалюю переконання",
+                        profile=_dnd_profile(),
+                    )
+                _, updates_failure = _run_async(_run_failure())
+
+        assert updates_failure["reputation_delta"] == 0, (
+            f"Backward compat (FAILURE): absent reputation_delta_failure → 0. "
+            f"Got {updates_failure['reputation_delta']}"
+        )
+
+    def test_reputation_delta_clamped_to_schema_range(self):
+        """reputation_delta must be clamped to -7..+7 (extended schema range, §5.2)."""
+        profile = _dnd_profile()
+        data = _minimal_worker_data(
+            ability_used="CHA",
+            skill_used="Persuasion",
+            difficulty=10,
+        )
+        data["reputation_delta_success"] = 99   # out-of-range value from LLM
+        data["reputation_delta_failure"] = -99  # out-of-range value from LLM
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data):
+                stack.enter_context(p)
+            with patch("core.dnd_core.random.randint", return_value=18):
+                async def _run():
+                    from core.dnd_engine import resolve_normal_action
+                    return await resolve_normal_action(
+                        user_input="Я переконую",
+                        profile=profile,
+                    )
+                _, updates = _run_async(_run())
+
+        assert -7 <= updates["reputation_delta"] <= 7, (
+            f"reputation_delta must be clamped to [-7, 7]. Got {updates['reputation_delta']}"
+        )
+
+    def test_reputation_delta_clamped_to_plus_minus_7(self):
+        """Worker suggests +9 → clamped to +7; -9 → clamped to -7.
+
+        Regression guard: verifies REPUTATION_DELTA_MAX=7 / REPUTATION_DELTA_MIN=-7.
+        Extended from ±5 to ±7 to support asymmetric magnitude-gated progression
+        (core/reputation.py) mirroring the 15-step Relation_Player scale.
+        """
+        from core.dnd_engine import REPUTATION_DELTA_MIN, REPUTATION_DELTA_MAX
+        assert REPUTATION_DELTA_MAX == 7
+        assert REPUTATION_DELTA_MIN == -7
+
+        profile = _dnd_profile()
+
+        # --- success case: +9 → +7 ---
+        data_over = _minimal_worker_data(
+            ability_used="CHA",
+            skill_used="Persuasion",
+            difficulty=10,
+        )
+        data_over["reputation_delta_success"] = 9
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data_over):
+                stack.enter_context(p)
+            # roll 18 → success
+            with patch("core.dnd_core.random.randint", return_value=18):
+                async def _run_over():
+                    from core.dnd_engine import resolve_normal_action
+                    return await resolve_normal_action(
+                        user_input="Переконую лорда",
+                        profile=profile,
+                    )
+                _, updates_over = _run_async(_run_over())
+
+        assert updates_over["reputation_delta"] == 7, (
+            f"Worker +9 on SUCCESS must be clamped to +7. "
+            f"Got {updates_over['reputation_delta']}"
+        )
+
+        # --- failure case: -9 → -7 ---
+        data_under = _minimal_worker_data(
+            ability_used="CHA",
+            skill_used="Persuasion",
+            difficulty=10,
+        )
+        data_under["reputation_delta_success"] = 0
+        data_under["reputation_delta_failure"] = -9
+
+        with ExitStack() as stack:
+            for p in _patches_for_resolve(data_under):
+                stack.enter_context(p)
+            # roll 1 → CRITICAL FAILURE
+            with patch("core.dnd_core.random.randint", return_value=1):
+                async def _run_under():
+                    from core.dnd_engine import resolve_normal_action
+                    return await resolve_normal_action(
+                        user_input="Переконую лорда",
+                        profile=profile,
+                    )
+                _, updates_under = _run_async(_run_under())
+
+        assert updates_under["reputation_delta"] == -7, (
+            f"Worker -9 on FAILURE must be clamped to -7. "
+            f"Got {updates_under['reputation_delta']}"
+        )
+
+    def test_reputation_delta_mid_range_values_preserved(self):
+        """+4, -2, 0, ±7 pass through _clamp_reputation_delta unchanged.
+
+        Mid-range values within -7..+7 must not be modified by the clamp.
+        Boundaries ±7 are now legal (extended schema range).
+        """
+        from core.dnd_engine import _clamp_reputation_delta
+        assert _clamp_reputation_delta(4) == 4, "4 must pass through unchanged"
+        assert _clamp_reputation_delta(-2) == -2, "-2 must pass through unchanged"
+        assert _clamp_reputation_delta(0) == 0, "0 must pass through unchanged"
+        assert _clamp_reputation_delta(7) == 7, "7 (new boundary) must pass through unchanged"
+        assert _clamp_reputation_delta(-7) == -7, "-7 (new boundary) must pass through unchanged"
+        assert _clamp_reputation_delta(5) == 5, "5 (within range) must pass through unchanged"
+        assert _clamp_reputation_delta(-5) == -5, "-5 (within range) must pass through unchanged"

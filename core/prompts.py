@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Literal
 from core.dnd_core import LEGAL_DCS
+from core.dnd_heritages import get_heritage_traits
 
 GAME_ERA_CONTEXT = """
 === ХРОНОЛОГІЯ: 298 рік від Завоювання (Кінець Довгого Літа) ===
@@ -592,10 +593,14 @@ def build_normal_resolve_prompt(
     else:
         equipped_weapon_block = ""
 
-    # Build class features block — only when features are present
+    # Build class features block — shown when class features OR heritage traits are present
     raw_features = profile.get("features", [])
-    if raw_features:
+    heritage_name = profile.get("heritage", "")
+    heritage_traits = get_heritage_traits(heritage_name)
+
+    if raw_features or heritage_traits:
         features_lines = []
+        # Class features first
         for feat in raw_features:
             # Support both dataclass Feature objects and plain dicts
             name = feat.name if hasattr(feat, "name") else feat.get("name", "?")
@@ -605,6 +610,14 @@ def build_normal_resolve_prompt(
             if len(desc) > 120:
                 desc = desc[:117] + "..."
             features_lines.append(f"  • {name} [{source}] — {desc}")
+        # Heritage traits after class features
+        if heritage_traits:
+            features_lines.append(f"  🩸 Heritage ({heritage_name}):")
+            for trait in heritage_traits:
+                t_desc = trait.desc
+                if len(t_desc) > 150:
+                    t_desc = t_desc[:147] + "..."
+                features_lines.append(f"  • {trait.name} — {t_desc}")
         features_block = "\n<class_features>\nActive class/heritage features:\n" + "\n".join(features_lines) + "\n</class_features>"
         gate0_block = """
 [GATE 0 — CLASS FEATURES?]
@@ -612,13 +625,25 @@ Scan <class_features> block above. For each feature ask:
   A) Is this a PASSIVE feature with a condition (e.g. "Advantage on CHA vs lower-status targets")?
      → Check if the action + target NPC meet that condition RIGHT NOW.
      → If YES → set advantage_reason="<feature_name>: <one-sentence reason condition is met>"
+     IMPORTANT CONSTRAINT for "Шляхетне поводження" and similar noble-courtesy passives:
+       Condition "рівний або нижчий соціальний статус" FAILS for:
+         • Hostile NPCs (Relation_Player = Ворожий / Кривавий ворог / Смертельна ненависть /
+           Відкрита ворожість / Глибока підозра) — hostility overrides status equality.
+         • De-facto superior power regardless of nominal title:
+           a warlord commanding an army, a reigning monarch, a high priest backed by faith.
+       → In these cases set advantage_reason="" (feature does NOT trigger).
   B) Is this an ACTIVE feature (e.g. "1/day: reroll Persuasion after seeing result")?
      → Check if player's user_input EXPLICITLY references using this feature
        (e.g. "використовую Срібний язик", "активую здібність", "перекидаю через здібність").
      → If YES → set advantage_reason="<feature_name>: player explicitly requested activation"
      NOTE: Daily usage tracking is NOT in the system yet. Trust the player's narrative.
            If they say they use it, honour it. A tracker will be added later.
-  C) If NO features are active/triggered → proceed normally (advantage_reason stays "").
+  C) Heritage traits (shown under "🩸 Heritage" section):
+     → Passive resistance traits (e.g. "Опір вогню") — do NOT grant advantage; they are
+       applied by the engine to reduce damage. You only need to set hp_damage_type correctly
+       in updates so the engine can apply resistance.
+     → Active heritage traits (e.g. "Піромантія") — treat as active features (rule B above).
+  D) If NO features are active/triggered → proceed normally (advantage_reason stays "").
 IMPORTANT: Never fabricate features not listed above.
 
 """
@@ -738,11 +763,26 @@ If player_action is a physical attack TARGETING an NPC (атак*, удар*, б
   → ALWAYS combat_imminent=true, REGARDLESS of likely outcome.
   → ALWAYS set hp_damage_dice="none" — NPC damage resolves in the COMBAT pipeline next turn.
   → Do NOT use hp_damage_dice to represent damage dealt BY the player TO an NPC.
+  → MANDATORY TARGET RULE: when combat_imminent=true you MUST identify the attacked NPC by name.
+      Step 1: Read player_action and find the NPC being physically attacked.
+      Step 2: Match that NPC's exact name from the NPCs present list above.
+      Step 3: Set reputation_target_npc = that exact name. NEVER leave it empty when combat_imminent=true.
+      If player_action is ambiguous ("атакую першого-ліпшого") → pick the NPC most consistent with the scene.
+      Justify your choice in reputation_reasoning (one sentence).
 
 hp_damage_dice PURPOSE — PLAYER SELF-DAMAGE ONLY:
   hp_damage_dice is ONLY for damage received BY the PLAYER (falling, poison, starvation, trap, environmental).
   Examples where hp_damage_dice IS valid: falling from height, drinking poison, trap trigger, severe cold.
   Examples where hp_damage_dice is FORBIDDEN: "я атакую слугу", "я вдарю варту", "я стріляю в ворога".
+
+hp_damage_type — ОБОВ'ЯЗКОВО вказуй тип коли hp_damage_dice != "none":
+  • Вогонь/жар/полум'я/розпечене (тримати вугілля, опік, dragon breath, алхімічний вогонь) → "fire"
+  • Холод/мороз/обмороження → "cold"
+  • Отрута/токсин → "poison"
+  • Кислота → "acid"
+  • Падіння/удар/фізична травма/різана рана → "physical" (default, якщо тип неясний)
+  Engine застосує heritage resistance: Valyrian Descent "Опір вогню" → half fire damage автоматично.
+  Якщо hp_damage_dice="none" → hp_damage_type не впливає (залиш "physical" або пропусти).
 
 [GATE 7 — TRAINING?]
 Explicit TRAIN/PRACTICE/STUDY intent? YES→action_type="training". Incidental skill use→"standard".
@@ -766,6 +806,68 @@ Does the player's action describe resting or sleeping?
        rest_type="short", ability_used="None", skill_used="None", difficulty=5.
        updates.minutes_passed=60.
   → NEITHER → rest_type="none".
+
+[GATE REP — REPUTATION (оцінюй ОБИДВА сценарії — ти не знаєш чи roll succeeds)]
+  reputation_delta_success: як зміниться ставлення NPC ЯКЩО дія вдасться
+  reputation_delta_failure: як зміниться ЯКЩО провалиться
+  Engine застосує правильне поле після кидка кубика.
+
+  TRIVIAL → 0 RULE (CRITICAL): повсякденні ввічливі дії = 0.
+  "Привітався", "подякував", "кивнув", "прощання", "дивлюся", "іду" — це НЕ зрушення стосунків.
+  Обидва delta-поля змінюються ЛИШЕ за дії, що РЕАЛЬНО впливають на ставлення NPC.
+  Причина: фарм репутації спамом привітань — баг, не фіча.
+
+  НЕ став delta за умовчанням — оцінюй РЕАЛЬНУ вагу дії.
+  Більшість повсякденних дій = 0. ±1 лише за справжній, хай дрібний, але змістовний жест/образу.
+  Високі значення (±5,6,7) — рідкісні, лише за справді доленосні події.
+
+<reputation_scale>
+ПОЗИТИВ (рух до довіри) — для reputation_delta_success:
+  +7 Доленосний    — дія визначає життя NPC; виконання його НАЙГОЛОВНІШОЇ мети
+                     Приклад: посадив на трон; повернув втрачене королівство
+  +6 Епічна жертва — ризик власним життям/усім заради NPC
+                     Приклад: закрив собою від клинка; віддав усе майно щоб викупити з полону
+  +5 Порятунок     — врятував від смерті/катастрофи/ганьби
+                     Приклад: витяг з пожежі; зупинив страту; розкрив змову проти нього
+  +4 Велика послуга — суттєво змінив становище NPC на краще
+                     Приклад: уклав союз що рятує його дім; знищив його ворога
+  +3 Значна послуга — важлива допомога, цінний дар, міцний союз
+                     Приклад: бенкет гідний вождя; цінна таємниця; військова підтримка
+  +2 Помітна послуга — щира підтримка, корисна послуга
+                     Приклад: захистив у суперечці; цінна порада; розділив здобич
+  +1 Дрібний жест  — приємна дрібниця, ввічливість зі змістом
+                     Приклад: щирий комплімент; пригостив вином; невелика люб'язність
+
+НЕЙТРАЛЬ:
+   0 Тривіальна/повсякденна (привітання, кивок, прощання, подяка, "дивлюся", "іду")
+     АБО дія не спрямована на конкретного NPC
+
+НЕГАТИВ (рух до ненависті):
+  -1 Нетактовність  — дрібна неввічливість
+                     Приклад: грубе слово; зневажливий жест; недоречний жарт
+  -2 Образа         — свідома образа, дрібна неповага
+                     Приклад: публічна шпилька; знехтував звичаєм
+  -3 Серйозна образа — приниження, зламана обіцянка
+                     Приклад: принизив на людях; не дотримав слова; образив рід
+  -4 Зрада довіри   — підвів того, хто довіряв
+                     Приклад: виказав дрібну таємницю; підставив у дрібниці; обдурив
+  -5 Тяжка зрада    — значна шкода інтересам/честі
+                     Приклад: зрадив союз; вкрав цінне; зганьбив публічно
+  -6 Непрощенне     — глибока руйнівна зрада
+                     Приклад: виказав смертельну таємницю; вбив його людину; зрадив на полі бою
+  -7 Смертний гріх  — найстрашніше для цього NPC
+                     Приклад: вбив його дитину/кохану; знищив його дім
+</reputation_scale>
+
+  КАЛІБРУВАЛЬНІ ЯКОРІ (контрастні пари — щоб не плутати сусідні рівні):
+  • «Пригостив вином» = +1, але «влаштував бенкет гідний вождя» = +3
+  • «Грубе слово» = -1, але «принизив на людях» = -3
+  • «Врятував від пожежі» = +5, але «посадив на трон» = +7
+  • «Привітався / подякував» = 0 (тривіально, НЕ +1)
+
+  Приклад: гравець намагається вразити ворожого Кхала вогняним трюком:
+    reputation_delta_success=+2  (Кхал вражений — помітна демонстрація сили)
+    reputation_delta_failure=-3  (принизився перед warlord'ом що поважає лише силу — виявив слабкість)
 </thinking_directives>
 
 <antiexamples>
@@ -780,12 +882,14 @@ Does the player's action describe resting or sleeping?
 <few_shot_examples>
 EXAMPLE A — Player attacks NPC:
   player_action: "Я атакую слугу рапірою"
-  skill_check_reasoning: "GATE 1: NO — this is a physical attack on an NPC, not a free action. GATE 2: player initiates melee combat — combat_imminent=true, no skill roll needed in NORMAL turn."
+  skill_check_reasoning: "GATE 1: NO — this is a physical attack on an NPC, not a free action. GATE 2: player initiates melee combat — combat_imminent=true, no skill roll needed in NORMAL turn. GATE 6 TARGET: physical attack targeting 'слуга' → reputation_target_npc='Слуга Марік' (matched from NPCs present)."
   ability_used: "None"
   skill_used: "None"
   difficulty: 5
   combat_imminent: true          ← MANDATORY for any physical attack on NPC
   hp_damage_dice: "none"         ← NEVER use for NPC damage; COMBAT pipeline resolves it next turn
+  reputation_target_npc: "Слуга Марік"  ← MANDATORY when combat_imminent=true; exact name from NPCs present
+  reputation_reasoning: "GATE 6 MANDATORY TARGET: player physically attacks 'слугу рапірою' → matched NPC 'Слуга Марік' from scene. combat_imminent=true requires non-empty target."
   verdict_text: "Гравець виймає рапіру і кидається на слугу — сутичка неминуча."
 
 EXAMPLE B — Environmental self-damage (valid hp_damage_dice use):
@@ -796,6 +900,7 @@ EXAMPLE B — Environmental self-damage (valid hp_damage_dice use):
   difficulty: 12
   combat_imminent: false
   hp_damage_dice: "1d6"          ← VALID: environmental damage to player, not NPC attack
+  hp_damage_type: "physical"     ← fall damage is physical (default). For fire → use "fire" instead.
   verdict_text: "Стрибок з висоти — гравець ризикує отримати травму."
 
 EXAMPLE C — Passive feature triggers advantage (Шляхетне поводження):
@@ -808,6 +913,8 @@ EXAMPLE C — Passive feature triggers advantage (Шляхетне поводж�
   difficulty: 12
   advantage_reason: "Шляхетне поводження: target is servant (lower social status) — condition met"
   disadvantage_reason: ""
+  reputation_delta_success: 2   ← помітна послуга (гравець довів лояльність), шкала ширша за ±1
+  reputation_delta_failure: 0   ← невдала спроба не образлива (Марік не статусний NPC)
   verdict_text: "Гравець переконує слугу з природною шляхетною владністю."
 
 EXAMPLE D — Active feature triggers advantage (Срібний язик, player requests it):
@@ -889,6 +996,21 @@ EXAMPLE K — DC 2 vs DC 5 boundary (risk factor shifts tier):
   difficulty: 2  # default no-risk pickup; підвищуй до 5 тільки при явному risk factor
   combat_imminent: false
   verdict_text: "Гравець піднімає меч з підлоги. Без ускладнень."
+
+EXAMPLE L — Fire self-damage with hp_damage_type:
+  player_action: "Хапаю розпечене вугілля голою рукою щоб довести драконячу кров"
+  GATE 1: NO — deliberate self-harm, painful consequence for player.
+  GATE 2: CON/Athletics? No skill check — direct environmental self-damage, no opposed roll.
+          ability_used="None", skill_used="None".
+  GATE 3: DC 5 — trivial in terms of success (you CAN grab coal; the pain is the consequence).
+  skill_check_reasoning: "GATE 1: NO — deliberate painful self-damage. GATE 2: no opposed roll needed, player chooses to take damage. hp_damage_type=fire (burning coal) → engine applies heritage resistance."
+  ability_used: "None"
+  skill_used: "None"
+  difficulty: 5
+  combat_imminent: false
+  hp_damage_dice: "1d6"          ← environmental fire damage to player
+  hp_damage_type: "fire"         ← engine halves this for Valyrian Descent (Опір вогню)
+  verdict_text: "Гравець хапає розпечене вугілля — опік неминучий (Валірійська кров послабить його)."
 </few_shot_examples>
 
 <location_rules>
@@ -915,13 +1037,29 @@ difficulty_reasoning  : string ≥20 chars — GATE 3 walkthrough
 gold_reasoning        : string ≥20 chars — GATE 4 walkthrough
 verdict_text     : string — 1 sentence for GM context (Ukrainian)
 xp_award         : one integer from {{{_LEGAL_XP}}}
-reputation_reasoning  : string — 1 sentence: WHY this sign and magnitude (internal CoT, not shown to player)
-reputation_delta : integer -3..+3. SIGN RULES (mandatory):
-  • Action beneficial/pleasant for target NPC AND outcome=SUCCESS → +1 (minor gesture), +2 (significant aid), +3 (epic/self-sacrifice)
-  • Action harmful/insulting for target NPC AND outcome=SUCCESS → -1 (minor slight), -2 (serious offence), -3 (grave harm/humiliation)
-  • Action directed at NPC AND outcome=FAILURE → 0 or -1 (depending on nature of failure: clumsy = 0, offensive = -1)
-  • Action NOT directed at any specific NPC → reputation_delta=0, reputation_target_npc=""
-reputation_target_npc : string — exact NPC name or ""
+reputation_reasoning  : string — 1 sentence: WHY this sign/magnitude for BOTH outcomes (internal CoT, not shown to player)
+reputation_delta_success : integer -7..+7 — relation change IF the roll SUCCEEDS. See <reputation_scale> in GATE REP.
+  TRIVIAL → 0: привітання/подяка/кивок/прощання = 0. Змінюй ЛИШЕ якщо дія РЕАЛЬНО зрушує стосунки.
+  НЕ за умовчанням ±1 — оцінюй РЕАЛЬНУ вагу. Більшість повсякденних дій = 0.
+  ±1 лише за справжній змістовний жест. ±5,6,7 — рідко, лише за доленосні події.
+  SIGN RULES quick-ref (success outcome):
+    +7 Доленосний (+6 Епічна жертва, +5 Порятунок, +4 Велика послуга, +3 Значна послуга)
+    +2 Помітна послуга, +1 Дрібний жест, 0 Тривіальна/не NPC-спрямована
+    -1 Нетактовність, -2 Образа, -3 Серйозна образа, -4 Зрада довіри
+    -5 Тяжка зрада, -6 Непрощенне, -7 Смертний гріх
+  • Action NOT directed at any specific NPC → 0
+reputation_delta_failure : integer -7..+7 — relation change IF the roll FAILS.
+  Зазвичай менший за magnitude ніж success (провал рідко епічний).
+  SIGN RULES quick-ref (failure outcome):
+    0  — провал без образи (NPC співчуває або не помітив)
+    -1 — незграбний/ніяковий провал
+    -2 — принизливий провал перед status-conscious NPC
+    -3 — провал що виявив ворожий/брехливий намір
+  рідко позитивний — лише якщо сама спроба вразила (failure +1 max)
+  • Action NOT directed at any specific NPC → 0
+reputation_target_npc : string — exact NPC name or "".
+                    REQUIRED (non-empty) when combat_imminent=true — must be the name of the NPC
+                    the player is physically attacking, matched exactly from the NPCs present list.
 updates (object):
   minutes_passed  : integer 1..600
   location_impact : "none" | exact canonical location name | "В дорозі"
@@ -930,6 +1068,8 @@ updates (object):
                     !! PLAYER SELF-DAMAGE ONLY (fall/poison/trap/environmental) !!
                     NEVER use for damage dealt BY player TO an NPC.
                     If combat_imminent=true → hp_damage_dice MUST be "none".
+  hp_damage_type  : "physical"|"fire"|"cold"|"poison"|"acid"|"none" — тип шкоди для resistance (default "physical").
+                    ВАЖЛИВО: "fire" якщо джерело — вогонь/жар/полум'я (engine застосує heritage fire resistance).
   hp_heal_dice    : "none"|"1d4"|"1d6"|"1d8"|"2d8"
   gold_impact     : "none"|"-N"|"+N"|"spend_small"|"spend_medium"|"spend_large"|"earn_small"|"earn_medium"|"earn_large"
   inventory_new   : array of strings
@@ -958,8 +1098,9 @@ OUTPUT STRICTLY VALID JSON. NO MARKDOWN. NO BACKTICKS:
     "combat_imminent": false,
     "verdict_text": "Гравець намагається дістатися до воріт через натовп.",
     "xp_award": 25,
-    "reputation_reasoning": "Дія не спрямована на конкретного NPC, тому дельта = 0.",
-    "reputation_delta": 0,
+    "reputation_reasoning": "Дія не спрямована на конкретного NPC, тому обидві дельти = 0.",
+    "reputation_delta_success": 0,
+    "reputation_delta_failure": 0,
     "reputation_target_npc": "",
     "save_used": "None",
     "save_dc": 5,
@@ -969,6 +1110,7 @@ OUTPUT STRICTLY VALID JSON. NO MARKDOWN. NO BACKTICKS:
         "location_impact": "none",
         "scene_impact": "none",
         "hp_damage_dice": "none",
+        "hp_damage_type": "physical",
         "hp_heal_dice": "none",
         "gold_impact": "none",
         "inventory_new": [],
@@ -1243,14 +1385,27 @@ def build_gm_logic_prompt(
     departing_roster_text: str = "",
     arriving_roster_text: str = "",
     mode: Literal["NORMAL", "COMBAT"] = "NORMAL",
+    npc_hp_snapshot: dict[str, dict] | None = None,
 ) -> str:
     """GM Logic Engine — mode-aware (NORMAL | COMBAT).
 
     Phase 4 change: adds `mode` parameter, COMBAT suggested_actions slots,
     and hp_current/conditions fields in npc_updates.
 
+    Package 3A change: adds `npc_hp_snapshot` parameter.
+    - npc_hp_snapshot: authoritative HP/AC/conditions snapshot from combat_state,
+      populated by engine in COMBAT mode only; None in NORMAL mode.
+      Expected shape: {
+          "Кхал Дрого": {"hp_current": 142, "hp_max": 150, "ac": 18, "conditions": []},
+          ...
+      }
+      Rendered as <npc_hp_snapshot> block in the prompt (COMBAT only).
+      NOT a JSON output key — input context only.
+
     Contract changes vs legacy:
     - npc_updates[i] gains: hp_current (int), conditions (list[str])
+      — NORMAL mode only; COMBAT mode forbids hp_current/conditions in output
+        (engine strips them; combat_state is authoritative).
     - mode_transition added: null | "TO_COMBAT" | "TO_NORMAL"
     - frozen_fields_change_reason remains (unchanged contract)
     - Relation_Player removed from npc_updates (was already system-managed;
@@ -1263,13 +1418,50 @@ def build_gm_logic_prompt(
         f"<system_impacts>\n{impact_narrative_hints}\nВрахуй ці підказки при формуванні director_notes.\n</system_impacts>"
         if impact_narrative_hints else ""
     )
+
+    # Build authoritative HP snapshot block (COMBAT only, input context — NOT output key).
+    # Wound-tier thresholds: ≤10% max → "критична загроза", ≤25% max → "критично поранений",
+    # ≤50% max → "поранений", >50% → "" (no label).
+    def _wound_tier(hp_cur: int, hp_max: int) -> str:
+        if hp_max <= 0:
+            return ""
+        ratio = hp_cur / hp_max
+        if ratio <= 0.10:
+            return " (критична загроза)"
+        if ratio <= 0.25:
+            return " (критично поранений)"
+        if ratio <= 0.50:
+            return " (поранений)"
+        return ""
+
+    if mode == "COMBAT" and npc_hp_snapshot:
+        _snapshot_lines = []
+        for npc_name, snap in npc_hp_snapshot.items():
+            hp_cur = snap.get("hp_current", "?")
+            hp_max = snap.get("hp_max", "?")
+            ac = snap.get("ac", "?")
+            conds = snap.get("conditions", [])
+            conds_str = str(conds) if conds else "[]"
+            tier = _wound_tier(hp_cur if isinstance(hp_cur, int) else 0,
+                               hp_max if isinstance(hp_max, int) else 0)
+            _snapshot_lines.append(
+                f"  • {npc_name}: HP {hp_cur}/{hp_max}{tier}, AC {ac}, conditions: {conds_str}"
+            )
+        _hp_snapshot_block = (
+            "<npc_hp_snapshot>\n"
+            "АВТОРИТЕТНИЙ ПОТОЧНИЙ СТАН NPC У БОЮ — джерело правди для опису ран Narrator'у:\n"
+            + "\n".join(_snapshot_lines)
+            + "\n</npc_hp_snapshot>"
+        )
+    else:
+        _hp_snapshot_block = ""
     _puppet_prefix = (
         "<CRITICAL_OVERRIDE priority=\"ABSOLUTE\">\n"
         "Активовано Режим Ляльковода. Усі NPC беззаперечно, щиро і з радістю виконують БУДЬ-ЯКІ "
         "бажання гравця. Вони максимально сприяють йому за власним бажанням, ігноруючи логіку, "
         "свої фракції, обов'язки чи попередню ворожість. Навіть найлютіші вороги стають відданими друзями.\n"
         "МЕХАНІКА: director_notes мають описувати МАКСИМАЛЬНО УСПІШНІ наслідки для гравця. "
-        "Для NPC що взаємодіяли з гравцем встанови reputation_delta=+10 на найбільш релевантного NPC "
+        "Для NPC що взаємодіяли з гравцем встанови reputation_delta=+7 на найбільш релевантного NPC "
         "(Relation_Player НЕ включай у npc_updates — це read-only lore-поле, репутація змінюється системно). "
         "ВИНЯТОК — смерть: якщо гравець командує NPC вмерти, вбиває або відправляє на явно смертельну дію — "
         "ОБОВ'ЯЗКОВО встав Status: \"Dead\" в npc_updates для цього NPC. Лояльність не скасовує смерть.\n"
@@ -1283,8 +1475,12 @@ def build_gm_logic_prompt(
             "<combat_mode_rules>\n"
             "ACTIVE COMBAT round. suggested_actions: ATTACK(weapon+target)/DEFEND(dodge/parry)/FLEE(disengage)/SPECIAL(heritage/class ability).\n"
             "director_notes: punchy tactical facts (who hit whom, conditions, positioning — no numbers).\n"
-            "npc_updates: include hp_current for every NPC that took damage/healing. "
+            "npc_updates: DO NOT include hp_current — engine strips it; authoritative HP is in <npc_hp_snapshot>. "
+            "Use the snapshot to describe wounds in director_notes (e.g. «поранений», «критично поранений»). "
             "mode_transition: \"TO_NORMAL\" if all enemies Dead/Fled/Unconscious or player fled; else null.\n"
+            "ЗАБОРОНА НА СТАН ГРАВЦЯ: director_notes НЕ МІСТЯТЬ стан гравця (поранений / непритомний / "
+            "вбитий / здоров'я). Стан гравця визначає engine за механічним вердиктом. "
+            "Ти описуєш ВИКЛЮЧНО дії та стани NPC і середовища.\n"
             "</combat_mode_rules>"
         )
         action_slot_guide = (
@@ -1314,7 +1510,9 @@ def build_gm_logic_prompt(
 2. Кожен NPC в npc_updates — фізично присутній у сцені?
 3. companion_npcs: тільки якщо гравець ЯВНО назвав NPC для подорожі, інакше [].
 4. mode_transition: бій завершено→"TO_NORMAL"; виник бій→"TO_COMBAT"; інакше→null.
-5. NPC отримав пошкодження → ОБОВ'ЯЗКОВО вкажи hp_current у npc_updates.
+5. [NORMAL] NPC отримав пошкодження → ОБОВ'ЯЗКОВО вкажи hp_current (int ≥ 0) у npc_updates.
+   [COMBAT] НЕ ВКАЗУЙ hp_current у npc_updates — авторитет HP є <npc_hp_snapshot>. Для опису ран
+   використовуй тір-підказки зі знімку («поранений», «критично поранений», «критична загроза»).
 </thinking_directives>
 
 <player_identity>
@@ -1352,6 +1550,7 @@ def build_gm_logic_prompt(
 Якщо SUCCESS: результат тріумфальний.
 </mechanical_verdict>
 {impact_block}
+{_hp_snapshot_block}
 
 <reputation_behavior_rules>
 ≥60: допомагає проактивно | 20-59: стандарт | -19..19: підозрілий | -20..-59: мінімум/відмова | ≤-60: ніколи добровільно.
@@ -1367,7 +1566,22 @@ Relation_Player — НІКОЛИ не включати в npc_updates (сист�
 <antiexamples>
 ❌ Description у npc_updates без незворотної події → не включати взагалі.
 ❌ Relation_Player у npc_updates → ніколи.
-❌ Status:"Unconscious" без hp_current → ✅ додати hp_current:0, conditions:["unconscious"].
+❌ Status:"Unconscious" без hp_current (NORMAL) → ✅ додати hp_current:0, conditions:["unconscious"].
+❌ [COMBAT] WRONG: emitting hp_current in npc_updates during combat round:
+{{
+  "npc_updates": [
+    {{"Name": "Кхал Дрого", "Status": "Active", "hp_current": 92, "conditions": ["bleeding"]}}
+  ]
+}}
+✅ [COMBAT] CORRECT: hp_current ВІДСУТНІЙ; стан описано словами з <npc_hp_snapshot>; conditions
+   тільки якщо явно вказано у <mechanical_verdict>:
+{{
+  "npc_updates": [
+    {{"Name": "Кхал Дрого", "Status": "Active", "conditions": ["bleeding"]}}
+  ],
+  "director_notes": ["Дрого отримав удар і тепер поранений — кров тече крізь пов'язки."]
+}}
+  (hp_current відсутній — engine авторизує HP з combat_state; "поранений" взято з тір-підказки знімку)
 ❌ WRONG: suggested_actions з не-українським текстом:
 [
   {{"button": "억지 a polite request", "intent": "I politely request..."}},
@@ -1386,6 +1600,8 @@ Relation_Player — НІКОЛИ не включати в npc_updates (сист�
 3. Scene/Location NPC змінюється лише якщо він ЯВНО названий або висловив намір іти.
 4. Гравець переміщується з NPC → заповни companion_npcs точними іменами.
 5. NPC в приватному просторі → Scene = поточна сцена гравця.
+6. [COMBAT] director_notes НЕ АВТОРИЗУЮТЬ стан гравця (поранений / непритомний / вбитий / рівень HP).
+   Стан гравця — виключна відповідальність engine. Ти описуєш ТІЛЬКИ NPC і середовище.
 </golden_laws_of_agency>
 
 <history>
@@ -1418,7 +1634,13 @@ Relation_Player — НІКОЛИ не включати в npc_updates (сист�
 
 <json_generation_rules>
 1. director_notes: 3-7 фактичних речень (COMBAT: 4-6 тактичних). БЕЗ літературних прикрас.
-2. NPC з пошкодженнями/лікуванням: hp_current (int) + conditions обов'язкові.
+2. hp_current у npc_updates:
+   — COMBAT-режим: ЗАБОРОНЕНО включати hp_current — engine ігнорує його, авторитет HP є combat_state
+     (показаний у <npc_hp_snapshot>). Описуй тяжкість ран словами з тір-підказок знімку.
+     conditions включати ЛИШЕ якщо стан явно вказаний у тексті <mechanical_verdict>
+     (наприклад «Дрого отримав bleeding»); НІКОЛИ не вигадуй conditions самостійно.
+   — NORMAL-режим: якщо NPC отримав пошкодження або лікування — hp_current (int ≥ 0) + conditions
+     обов'язкові. NULL/None ЗАБОРОНЕНО; якщо точне значення невідомо — НЕ включай це поле взагалі.
 3. '' = поле не змінилось; нове значення = реальна зміна.
 4. suggested_actions — рівно 4: {action_slot_guide}
 LANGUAGE INVARIANT для suggested_actions (АБСОЛЮТНА ВИМОГА):

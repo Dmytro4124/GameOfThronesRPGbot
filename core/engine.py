@@ -20,12 +20,19 @@ from core.dnd_combat_engine import (
     format_combat_log_for_narrator,
     initiate_combat_from_normal,
 )
+from core.combat_state import (
+    is_in_combat as _is_in_combat_for_engine,
+    clear_combat_state as _clear_combat_state_for_engine,
+    cleanup_lock as _cleanup_lock_for_engine,
+    get_combat_state as _get_combat_state_for_engine,
+)
 from core.prompts import (
     GAME_ERA_CONTEXT, build_summarize_turn_prompt, build_summarize_full_turn_prompt,
     build_narrator_prompt, build_gm_logic_prompt, build_history_summary_prompt,
 )
 from core.world_constants import VALID_LOCATIONS_ORDERED, VALID_REGIONS_ORDERED, TRAVEL_LOCATION, get_region_for_location, get_locations_for_region, LOCATION_DESCRIPTIONS, format_scenes_for_prompt
 from core.inventory import parse_inventory as _parse_inventory, format_inventory as _fmt_inventory
+from database.operations import get_canon_npc_statblock
 
 
 def _format_inventory_for_prompt(raw) -> str:
@@ -605,10 +612,20 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
 
     elif _game_mode == "COMBAT":
         # Sequential Censor для COMBAT (combat_state lock несумісний з cancel)
+        if _debug_active:
+            clear_thoughts()
         is_valid, refusal_reason = await validate_action(
             user_input, profile,
             debug_trace=_debug_trace if _debug_active else None,
         )
+        if _debug_active and _debug_trace is not None:
+            _debug_trace["censor"]["parsed"] = {
+                "is_valid": is_valid,
+                "refusal_reason": refusal_reason,
+            }
+            _debug_trace["censor"]["thoughts"] = [
+                e.get("thought", "") for e in get_thoughts_log() if e.get("thought")
+            ]
         if not is_valid:
             return refusal_reason + "\n\n📊 🛑 Дію заблоковано Цензором.", []
 
@@ -618,6 +635,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         from core.combat_state import get_combat_state, get_or_create_lock
 
         combat_lock = get_or_create_lock(chat_id)
+        _combat_crashed = False
         async with combat_lock:
             combat_state = get_combat_state(chat_id)
             if not combat_state:
@@ -705,10 +723,25 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                         f"[FSM] COMBAT pipeline crashed for chat_id={chat_id}: {combat_exc}",
                         exc_info=True,
                     )
-                    # Safe fallback: treat as NORMAL for this turn
+                    # Safe fallback: treat as NORMAL for this turn.
+                    # Also clear stale CombatState so that combat_imminent on the
+                    # next NORMAL turn does not find a lingering registry entry and
+                    # skip re-init entirely (see reinit-guard in initiate_combat_from_normal).
+                    _clear_combat_state_for_engine(chat_id)
+                    # Do NOT call _cleanup_lock_for_engine here — the Lock is still
+                    # held by the surrounding async with.  Removing it from the registry
+                    # while held lets a concurrent task acquire a NEW Lock for the same
+                    # chat_id, defeating mutual exclusion (CLAUDE.md §5.4).
+                    # The flag is consumed immediately after async with exits (below).
+                    _combat_crashed = True
                     profile["mode"] = "NORMAL"
                     _game_mode = "NORMAL"
                     _combat_log_for_narrator = []
+
+        # Lock is now fully released by async with __aexit__.
+        # Only NOW it is safe to remove it from the registry.
+        if _combat_crashed:
+            _cleanup_lock_for_engine(chat_id)
 
     # COMBAT→NORMAL fallback (state lost) або unknown mode — додатковий NORMAL resolve.
     # mechanics_verdict залишається None якщо COMBAT block скинув mode до NORMAL
@@ -826,23 +859,66 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
     impact_narrative_hints = _build_impact_hints(impact_logs)
 
     # FSM transition: combat_imminent=True → initiate COMBAT mode for next turn
-    if mechanical_updates.get("combat_imminent") and profile.get("mode") != "COMBAT":
-        # Use real score-based relation for every NPC in the scene.
-        # Hardcoding "Ворожий" for all scene NPCs was wrong: a neutral bystander
-        # caught in someone else's fight should not enter COMBAT with "Ворожий".
-        # The actual aggressor will already have a hostile score in npc_reputation_context;
-        # if for some reason it doesn't, "Нейтральний" (score=0 fallback) is still safer
-        # than a blanket "Ворожий" for everybody.
-        _scene_npcs_for_combat = [
-            {
-                "Name": n,
+    # Trigger-guard: skip if a CombatState already exists in the registry — a lingering
+    # in-memory state must not cause a second init (which would re-roll initiative and
+    # replace any bystander filtering done on turn 1).
+    if (
+        mechanical_updates.get("combat_imminent")
+        and profile.get("mode") != "COMBAT"
+        and not _is_in_combat_for_engine(chat_id)
+    ):
+        # Friend/foe filter: ONLY the explicitly attacked NPC enters combat.
+        # Every other NPC in the scene (allies, civilians, bystanders) stays out
+        # until the player explicitly attacks them.  This prevents the "ally beats
+        # up the player" regression where ALL scene NPCs were enrolled.
+        #
+        # Resolution order (2 tiers — no tier-3 to avoid enrolling allies):
+        #   1. Worker's reputation_target_npc — most reliable (prompt-engineer ensures
+        #      this is set to the attacked NPC when combat_imminent=True).
+        #   2. Fallback: most-hostile NPC in npc_reputation_context (lowest score < 0).
+        #   If neither resolves to a legal scene NPC — do not initiate combat.
+        #   (A Worker name-mismatch or absence of hostile NPCs must NOT fall through
+        #    to the first legal NPC — that could enroll an ally into combat.)
+        _rep_ctx = npc_reputation_context or {}
+        _target_npc_name: str | None = None
+
+        # 1. Primary: Worker explicitly named the target
+        _raw_target = mechanical_updates.get("reputation_target_npc", "")
+        if _raw_target and _raw_target in legal_npc_names:
+            _target_npc_name = _raw_target
+        else:
+            # 2. Fallback: most-hostile (lowest reputation score) among legal scene NPCs
+            _hostile_candidates = [
+                (n, _rep_ctx.get(n, 0))
+                for n in legal_npc_names
+                if _rep_ctx.get(n, 0) < 0  # only actually hostile NPCs
+            ]
+            if _hostile_candidates:
+                _target_npc_name = min(_hostile_candidates, key=lambda x: x[1])[0]
+            # No tier-3: if Worker named an invalid NPC and no hostile fallback exists,
+            # _target_npc_name stays None → combat is not initiated.
+
+        if _target_npc_name:
+            _npc_combat_entry = {
+                "Name": _target_npc_name,
                 "Relation_Player": score_to_relation_text(
-                    (npc_reputation_context or {}).get(n, 0)
+                    _rep_ctx.get(_target_npc_name, 0)
                 ),
             }
-            for n in legal_npc_names
-        ]
-        if _scene_npcs_for_combat:
+            _statblock = get_canon_npc_statblock(_target_npc_name)
+            if _statblock:
+                _npc_combat_entry.update(_statblock)
+                # Engine-resolved name takes precedence over any Name field in the statblock
+                _npc_combat_entry["Name"] = _target_npc_name
+                logger.info(
+                    f"[FSM] enrolled canon NPC '{_target_npc_name}' with statblock "
+                    f"(AC={_statblock.get('ac')}, HP={_statblock.get('hp_max')})."
+                )
+            else:
+                logger.info(
+                    f"[FSM] non-canon NPC '{_target_npc_name}' — will use tier fallback in initiate_combat."
+                )
+            _scene_npcs_for_combat = [_npc_combat_entry]
             try:
                 _new_cs = await initiate_combat_from_normal(chat_id, profile, _scene_npcs_for_combat)
                 # Initiative display: "Ім'я (roll), Ім'я (roll)"
@@ -852,11 +928,17 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 ]
                 _init_str = ", ".join(_init_parts) if _init_parts else "?"
                 logs.append(f"⚔️ БІЙ РОЗПОЧАТО! Ініціатива: {_init_str}")
-                logger.info(f"[FSM] combat_imminent=true → CombatState initiated for chat_id={chat_id}")
+                logger.info(
+                    f"[FSM] combat_imminent=true → CombatState initiated for chat_id={chat_id}, "
+                    f"enemy={_target_npc_name}"
+                )
             except Exception as _ci_exc:
                 logger.error(f"[FSM] initiate_combat_from_normal failed: {_ci_exc}", exc_info=True)
         else:
-            logger.info(f"[FSM] combat_imminent=true but no scene NPCs — staying NORMAL for chat_id={chat_id}")
+            logger.info(
+                f"[FSM] combat_imminent=true but no valid enemy NPC resolved "
+                f"(raw_target='{_raw_target}', legal={legal_npc_names}) — staying NORMAL for chat_id={chat_id}"
+            )
 
     # === REFRESH: Перечитуємо loc/scene/region якщо apply_system_impacts їх змінила ===
     # Зберігаємо "ростер відправлення" ПЕРЕД rebuild (для dual roster промптів)
@@ -961,6 +1043,27 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
     # For COMBAT mode, override action slots with combat buttons
     if _gm_mode == "COMBAT":
         _action_slots = ["АТАКУВАТИ", "ЗАХИСТИТИСЬ", "ВТЕКТИ", "СПЕЦДІЯ"]
+
+    # B1 — Build npc_hp_snapshot for GM_Logic in COMBAT so the prompt can
+    # show authoritative HP values and prevent GM hallucinating HP drift.
+    # combat_state is the sole HP authority during combat (Package 3 design).
+    _npc_hp_snapshot: dict | None = None
+    if _gm_mode == "COMBAT":
+        _cs_for_snapshot = _get_combat_state_for_engine(chat_id)
+        if _cs_for_snapshot is not None:
+            _npc_hp_snapshot = {}
+            for _snap_name, _snap_data in _cs_for_snapshot.npcs.items():
+                _npc_hp_snapshot[_snap_name] = {
+                    "hp_current": _snap_data.get("hp_current", 0),
+                    "hp_max":     _snap_data.get("hp_max",     0),
+                    "ac":         _snap_data.get("ac",         10),
+                    "conditions": list(_snap_data.get("conditions", [])),
+                }
+            logger.debug(
+                f"[FSM] npc_hp_snapshot built for GM_Logic: "
+                f"{list(_npc_hp_snapshot.keys())} (chat_id={chat_id})"
+            )
+
     gm_logic_prompt = build_gm_logic_prompt(
         hero_name=profile.get("Ім'я", "Невідомий"),
         hero_house=profile.get("Дім", "Невідомий"),
@@ -991,6 +1094,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         departing_roster_text=departing_npc_context if location_or_scene_changed else "",
         arriving_roster_text=arriving_npc_context if location_or_scene_changed else "",
         mode=_gm_mode,
+        npc_hp_snapshot=_npc_hp_snapshot,
     )
 
 
@@ -1052,6 +1156,33 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
 
         # Зберігаємо ai_data в сесію для QA-валідації
         user_sessions[chat_id]['last_ai_data'] = ai_data
+
+        # B3 — Unconditional guard: strip hp_current if None/non-int (both modes).
+        # GM_Logic sometimes returns "hp_current": null despite prompt rules.
+        # null is never a valid HP value and must never reach the DB writer.
+        _gm_npc_updates = ai_data.get("npc_updates") if isinstance(ai_data.get("npc_updates"), list) else []
+        for _u in _gm_npc_updates:
+            if not isinstance(_u, dict):
+                continue
+            _hp_val = _u.get("hp_current")
+            if _hp_val is None or not isinstance(_hp_val, int):
+                _u.pop("hp_current", None)
+
+        # B2 — COMBAT: strip hp_current AND conditions from GM_Logic npc_updates.
+        # combat_state is the sole HP/conditions authority during combat.
+        # Status (Dead/Fled/Unconscious) is NOT stripped — legitimate from GM_Logic.
+        # On combat exit, cleanup_and_exit_combat syncs NPC HP/conditions from
+        # combat_state to the DB, so stripping here causes no data loss.
+        if _gm_mode == "COMBAT":
+            for _u in _gm_npc_updates:
+                if not isinstance(_u, dict):
+                    continue
+                _u.pop("hp_current", None)
+                _u.pop("conditions", None)
+            logger.debug(
+                f"[FSM] stripped hp_current/conditions from {len(_gm_npc_updates)} "
+                f"GM npc_updates (COMBAT — combat_state is authoritative) chat_id={chat_id}"
+            )
 
         # Витягуємо suggested_actions з GM_Logic
         raw_actions = ai_data.get("suggested_actions", [])
@@ -1552,13 +1683,20 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
 
             _run_bg_task(travel_population_task(new_location, current_char_name))
 
+        # === PROFILE SAVE (synchronous) ===
+        # Player profile is flushed BEFORE returning so the next turn sees
+        # up-to-date xp / mode / time / clocks / hp.  All other DB work
+        # (NPC updates, reputation, history summary) stays in the background task.
+        await save_user_data(user_id, profile, profile.get("Ім'я"))
+
         async def background_task(chat_id_arg, user_id_arg, profile_arg, char_name_arg, input_arg, story_arg,
                                   npc_changes_arg, legal_names_arg, mech_updates_arg=None,
                                   new_location_arg=None, player_location_changed_arg=False,
                                   player_new_scene_arg=None, player_scene_changed_arg=False,
                                   companion_npcs_arg=None, frozen_fields_reason_arg=""):
             try:
-                await save_user_data(user_id_arg, profile_arg, char_name_arg)
+                # Profile already persisted synchronously above; only secondary
+                # writes remain here (NPC DB, reputation, history summarization).
                 if npc_changes_arg:
                     await update_npcs_in_db(
                         chat_id_arg, npc_changes_arg,

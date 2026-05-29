@@ -6,6 +6,7 @@ All combat-state mutations are guarded by try/finally per CLAUDE.md §5.4.
 """
 
 import asyncio
+import copy
 import logging
 from typing import Optional
 
@@ -477,7 +478,17 @@ async def initiate_combat_from_normal(
     3. Mutate profile['mode'] = 'COMBAT'.
     Returns the new CombatState.
     """
-    import copy
+    # Reinit-guard: if combat is already active for this chat, return the existing
+    # state unchanged.  Re-rolling initiative every turn was the root cause of the
+    # "ally attacks player on turn 2" regression.
+    if is_in_combat(chat_id):
+        existing = get_combat_state(chat_id)
+        logger.info(
+            f"[COMBAT_ENGINE] initiate_combat_from_normal: combat already active for "
+            f"chat_id={chat_id} — returning existing CombatState (no re-init)."
+        )
+        return existing
+
     player_copy = copy.deepcopy(profile)
 
     combat_state = initiate_combat(

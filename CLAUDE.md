@@ -176,7 +176,8 @@ TelegramGameOfThronesBot/
 │   ├── dnd_rest.py          # short/long rest
 │   ├── dnd_engine.py        # resolve_normal_action + apply_dnd_impacts (NORMAL pipeline)
 │   ├── dnd_combat_engine.py # COMBAT round execution (spotlight pattern)
-│   └── dnd_migration.py     # backup + LLM-regen NPC + wipe utilities
+│   ├── dnd_migration.py     # backup + LLM-regen NPC + wipe utilities
+│   └── reputation.py        # apply_reputation_step: asymmetric magnitude-gated reputation math (mechanics-dev domain)
 ├── database/
 │   ├── canon_npc.py         # ~100 канонічних NPC (хардкод)
 │   ├── operations.py        # gspread + RAG
@@ -230,19 +231,22 @@ Pipeline складається з 4 ролей. Перші три поверт�
 - `skill_check_reasoning`, `difficulty_reasoning`, `gold_reasoning` — внутрішнє міркування (потрібні для діагностики поведінки моделі)
 - `ability_used` (`"STR"` | `"DEX"` | `"CON"` | `"INT"` | `"WIS"` | `"CHA"` | `"None"`)
 - `skill_used` (один з 18 D&D skills або `"None"`)
-- `difficulty` — STRICT enum `{5, 10, 12, 15, 17, 20, 22}` (div. 5.2)
+- `difficulty` — STRICT enum `{2, 5, 10, 12, 15, 17, 20, 22}` (div. 5.2; DC 2 = ultra-trivial auto-success)
 - `advantage_reason`, `disadvantage_reason` (рядки; порожні = no modifier)
-- `combat_imminent` (bool) — якщо true, engine ініціює COMBAT_MODE наступним ходом
-- `verdict_text`, `xp_award` ∈ {0|25|50|100|200}, `reputation_delta` (-3..+3), `reputation_target_npc`
+- `combat_imminent` (bool) — якщо true, engine ініціює COMBAT_MODE наступним ходом. **Friend/foe правило:** у бій входить ЛИШЕ NPC з `reputation_target_npc` (якщо він у `legal_npc_names`) АБО найворожіший NPC сцени (score < 0); інші NPC сцени — глядачі. Якщо ціль не резолвиться → engine залишається в NORMAL (бій не стартує).
+- `verdict_text`, `xp_award` ∈ {0|25|50|100|200}, `reputation_target_npc` — **REQUIRED non-empty при `combat_imminent=true`** (engine читає це для friend/foe-фільтра; без цього бій не стартує).
+- `reputation_delta_success` / `reputation_delta_failure` (обидва -7..+7, 15-крокова шкала значущості дії, дзеркалить 15 relation-рівнів; тривіальні/повсякденні дії = 0) — RAW значущість, окремо для success/failure outcome. Worker не знає результату кидка наперед, тож оцінює обидва сценарії; engine ПІСЛЯ roll вибирає правильний → `_clamp_reputation_delta` (`REPUTATION_DELTA_MIN/MAX` = ±7) → `updates["reputation_delta"]` (RAW). Споживач `update_npc_reputation` (operations.py) викликає `apply_reputation_step(current_score, delta)` з `core/reputation.py` — **асиметрична magnitude-gated прогресія**: позитив важко набрати (diminishing climb до `POSITIVE_CAP[mag]` + epic jump при `|raw|>=6`), негатив magnitude-gated (`NEGATIVE_DROP={1:1,2:2,3:5,4:10,5:25,6:50,7:100}` — дрібні образи майже непомітні, тяжкі зради нищівні), фінальний clamp -100..100. Запобігає reputation farming (100 привітань ≠ +100). Backward compat: старий single `reputation_delta` → success-case, failure → 0.
 - `updates` — вкладений об'єкт: `minutes_passed`, `location_impact`, `scene_impact`, `hp_damage_dice` (напр. `"1d6"`), `hp_heal_dice`, `gold_impact`, `inventory_new`, `inventory_lost`, `clocks_impact`, `condition_apply[]`, `condition_remove[]`
 
 **Worker NORMAL OPTIONAL keys** (для D&D save/rest mechanics, додано 2026-05):
 - `save_used` (`"STR"|"DEX"|"CON"|"INT"|"WIS"|"CHA"|"None"`, default `"None"`) — якщо set, engine викликає `saving_throw()` замість skill_check. Див. GATE S у Worker prompt.
 - `save_dc` (integer ∈ LEGAL_DCS, default 5) — DC для save. Engine робить `clamp_dc()`.
 - `rest_type` (`"long"|"short"|"none"`, default `"none"`) — якщо set, engine викликає `long_rest()` / `short_rest()`. Див. GATE R. **REST має пріоритет над SAVE** при одночасному наявності обох.
+- `updates.hp_damage_type` (`"physical"|"fire"|"cold"|"poison"|"acid"`, default `"physical"`) — тип self-damage для heritage resistance. Якщо `"fire"` і профіль fire-resistant (Valyrian `is_fire_resistant`) → engine halve'ить damage (`max(1, dmg//2)`). Див. GATE 6 hp_damage_type блок.
 
 **Worker NORMAL INPUT context** (передається в `<player_state>`):
 - `equipped_weapon` (dict `{name, damage_dice, damage_type, properties}`) — structured опис зброї. Опціонально (старі профілі без поля → fallback на текст). LLM використовує properties (`"finesse"`, `"thrown"`, `"ranged"`) для вибору ability_used (DEX vs STR). Див. GATE W.
+- `<class_features>` блок включає і class features (`profile["features"]`), і heritage traits (`get_heritage_traits(profile["heritage"])` — напр. Valyrian "Опір вогню"). LLM враховує passive traits при виборі hp_damage_type та інших рішеннях.
 
 **Worker COMBAT** (`build_combat_round_prompt`) — обов'язкові ключі:
 - `intent` (`"attack"` | `"cast"` | `"move"` | `"dodge"` | `"flee"` | `"item"` | `"help"` | `"grapple"` | `"shove"`)

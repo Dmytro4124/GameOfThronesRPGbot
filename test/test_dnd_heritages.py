@@ -10,6 +10,8 @@ from core.dnd_heritages import (
     get_heritage,
     apply_heritage_bonuses,
     list_heritages,
+    is_fire_resistant,
+    get_heritage_traits,
 )
 
 
@@ -234,3 +236,116 @@ def test_get_heritage_returns_heritage_def_for_valid_name():
 def test_get_heritage_raises_key_error_for_unknown_heritage():
     with pytest.raises(KeyError):
         get_heritage("Dwarf")
+
+
+# ---------------------------------------------------------------------------
+# is_fire_resistant
+# ---------------------------------------------------------------------------
+
+def test_is_fire_resistant_valyrian_true():
+    """Valyrian Descent has 'Опір вогню' trait → must return True."""
+    profile = {"heritage": "Valyrian Descent"}
+    assert is_fire_resistant(profile) is True
+
+
+def test_is_fire_resistant_non_valyrian_false():
+    """Westerosi (Andal) has no fire resistance → must return False."""
+    profile = {"heritage": "Westerosi (Andal)"}
+    assert is_fire_resistant(profile) is False
+
+
+@pytest.mark.parametrize("heritage_name", [
+    "First Men (Stark line)",
+    "Free Folk",
+    "Red Priest",
+    "Ironborn",
+])
+def test_is_fire_resistant_other_heritages_false(heritage_name):
+    """No heritage other than Valyrian Descent currently grants fire resistance."""
+    profile = {"heritage": heritage_name}
+    assert is_fire_resistant(profile) is False
+
+
+def test_is_fire_resistant_unknown_heritage_false():
+    """Unknown heritage string → no HERITAGES lookup match → False."""
+    profile = {"heritage": "Dwarf"}
+    assert is_fire_resistant(profile) is False
+
+
+def test_is_fire_resistant_no_heritage_key_false():
+    """Profile without 'heritage' key and no 'Риси' fallback → False."""
+    profile = {"Ім'я": "TestHero"}
+    assert is_fire_resistant(profile) is False
+
+
+def test_is_fire_resistant_legacy_fallback_riси():
+    """Legacy profile without 'heritage' key but with 'Опір вогню' in 'Риси' → True."""
+    profile = {"Риси": "Brave, Опір вогню, Loyal"}
+    assert is_fire_resistant(profile) is True
+
+
+def test_is_fire_resistant_legacy_fallback_riси_case_insensitive():
+    """Legacy fallback check is case-insensitive (lower())."""
+    profile = {"Риси": "ОПІР ВОГНЮ"}
+    assert is_fire_resistant(profile) is True
+
+
+# ---------------------------------------------------------------------------
+# get_heritage_traits
+# ---------------------------------------------------------------------------
+
+def test_get_heritage_traits_valyrian_has_fire_trait():
+    """Valyrian Descent traits include one with 'вогн' in name or 'fire' in desc."""
+    traits = get_heritage_traits("Valyrian Descent")
+    assert any(
+        "вогн" in t.name.lower() or "fire" in t.desc.lower()
+        for t in traits
+    ), f"Expected fire-related trait in Valyrian traits: {[t.name for t in traits]}"
+
+
+def test_get_heritage_traits_returns_trait_objects():
+    """get_heritage_traits must return a list of Trait instances."""
+    traits = get_heritage_traits("Valyrian Descent")
+    assert len(traits) > 0
+    for t in traits:
+        assert isinstance(t, Trait), f"Expected Trait, got {type(t)}"
+        assert isinstance(t.name, str)
+        assert isinstance(t.desc, str)
+
+
+def test_get_heritage_traits_unknown_returns_empty():
+    """Unknown heritage → empty list, no exception."""
+    traits = get_heritage_traits("Dragon")
+    assert traits == []
+
+
+def test_get_heritage_traits_empty_string_returns_empty():
+    """Empty string → empty list, no exception."""
+    traits = get_heritage_traits("")
+    assert traits == []
+
+
+def test_get_heritage_traits_is_copy():
+    """Returned list is a copy — mutating it must not affect the registry."""
+    traits = get_heritage_traits("Valyrian Descent")
+    original_count = len(HERITAGES["Valyrian Descent"].traits)
+    traits.clear()
+    assert len(HERITAGES["Valyrian Descent"].traits) == original_count, (
+        "Mutating returned list must not affect HERITAGES registry."
+    )
+
+
+@pytest.mark.parametrize("heritage_name", sorted({
+    "Westerosi (Andal)",
+    "Valyrian Descent",
+    "First Men (Stark line)",
+    "Free Folk",
+    "Red Priest",
+    "Ironborn",
+}))
+def test_get_heritage_traits_all_heritages_non_empty(heritage_name):
+    """Every defined heritage must have at least one trait."""
+    traits = get_heritage_traits(heritage_name)
+    assert len(traits) >= 1, (
+        f"Heritage '{heritage_name}' must have at least one trait. Got: {traits}"
+    )
