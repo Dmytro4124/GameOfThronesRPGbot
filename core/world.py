@@ -42,6 +42,7 @@ def _build_deterministic_dnd_profile(
     origin_region: str,
     suggested_class: str = "Knight",
     suggested_heritage: str = "Westerosi (Andal)",
+    apply_heritage: bool = True,
 ) -> dict:
     """Return a valid D&D L1 profile without any LLM call.
 
@@ -60,6 +61,13 @@ def _build_deterministic_dnd_profile(
     - proficiency_bonus = 2 at L1
     - Енергія = 1000 (legacy scale start)
     - Здоров'я = hp_current (legacy UI sync)
+
+    Args:
+        apply_heritage: When True (default), apply_heritage_bonuses() is called
+            and final_scores reflect heritage ability bonuses (scores up to 20).
+            When False, base standard-array scores (8-15) are used as-is —
+            caller is responsible for applying heritage bonuses after point-buy.
+            In both cases, profile["heritage"] is set to suggested_heritage.
     """
     import re as _re
     from core.dnd_classes import GOT_CLASSES, get_class, get_starting_hp, build_class_starting_kit, get_class_features_at_level
@@ -93,11 +101,12 @@ def _build_deterministic_dnd_profile(
 
     # --- Apply heritage bonuses (mutates ability_scores, caps at 20) ---
     _tmp_profile: dict = {"ability_scores": raw_scores}
-    _tmp_profile = apply_heritage_bonuses(
-        _tmp_profile,
-        suggested_heritage,
-        ability_choices=None,  # Westerosi Andal: fallback to STR, DEX per apply_heritage_bonuses logic
-    )
+    if apply_heritage:
+        _tmp_profile = apply_heritage_bonuses(
+            _tmp_profile,
+            suggested_heritage,
+            ability_choices=None,  # Westerosi Andal: fallback to STR, DEX per apply_heritage_bonuses logic
+        )
     final_scores: dict[str, int] = _tmp_profile["ability_scores"]
     languages: list[str] = _tmp_profile.get("languages", ["Common Tongue"])
 
@@ -391,7 +400,7 @@ async def generate_initial_stats_legacy(char_name, house_name, house_data):
     return None
 
 
-async def generate_initial_stats(char_name, house_name, house_data):
+async def generate_initial_stats(char_name, house_name, house_data, apply_heritage: bool = True):
     """Асинхронно генерує стартовий D&D профіль героя (Phase 5+).
 
     Порядок:
@@ -400,6 +409,14 @@ async def generate_initial_stats(char_name, house_name, house_data):
        ac, skill_profs, saves_proficient, equipment, gold, features, conditions.
     3. Застосовує heritage bonuses через dnd_heritages.apply_heritage_bonuses.
     4. Зберігає legacy-сумісні ключі ("Здоров'я", "Енергія") поряд з D&D полями.
+
+    Args:
+        apply_heritage: When True (default), apply_heritage_bonuses() is called
+            and ability_scores reflect heritage bonuses (scores up to 20).
+            When False, base LLM-generated (or clamped fallback) scores in range
+            8-15 are returned without heritage bonuses applied — caller handles
+            heritage application after point-buy confirmation.
+            In both cases, profile["heritage"] is set to suggested_heritage.
     """
     from core.dnd_classes import get_class, get_starting_hp, build_class_starting_kit, get_class_features_at_level
     from core.dnd_heritages import apply_heritage_bonuses, get_heritage
@@ -439,6 +456,7 @@ async def generate_initial_stats(char_name, house_name, house_data):
             origin_region=origin_region,
             suggested_class="Hedge Knight",   # safe default: martial, broadly compatible
             suggested_heritage="Westerosi (Andal)",
+            apply_heritage=apply_heritage,
         )
 
     # --- Validate location and scene (same as legacy) ---
@@ -489,11 +507,12 @@ async def generate_initial_stats(char_name, house_name, house_data):
     llm_data["ability_scores"] = ability_scores
 
     # Apply heritage bonuses (mutates ability_scores safely, caps at 20)
-    llm_data = apply_heritage_bonuses(
-        llm_data,
-        suggested_heritage,
-        ability_choices=None,  # Westerosi Andal: fallback to STR, DEX
-    )
+    if apply_heritage:
+        llm_data = apply_heritage_bonuses(
+            llm_data,
+            suggested_heritage,
+            ability_choices=None,  # Westerosi Andal: fallback to STR, DEX
+        )
     final_scores: dict[str, int] = llm_data["ability_scores"]
 
     # --- Level 1 D&D fields (deterministic) ---

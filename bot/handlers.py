@@ -1,5 +1,6 @@
 # bot/handlers.py
 import asyncio
+import copy
 import io
 import json
 import logging
@@ -12,7 +13,7 @@ from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from bot.menus import get_dynamic_menu, get_main_menu
+from bot.menus import get_dynamic_menu, get_main_menu, build_ability_preview_keyboard, build_point_buy_keyboard
 from bot.utils import send_safe_message, send_game_response
 from database.operations import (
     get_unique_regions, get_houses_by_region, get_house_stats_data,
@@ -222,6 +223,12 @@ async def handle_character_selection(call: CallbackQuery, bot: Bot):
 
 
 async def start_game_with_character(bot: Bot, chat_id: int, char_name: str):
+    """Generate base profile (apply_heritage=False) and show ability-preview message.
+
+    The player then chooses to Accept the auto-rolled stats or Redistribute via
+    point-buy.  Profile is NOT saved here — saving happens in the Accept/Confirm
+    callback handlers after heritage bonuses are applied.
+    """
     user_id = chat_id
     session = user_sessions.get(chat_id, {})
     house_name = session.get('house_name')
@@ -231,132 +238,517 @@ async def start_game_with_character(bot: Bot, chat_id: int, char_name: str):
         return
 
     house_data = await get_house_stats_data(house_name)
-    full_profile = await generate_initial_stats(char_name, house_name, house_data)
+    # apply_heritage=False: base scores 8-15 returned; heritage applied later
+    base_profile = await generate_initial_stats(char_name, house_name, house_data, apply_heritage=False)
 
-    if full_profile:
-        if await save_user_data(user_id, full_profile, char_name):
-
-            if chat_id not in user_sessions:
-                user_sessions[chat_id] = {}
-            user_sessions[chat_id]['state'] = "INITIALIZING"  # Блокуємо ігрові дії до готовності світу
-            user_sessions[chat_id]['character_name'] = char_name
-            user_sessions[chat_id]['history'] = []
-
-            start_loc = full_profile.get("Поточне місцезнаходження", "Вестерос")
-            hero_name = full_profile.get("Ім'я", char_name)
-            profile_region = full_profile.get("Регіон", "")
-            profile_class = full_profile.get("class", "")
-            profile_heritage = full_profile.get("heritage", "")
-
-            # Фоновий запуск world setup (канонічні NPC + локальні NPC).
-            # Стан INITIALIZING залишається до завершення — гравець бачить intro
-            # але game loop заблокований (handle_general_messages перевіряє state).
-            async def initial_world_setup(loc, p_name):
-                try:
-                    await background_canon_generation(user_id, excluded_name=p_name)
-                    await populate_contextual_npcs(user_id, loc, "Start of the game. Normal daily routine.", excluded_name=p_name)
-                finally:
-                    # Розблокуємо гравця у будь-якому разі
-                    if chat_id in user_sessions:
-                        user_sessions[chat_id]['state'] = "GAME_ACTIVE"
-
-            task = asyncio.create_task(initial_world_setup(start_loc, char_name))
-
-            def _on_world_setup_done(t):
-                if t.exception():
-                    print(f"[WORLD SETUP FAILED] {t.exception()}")
-                    if chat_id in user_sessions:
-                        user_sessions[chat_id]['state'] = "GAME_ACTIVE"
-
-            task.add_done_callback(_on_world_setup_done)
-
-            stats_msg = f"✅ *Персонажа створено!*\n👤 **{hero_name}**\n📍 Локація: _{start_loc}_"
-            await bot.send_message(chat_id, stats_msg, parse_mode='Markdown')
-
-            # --- Intro: cache hit → миттєво; cache miss → fallback + фоновий LLM ---
-            cached_intro_text = get_cached_intro(profile_class, profile_heritage, profile_region)
-
-            if cached_intro_text:
-                # Cache HIT — надсилаємо одразу (plain text: LLM генерує власну розмітку, не Markdown)
-                await send_safe_message(bot, chat_id, cached_intro_text, reply_markup=get_main_menu(), parse_mode=None)
-                user_sessions.setdefault(chat_id, {})["action_intents"] = {}
-                user_sessions[chat_id]['history'].append({"role": "GM", "content": cached_intro_text})
-            else:
-                # Cache MISS — показуємо детерміністичний fallback одразу,
-                # надсилаємо через bot.send_message щоб отримати Message-об'єкт для edit_text
-                fallback_text = build_fallback_intro(full_profile)
-                placeholder_msg = await bot.send_message(
-                    chat_id,
-                    fallback_text + "\n\n_Готую персоналізований вступ..._",
-                    reply_markup=get_main_menu(),
-                    parse_mode='Markdown',
-                )
-                user_sessions.setdefault(chat_id, {})["action_intents"] = {}
-                user_sessions[chat_id]['history'].append({"role": "GM", "content": fallback_text})
-
-                # Фоновий LLM-intro — замінює placeholder на повне інтро з кнопками.
-                # Важливо: edit_text не підтримує ReplyKeyboardMarkup (лише InlineKeyboard),
-                # тому замість edit використовуємо delete + send_message — так само як
-                # send_safe_message з edit_message (bot/utils.py:25-29).
-                async def _bg_intro_task():
-                    try:
-                        intro_data = await get_narrative_intro(full_profile)
-                        narrative = intro_data.get("narrative_text", "")
-                        action_prompt = intro_data.get("action_prompt", "")
-                        raw_suggested = intro_data.get("suggested_actions", [])
-
-                        button_texts = []
-                        intents_map = {}
-                        for item in raw_suggested:
-                            if isinstance(item, dict):
-                                btn = str(item.get("button", "...")).strip()[:40]
-                                intent = str(item.get("intent", btn)).strip()
-                            else:
-                                btn = str(item).strip()[:40]
-                                intent = btn
-                            button_texts.append(btn)
-                            intents_map[btn] = intent
-
-                        display_text = narrative
-                        if action_prompt:
-                            display_text += f"\n\n_{action_prompt}_"
-
-                        if display_text:
-                            # Кешуємо для майбутніх гравців з тією ж комбінацією
-                            await set_cached_intro(profile_class, profile_heritage, profile_region, display_text)
-                            markup = get_dynamic_menu(button_texts) if button_texts else get_main_menu()
-                            # Видаляємо placeholder, надсилаємо нове повідомлення з ReplyKeyboard
-                            try:
-                                await placeholder_msg.delete()
-                            except Exception:
-                                pass
-                            try:
-                                await bot.send_message(chat_id, display_text, reply_markup=markup, parse_mode=None)
-                                if chat_id in user_sessions:
-                                    user_sessions[chat_id]["action_intents"] = intents_map
-                                    if user_sessions[chat_id].get('history'):
-                                        user_sessions[chat_id]['history'][-1] = {"role": "GM", "content": display_text}
-                            except Exception as e_send:
-                                print(f"[bg intro] send_message failed: {e_send}")
-                    except Exception as e:
-                        print(f"[bg intro] Failed (using fallback): {e}")
-                        # При помилці LLM: видаляємо placeholder зі спінером, надсилаємо чистий fallback
-                        try:
-                            await placeholder_msg.delete()
-                        except Exception:
-                            pass
-                        try:
-                            await bot.send_message(chat_id, fallback_text, reply_markup=get_main_menu(), parse_mode=None)
-                        except Exception:
-                            pass
-
-                asyncio.create_task(_bg_intro_task())
-
-            await bot.send_message(chat_id, "⚔️ Ваш шлях починається...")
-        else:
-            await bot.send_message(chat_id, "❌ Помилка запису в базу даних.")
-    else:
+    if not base_profile:
         await bot.send_message(chat_id, "❌ Помилка генерації профілю.")
+        return
+
+    # Store both copies in session; auto_roll_profile is the Cancel target.
+    # Use copy.deepcopy so that point-buy mutations to temp_profile['ability_scores']
+    # do not corrupt auto_roll_profile (both start as the same base dict).
+    if chat_id not in user_sessions:
+        user_sessions[chat_id] = {}
+    user_sessions[chat_id]['temp_profile'] = base_profile
+    user_sessions[chat_id]['auto_roll_profile'] = copy.deepcopy(base_profile)
+    user_sessions[chat_id]['state'] = "WAITING_ABILITY_PREVIEW"
+    user_sessions[chat_id]['character_name'] = char_name
+    user_sessions[chat_id]['history'] = []
+
+    # Build the preview message
+    preview_text = _build_ability_preview_text(base_profile)
+    await bot.send_message(
+        chat_id,
+        preview_text,
+        parse_mode='Markdown',
+        reply_markup=build_ability_preview_keyboard(),
+    )
+
+
+def _build_ability_preview_text(profile: dict) -> str:
+    """Format a concise ability-score preview with heritage bonus hint."""
+    from core.dnd_heritages import HERITAGES
+    from core.dnd_core import ability_modifier
+
+    heritage_name = profile.get("heritage", "")
+    char_name = profile.get("Ім'я", "Герой")
+    char_class = profile.get("class", "")
+    scores = profile.get("ability_scores", {})
+
+    # Heritage bonus description
+    heritage_bonus_hint = ""
+    if heritage_name in HERITAGES:
+        hdef = HERITAGES[heritage_name]
+        bonuses = hdef.ability_bonuses
+        parts = []
+        for key, val in bonuses.items():
+            if key.startswith("any+"):
+                parts.append(f"+{val} до будь-якої здібності (на вибір)")
+            else:
+                parts.append(f"+{val} {key}")
+        heritage_bonus_hint = ", ".join(parts) if parts else "без бонусів"
+    else:
+        heritage_bonus_hint = "невідоме походження"
+
+    _AB_LABELS = {
+        "STR": "Сила",
+        "DEX": "Спритність",
+        "CON": "Витривалість",
+        "INT": "Інтелект",
+        "WIS": "Мудрість",
+        "CHA": "Харизма",
+    }
+
+    lines = [
+        f"⚔️ *{char_name}* — {char_class}",
+        "",
+        "📊 *Авто-розкид характеристик:*",
+    ]
+    for ab, label in _AB_LABELS.items():
+        score = scores.get(ab, 8)
+        mod = ability_modifier(score)
+        lines.append(f"  {label} ({ab}): *{score}* ({mod:+d})")
+
+    lines += [
+        "",
+        f"🏛 *Походження:* {heritage_name}",
+        f"   Буде додано: _{heritage_bonus_hint}_",
+        "",
+        "Прийняти авто-розкид або перерозподілити 27 очок вручну?",
+    ]
+    return "\n".join(lines)
+
+
+async def _finalise_character_and_start(bot: Bot, chat_id: int, full_profile: dict) -> None:
+    """Save profile and launch world-setup + intro.
+
+    Extracted from the original start_game_with_character so both the
+    ability_accept and pb_confirm callbacks share the same path.
+
+    Precondition: full_profile already has heritage bonuses applied and
+    recompute_ac() already called by the caller.
+    """
+    user_id = chat_id
+    char_name = full_profile.get("Ім'я", "")
+
+    if not await save_user_data(user_id, full_profile, char_name):
+        await bot.send_message(chat_id, "❌ Помилка запису в базу даних.")
+        return
+
+    if chat_id not in user_sessions:
+        user_sessions[chat_id] = {}
+    user_sessions[chat_id]['state'] = "INITIALIZING"
+    user_sessions[chat_id]['character_name'] = char_name
+    # history already set by start_game_with_character; keep it
+    user_sessions[chat_id].setdefault('history', [])
+    # Clean up point-buy temp keys
+    user_sessions[chat_id].pop('temp_profile', None)
+    user_sessions[chat_id].pop('auto_roll_profile', None)
+
+    start_loc = full_profile.get("Поточне місцезнаходження", "Вестерос")
+    hero_name = full_profile.get("Ім'я", char_name)
+    profile_region = full_profile.get("Регіон", "")
+    profile_class = full_profile.get("class", "")
+    profile_heritage = full_profile.get("heritage", "")
+
+    # Background world setup (canon NPC + contextual NPC)
+    async def initial_world_setup(loc, p_name):
+        try:
+            await background_canon_generation(user_id, excluded_name=p_name)
+            await populate_contextual_npcs(user_id, loc, "Start of the game. Normal daily routine.", excluded_name=p_name)
+        finally:
+            if chat_id in user_sessions:
+                user_sessions[chat_id]['state'] = "GAME_ACTIVE"
+
+    task = asyncio.create_task(initial_world_setup(start_loc, char_name))
+
+    def _on_world_setup_done(t):
+        if t.exception():
+            print(f"[WORLD SETUP FAILED] {t.exception()}")
+            if chat_id in user_sessions:
+                user_sessions[chat_id]['state'] = "GAME_ACTIVE"
+
+    task.add_done_callback(_on_world_setup_done)
+
+    stats_msg = f"✅ *Персонажа створено!*\n👤 **{hero_name}**\n📍 Локація: _{start_loc}_"
+    await bot.send_message(chat_id, stats_msg, parse_mode='Markdown')
+
+    # Intro: cache hit → instant; cache miss → fallback + background LLM
+    cached_intro_text = get_cached_intro(profile_class, profile_heritage, profile_region)
+
+    if cached_intro_text:
+        await send_safe_message(bot, chat_id, cached_intro_text, reply_markup=get_main_menu(), parse_mode=None)
+        user_sessions.setdefault(chat_id, {})["action_intents"] = {}
+        user_sessions[chat_id]['history'].append({"role": "GM", "content": cached_intro_text})
+    else:
+        fallback_text = build_fallback_intro(full_profile)
+        placeholder_msg = await bot.send_message(
+            chat_id,
+            fallback_text + "\n\n_Готую персоналізований вступ..._",
+            reply_markup=get_main_menu(),
+            parse_mode='Markdown',
+        )
+        user_sessions.setdefault(chat_id, {})["action_intents"] = {}
+        user_sessions[chat_id]['history'].append({"role": "GM", "content": fallback_text})
+
+        async def _bg_intro_task():
+            try:
+                intro_data = await get_narrative_intro(full_profile)
+                narrative = intro_data.get("narrative_text", "")
+                action_prompt = intro_data.get("action_prompt", "")
+                raw_suggested = intro_data.get("suggested_actions", [])
+
+                button_texts = []
+                intents_map = {}
+                for item in raw_suggested:
+                    if isinstance(item, dict):
+                        btn = str(item.get("button", "...")).strip()[:40]
+                        intent = str(item.get("intent", btn)).strip()
+                    else:
+                        btn = str(item).strip()[:40]
+                        intent = btn
+                    button_texts.append(btn)
+                    intents_map[btn] = intent
+
+                display_text = narrative
+                if action_prompt:
+                    display_text += f"\n\n_{action_prompt}_"
+
+                if display_text:
+                    await set_cached_intro(profile_class, profile_heritage, profile_region, display_text)
+                    markup = get_dynamic_menu(button_texts) if button_texts else get_main_menu()
+                    try:
+                        await placeholder_msg.delete()
+                    except Exception:
+                        pass
+                    try:
+                        await bot.send_message(chat_id, display_text, reply_markup=markup, parse_mode=None)
+                        if chat_id in user_sessions:
+                            user_sessions[chat_id]["action_intents"] = intents_map
+                            if user_sessions[chat_id].get('history'):
+                                user_sessions[chat_id]['history'][-1] = {"role": "GM", "content": display_text}
+                    except Exception as e_send:
+                        print(f"[bg intro] send_message failed: {e_send}")
+            except Exception as e:
+                print(f"[bg intro] Failed (using fallback): {e}")
+                try:
+                    await placeholder_msg.delete()
+                except Exception:
+                    pass
+                try:
+                    await bot.send_message(chat_id, fallback_text, reply_markup=get_main_menu(), parse_mode=None)
+                except Exception:
+                    pass
+
+        asyncio.create_task(_bg_intro_task())
+
+    await bot.send_message(chat_id, "⚔️ Ваш шлях починається...")
+
+
+# ---------------------------------------------------------------------------
+# Point-buy / ability-preview callback handlers
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data == "noop")
+async def callback_noop(call: CallbackQuery):
+    """Non-interactive label button — silently acknowledge."""
+    await call.answer()
+
+
+@router.callback_query(F.data == "ability_accept")
+async def callback_ability_accept(call: CallbackQuery, bot: Bot):
+    """Player accepts the auto-rolled stats.  Apply heritage bonuses and save."""
+    chat_id = call.message.chat.id
+    session = user_sessions.get(chat_id, {})
+
+    if session.get('state') != "WAITING_ABILITY_PREVIEW":
+        await call.answer("Ця кнопка більше не активна.")
+        return
+
+    try:
+        from core.dnd_heritages import apply_heritage_bonuses
+        from core.dnd_engine import recompute_ac
+
+        profile = session.get('temp_profile')
+        if not profile:
+            await call.answer("❌ Профіль не знайдено. Почніть /start заново.")
+            return
+
+        heritage_name = profile.get("heritage", "")
+        # Apply heritage bonuses to the base profile
+        profile = apply_heritage_bonuses(profile, heritage_name, ability_choices=None)
+        recompute_ac(profile)
+
+        # Remove the preview inline keyboard
+        try:
+            await call.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+        await call.answer("Характеристики прийнято!")
+        await _finalise_character_and_start(bot, chat_id, profile)
+    finally:
+        # Ensure temp keys are cleaned even on exception (also cleaned inside
+        # _finalise_character_and_start on success, but we guard against crash).
+        if chat_id in user_sessions:
+            user_sessions[chat_id].pop('temp_profile', None)
+            user_sessions[chat_id].pop('auto_roll_profile', None)
+            # If the state transition to INITIALIZING/GAME_ACTIVE never happened
+            # (e.g. Sheets save failed), release the stuck preview state so the
+            # player is not locked out until /start.
+            stuck_state = user_sessions[chat_id].get('state')
+            if stuck_state in ("WAITING_ABILITY_PREVIEW", "WAITING_ABILITY_REDISTRIBUTION"):
+                user_sessions[chat_id].pop('state', None)
+                await bot.send_message(
+                    chat_id,
+                    "⚠️ Виникла помилка під час збереження персонажа. Спробуйте /start ще раз.",
+                )
+
+
+@router.callback_query(F.data == "ability_redistribute")
+async def callback_ability_redistribute(call: CallbackQuery):
+    """Player chose to redistribute via point-buy.  Reset to all-8 and show editor."""
+    chat_id = call.message.chat.id
+    session = user_sessions.get(chat_id, {})
+
+    if session.get('state') != "WAITING_ABILITY_PREVIEW":
+        await call.answer("Ця кнопка більше не активна.")
+        return
+
+    try:
+        from core.character_creation import point_buy_initial, point_buy_remaining, POINT_BUY_BUDGET
+
+        profile = session.get('temp_profile')
+        if not profile:
+            await call.answer("❌ Профіль не знайдено. Почніть /start заново.")
+            return
+
+        # Reset ability scores to point-buy floor
+        profile['ability_scores'] = point_buy_initial()
+        user_sessions[chat_id]['temp_profile'] = profile
+        user_sessions[chat_id]['state'] = "WAITING_ABILITY_REDISTRIBUTION"
+
+        scores = profile['ability_scores']
+        remaining = point_buy_remaining(scores)
+        kb = build_point_buy_keyboard(scores, remaining)
+
+        heritage_name = profile.get("heritage", "")
+        editor_header = (
+            f"✏️ *Розподіл очок*\n"
+            f"Походження: {heritage_name} (бонуси буде додано після підтвердження)\n\n"
+            f"Розподіліть {POINT_BUY_BUDGET} очок між характеристиками:"
+        )
+
+        await call.message.edit_text(editor_header, parse_mode='Markdown', reply_markup=kb)
+        await call.answer()
+    except Exception as e:
+        logger.error(f"[PB REDISTRIBUTE] {type(e).__name__}: {e}")
+        await call.answer("Помилка. Спробуйте ще раз.")
+
+
+@router.callback_query(F.data.startswith("pb_inc_"))
+async def callback_pb_inc(call: CallbackQuery):
+    """Increment an ability score by 1 (point-buy)."""
+    chat_id = call.message.chat.id
+    session = user_sessions.get(chat_id, {})
+
+    if session.get('state') != "WAITING_ABILITY_REDISTRIBUTION":
+        await call.answer()
+        return
+
+    ability = call.data[len("pb_inc_"):]  # e.g. "STR"
+
+    try:
+        from core.character_creation import point_buy_can_increment, point_buy_remaining
+
+        profile = session.get('temp_profile')
+        if not profile:
+            await call.answer()
+            return
+
+        scores = profile['ability_scores']
+        if not point_buy_can_increment(scores, ability):
+            await call.answer()
+            return
+
+        scores[ability] += 1
+        profile['ability_scores'] = scores
+        user_sessions[chat_id]['temp_profile'] = profile
+
+        remaining = point_buy_remaining(scores)
+        kb = build_point_buy_keyboard(scores, remaining)
+        try:
+            await call.message.edit_reply_markup(reply_markup=kb)
+        except Exception:
+            pass
+        await call.answer()
+    except Exception as e:
+        logger.error(f"[PB INC] {ability}: {type(e).__name__}: {e}")
+        await call.answer()
+
+
+@router.callback_query(F.data.startswith("pb_dec_"))
+async def callback_pb_dec(call: CallbackQuery):
+    """Decrement an ability score by 1 (point-buy)."""
+    chat_id = call.message.chat.id
+    session = user_sessions.get(chat_id, {})
+
+    if session.get('state') != "WAITING_ABILITY_REDISTRIBUTION":
+        await call.answer()
+        return
+
+    ability = call.data[len("pb_dec_"):]  # e.g. "STR"
+
+    try:
+        from core.character_creation import point_buy_can_decrement, point_buy_remaining
+
+        profile = session.get('temp_profile')
+        if not profile:
+            await call.answer()
+            return
+
+        scores = profile['ability_scores']
+        if not point_buy_can_decrement(scores, ability):
+            await call.answer()
+            return
+
+        scores[ability] -= 1
+        profile['ability_scores'] = scores
+        user_sessions[chat_id]['temp_profile'] = profile
+
+        remaining = point_buy_remaining(scores)
+        kb = build_point_buy_keyboard(scores, remaining)
+        try:
+            await call.message.edit_reply_markup(reply_markup=kb)
+        except Exception:
+            pass
+        await call.answer()
+    except Exception as e:
+        logger.error(f"[PB DEC] {ability}: {type(e).__name__}: {e}")
+        await call.answer()
+
+
+@router.callback_query(F.data == "pb_confirm")
+async def callback_pb_confirm(call: CallbackQuery, bot: Bot):
+    """Confirm point-buy allocation: apply heritage, recompute AC, save, start game."""
+    chat_id = call.message.chat.id
+    session = user_sessions.get(chat_id, {})
+
+    if session.get('state') != "WAITING_ABILITY_REDISTRIBUTION":
+        await call.answer("Ця кнопка більше не активна.")
+        return
+
+    try:
+        from core.character_creation import point_buy_remaining
+        from core.dnd_heritages import apply_heritage_bonuses
+        from core.dnd_engine import recompute_ac
+
+        profile = session.get('temp_profile')
+        if not profile:
+            await call.answer("❌ Профіль не знайдено. Почніть /start заново.")
+            return
+
+        scores = profile['ability_scores']
+        remaining = point_buy_remaining(scores)
+
+        # Defensive check: keyboard already gates this, but verify in handler too
+        if remaining != 0:
+            await call.answer(f"Спочатку розподіліть усі очки. Залишок: {remaining}")
+            return
+
+        heritage_name = profile.get("heritage", "")
+        profile = apply_heritage_bonuses(profile, heritage_name, ability_choices=None)
+        recompute_ac(profile)
+
+        try:
+            await call.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+        await call.answer("Характеристики збережено!")
+        await _finalise_character_and_start(bot, chat_id, profile)
+    finally:
+        if chat_id in user_sessions:
+            user_sessions[chat_id].pop('temp_profile', None)
+            user_sessions[chat_id].pop('auto_roll_profile', None)
+            # If the state transition to INITIALIZING/GAME_ACTIVE never happened
+            # (e.g. Sheets save failed), release the stuck redistribution state so
+            # the player is not locked out until /start.
+            stuck_state = user_sessions[chat_id].get('state')
+            if stuck_state in ("WAITING_ABILITY_PREVIEW", "WAITING_ABILITY_REDISTRIBUTION"):
+                user_sessions[chat_id].pop('state', None)
+                await bot.send_message(
+                    chat_id,
+                    "⚠️ Виникла помилка під час збереження персонажа. Спробуйте /start ще раз.",
+                )
+
+
+@router.callback_query(F.data == "pb_reset")
+async def callback_pb_reset(call: CallbackQuery):
+    """Reset point-buy scores back to all-8."""
+    chat_id = call.message.chat.id
+    session = user_sessions.get(chat_id, {})
+
+    if session.get('state') != "WAITING_ABILITY_REDISTRIBUTION":
+        await call.answer()
+        return
+
+    try:
+        from core.character_creation import point_buy_initial, point_buy_remaining
+
+        profile = session.get('temp_profile')
+        if not profile:
+            await call.answer()
+            return
+
+        profile['ability_scores'] = point_buy_initial()
+        user_sessions[chat_id]['temp_profile'] = profile
+
+        scores = profile['ability_scores']
+        remaining = point_buy_remaining(scores)
+        kb = build_point_buy_keyboard(scores, remaining)
+        try:
+            await call.message.edit_reply_markup(reply_markup=kb)
+        except Exception:
+            pass
+        await call.answer("Скинуто до початкових значень.")
+    except Exception as e:
+        logger.error(f"[PB RESET] {type(e).__name__}: {e}")
+        await call.answer()
+
+
+@router.callback_query(F.data == "pb_cancel")
+async def callback_pb_cancel(call: CallbackQuery):
+    """Cancel point-buy and return to the auto-roll preview."""
+    chat_id = call.message.chat.id
+    session = user_sessions.get(chat_id, {})
+
+    if session.get('state') != "WAITING_ABILITY_REDISTRIBUTION":
+        await call.answer()
+        return
+
+    try:
+        auto_roll = session.get('auto_roll_profile')
+        if not auto_roll:
+            await call.answer()
+            return
+
+        # Restore temp_profile to the original auto-rolled base scores.
+        # Deep-copy so that a subsequent "Перерозподілити" cannot mutate auto_roll_profile.
+        user_sessions[chat_id]['temp_profile'] = copy.deepcopy(auto_roll)
+        user_sessions[chat_id]['state'] = "WAITING_ABILITY_PREVIEW"
+
+        preview_text = _build_ability_preview_text(auto_roll)
+        await call.message.edit_text(
+            preview_text,
+            parse_mode='Markdown',
+            reply_markup=build_ability_preview_keyboard(),
+        )
+        await call.answer()
+    except Exception as e:
+        logger.error(f"[PB CANCEL] {type(e).__name__}: {e}")
+        await call.answer()
 
 
 _SKILL_EMOJI: dict[str, str] = {
