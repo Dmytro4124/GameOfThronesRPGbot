@@ -123,12 +123,95 @@ def build_summarize_turn_prompt(story_text: str) -> str:
     """
 
 
-def build_summarize_full_turn_prompt(user_input: str, story_text: str) -> str:
+def build_summarize_full_turn_prompt(
+    user_input: str,
+    story_text: str,
+    mechanical_updates: dict | None = None,
+) -> str:
+    """Summarise one RPG turn into a single ≤20-word sentence.
+
+    When ``mechanical_updates`` is provided the prompt gains an authoritative
+    ``<mechanical_changes>`` block and a truthfulness rule that prevents the
+    model from claiming changes that never happened mechanically (e.g. fake
+    ASI narration).  When ``None`` the prompt is identical to the legacy
+    version — backward-compatible for callers that do not pass the kwarg yet.
+    """
+    # Build optional mechanical_changes block ----------------------------
+    mechanical_block = ""
+    truthfulness_rule = ""
+    if mechanical_updates is not None:
+        lines: list[str] = []
+
+        xp = mechanical_updates.get("xp_award")
+        if xp and xp != 0:
+            lines.append(f"  • XP: +{xp}")
+
+        asi = mechanical_updates.get("asi_choices")
+        if asi:
+            lines.append(f"  • Ability scores: {asi}")
+        else:
+            lines.append("  • Ability scores: БЕЗ ЗМІН")
+
+        hp_dmg = mechanical_updates.get("hp_damage_dice")
+        hp_heal = mechanical_updates.get("hp_heal_dice")
+        if hp_dmg and hp_dmg != "none":
+            lines.append(f"  • HP: -{hp_dmg} (шкода)")
+        elif hp_heal and hp_heal != "none":
+            lines.append(f"  • HP: +{hp_heal} (лікування)")
+        else:
+            lines.append("  • HP: БЕЗ ЗМІН")
+
+        inv_new = mechanical_updates.get("inventory_new") or []
+        inv_lost = mechanical_updates.get("inventory_lost") or []
+        if inv_new or inv_lost:
+            lines.append(f"  • Inventory: новий={inv_new}, втрачено={inv_lost}")
+
+        cond_apply = mechanical_updates.get("condition_apply") or []
+        cond_remove = mechanical_updates.get("condition_remove") or []
+        if cond_apply or cond_remove:
+            lines.append(f"  • Conditions: застосовано={cond_apply}, знято={cond_remove}")
+
+        gold = mechanical_updates.get("gold_impact")
+        if gold and gold != "none":
+            lines.append(f"  • Gold: {gold}")
+
+        rep_delta = mechanical_updates.get("reputation_delta")
+        rep_target = mechanical_updates.get("reputation_target_npc") or "—"
+        if rep_delta and rep_delta != 0:
+            lines.append(f"  • Reputation: {rep_delta:+d} ({rep_target})")
+
+        loc = mechanical_updates.get("location_impact")
+        scene = mechanical_updates.get("scene_impact")
+        if (loc and loc != "none") or (scene and scene != "none"):
+            lines.append(
+                f"  • Локація/Сцена: {loc or 'БЕЗ ЗМІН'} / {scene or 'БЕЗ ЗМІН'}"
+            )
+
+        if lines:
+            mechanical_block = (
+                "\n<mechanical_changes>\n"
+                "АВТОРИТЕТНИЙ СПИСОК ЗМІН ЦЬОГО ХОДУ (грунтуй резюме ВИКЛЮЧНО на цьому):\n"
+                + "\n".join(lines)
+                + "\n</mechanical_changes>\n"
+            )
+
+        truthfulness_rule = """
+ПРАВИЛО ПРАВДИВОСТІ (КРИТИЧНО):
+Резюме МАЄ відображати ЛИШЕ ті зміни, що зазначені в <mechanical_changes>.
+ЗАБОРОНЕНО писати «зросло», «отримав», «вдалося», «успішно», «навчився», «опанував»
+ЯКЩО відповідної механічної зміни немає у блоці.
+Якщо нічого не змінилось — формулюй наративно («гравець сказав», «гравець спробував»,
+«гравець попросив»), без претензії на результат.
+Приклад: дія «Я використовую ASI», БЕЗ змін у <mechanical_changes> →
+  ❌ "Гравець використав ASI → характеристики зросли"
+  ✅ "Гравець спробував задекларувати ASI → бот пояснив, що це авто-механіка"
+"""
+
     return f"""Стисни цей RPG хід в ОДНЕ коротке речення (максимум 20 слів, українською).
     Формат: "[ХТО] [ДІЯ] → [РЕЗУЛЬТАТ]". Збережи імена персонажів, локації та ключові наслідки.
     Дія гравця: "{user_input}"
     Результат GM: "{story_text}"
-    Приклади:
+    {mechanical_block}{truthfulness_rule}Приклади:
     - "Візеріс переконав стражника пропустити його → пройшов у замок."
     - "Арія напала на бандита, але провалилась → поранена, втратила меч."
     - "Гравець тренував Дипломатію з майстром → навичка +2, витрачено 3 дні."
@@ -620,7 +703,35 @@ def build_normal_resolve_prompt(
                 features_lines.append(f"  • {trait.name} — {t_desc}")
         features_block = "\n<class_features>\nActive class/heritage features:\n" + "\n".join(features_lines) + "\n</class_features>"
         gate0_block = """
-[GATE 0 — CLASS FEATURES?]
+[GATE 0-META — META-MECHANIC CHECK (виконується ПЕРШИМ, до будь-яких інших gate)]
+Перевір: чи дія гравця є META-МЕХАНІЧНИМ запитом (підвищення рівня, ASI, зміна характеристик,
+respec, редагування аркуша персонажа) замість дії у світі?
+
+Маркери в тексті дії:
+  • "ASI", "Ability Score Improvement", "покращення характеристик", "підняти характеристики"
+  • "застосовую рівень", "level up", "розподіл скілів"
+  • Самоспрямований механічний бафф без обґрунтування в ігровому світі
+    (наприклад «я використовую навичку Ability Score Improvement»,
+     «застосовую бонус рівня», «підвищую STR через рівень»).
+
+ЯКЩО META-MECHANIC виявлено:
+  → ability_used = "None"
+  → skill_used = "None"
+  → difficulty = 2
+  → combat_imminent = false
+  → reputation_delta_success = 0, reputation_delta_failure = 0
+  → updates.minutes_passed = 0, усі updates.* = "none"/[]/порожні
+  → verdict_text = "ASI/level-up застосовується автоматично при підвищенні рівня через UI з кнопками — це не дія в світі. Ваш персонаж не зростає від декларації."
+  → skill_check_reasoning МАЄ містити: "META-MECHANIC detected — Worker rejects free-text invocation of level-up rewards"
+  → СТОП — не запускай інші gate. Виводь JSON негайно.
+
+Це правило запобігає фейковому AUTO_SUCCESS narration коли гравець намагається задекларувати
+level-up механіки через текст (handler перехоплює активний asi_pending=True стан;
+це Worker-правило покриває випадок коли pending вже False але гравець все одно пробує).
+
+ЯКЩО META-MECHANIC НЕ виявлено → переходь до GATE 0-CLASS нижче.
+
+[GATE 0-CLASS — CLASS FEATURES?]
 Scan <class_features> block above. For each feature ask:
   A) Is this a PASSIVE feature with a condition (e.g. "Advantage on CHA vs lower-status targets")?
      → Check if the action + target NPC meet that condition RIGHT NOW.
@@ -649,7 +760,36 @@ IMPORTANT: Never fabricate features not listed above.
 """
     else:
         features_block = ""
-        gate0_block = ""
+        gate0_block = """
+[GATE 0-META — META-MECHANIC CHECK (виконується ПЕРШИМ, до будь-яких інших gate)]
+Перевір: чи дія гравця є META-МЕХАНІЧНИМ запитом (підвищення рівня, ASI, зміна характеристик,
+respec, редагування аркуша персонажа) замість дії у світі?
+
+Маркери в тексті дії:
+  • "ASI", "Ability Score Improvement", "покращення характеристик", "підняти характеристики"
+  • "застосовую рівень", "level up", "розподіл скілів"
+  • Самоспрямований механічний бафф без обґрунтування в ігровому світі
+    (наприклад «я використовую навичку Ability Score Improvement»,
+     «застосовую бонус рівня», «підвищую STR через рівень»).
+
+ЯКЩО META-MECHANIC виявлено:
+  → ability_used = "None"
+  → skill_used = "None"
+  → difficulty = 2
+  → combat_imminent = false
+  → reputation_delta_success = 0, reputation_delta_failure = 0
+  → updates.minutes_passed = 0, усі updates.* = "none"/[]/порожні
+  → verdict_text = "ASI/level-up застосовується автоматично при підвищенні рівня через UI з кнопками — це не дія в світі. Ваш персонаж не зростає від декларації."
+  → skill_check_reasoning МАЄ містити: "META-MECHANIC detected — Worker rejects free-text invocation of level-up rewards"
+  → СТОП — не запускай інші gate. Виводь JSON негайно.
+
+Це правило запобігає фейковому AUTO_SUCCESS narration коли гравець намагається задекларувати
+level-up механіки через текст (handler перехоплює активний asi_pending=True стан;
+це Worker-правило покриває випадок коли pending вже False але гравець все одно пробує).
+
+ЯКЩО META-MECHANIC НЕ виявлено → переходь до GATE 1 нижче.
+
+"""
 
     return f"""<system>
 You are the System Engine (Worker) for a Grimdark RPG set in Westeros/Essos (298 AC).
@@ -877,6 +1017,11 @@ Does the player's action describe resting or sleeping?
 ❌ player_action="Я атакую слугу рапірою" → combat_imminent=false, hp_damage_dice="1d8"
   (WRONG: combat not started, damage applied to player instead of NPC — game-breaking)
   → ✅ combat_imminent=true, hp_damage_dice="none"
+❌ player_action="Я використовую навичку Ability Score Improvement" → AUTO_SUCCESS verdict
+  «Гравець застосовує покращення характеристик» (фейковий success — стати не змінюються)
+  → ✅ GATE 0-META: META-MECHANIC detected.
+     verdict_text="ASI/level-up застосовується автоматично при підвищенні рівня через UI — не дія в світі"
+     difficulty=2, ability_used="None", skill_used="None", усі updates порожні.
 </antiexamples>
 
 <few_shot_examples>

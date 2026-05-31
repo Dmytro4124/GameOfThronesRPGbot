@@ -30,7 +30,12 @@ from core.prompts import (
     GAME_ERA_CONTEXT, build_summarize_turn_prompt, build_summarize_full_turn_prompt,
     build_narrator_prompt, build_gm_logic_prompt, build_history_summary_prompt,
 )
-from core.world_constants import VALID_LOCATIONS_ORDERED, VALID_REGIONS_ORDERED, TRAVEL_LOCATION, get_region_for_location, get_locations_for_region, LOCATION_DESCRIPTIONS, format_scenes_for_prompt
+from core.world_constants import (
+    VALID_LOCATIONS_ORDERED, VALID_REGIONS_ORDERED, TRAVEL_LOCATION,
+    get_region_for_location, get_locations_for_region, LOCATION_DESCRIPTIONS,
+    format_scenes_for_prompt,
+    REGION_CLIMATE_MAP, EVENT_PLAUSIBILITY,
+)
 from core.inventory import parse_inventory as _parse_inventory, format_inventory as _fmt_inventory
 from database.operations import get_canon_npc_statblock
 
@@ -307,9 +312,13 @@ async def summarize_turn(gm_response):
         return "Гравець діє."
 
 
-async def summarize_full_turn(user_input, gm_response):
+async def summarize_full_turn(
+    user_input: str,
+    gm_response: str,
+    mechanical_updates: dict | None = None,
+) -> str:
     """Об'єднана сумаризація: дія гравця + результат GM → одне речення."""
-    prompt = build_summarize_full_turn_prompt(user_input, gm_response)
+    prompt = build_summarize_full_turn_prompt(user_input, gm_response, mechanical_updates=mechanical_updates)
     try:
         def _sync_gen():
             return model_worker.generate_content(prompt)
@@ -858,6 +867,11 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
     logs.extend(impact_logs)
     impact_narrative_hints = _build_impact_hints(impact_logs)
 
+    # Cache asi_pending in session so _check_and_trigger_asi can skip Sheets
+    # reads on the 99% of turns where no level-up with ASI occurred.  The flag
+    # is written even when False so the handler always has a fresh value.
+    user_sessions.setdefault(chat_id, {})['asi_pending'] = bool(profile.get("asi_pending", False))
+
     # FSM transition: combat_imminent=True → initiate COMBAT mode for next turn
     # Trigger-guard: skip if a CombatState already exists in the registry — a lingering
     # in-memory state must not cause a second init (which would re-roll initiative and
@@ -1012,7 +1026,15 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
 
     event_injection = ""
     if current_day in world_events:
-        event_injection = f"\n[SYSTEM INTERRUPT: СЬОГОДНІ ВАЖЛИВА ПОДІЯ: {world_events[current_day]}. Ти ПОВИНЕН органічно вплести цю подію в поточну сцену.]\n"
+        region_climate = REGION_CLIMATE_MAP.get(curr_region, "temperate")
+        plausible_climates = EVENT_PLAUSIBILITY.get(current_day, ["*"])
+        if "*" in plausible_climates or region_climate in plausible_climates:
+            event_injection = f"\n[SYSTEM INTERRUPT: СЬОГОДНІ ВАЖЛИВА ПОДІЯ: {world_events[current_day]}. Ти ПОВИНЕН органічно вплести цю подію в поточну сцену.]\n"
+        else:
+            logger.info(
+                "[FSM] event day=%d skipped: region=%r climate=%s not in plausible=%s",
+                current_day, curr_region, region_climate, plausible_climates,
+            )
 
     # Якісна мітка напруги сцени (без технічного терміну)
     _tension_raw = profile.get("Годинники", {}).get("Scene_Tension", "0/4")
@@ -1728,7 +1750,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
 
                 # Один AI-виклик замість двох: об'єднана сумаризація input + story
                 clean_story = story_arg.split("📊")[0][:800]
-                turn_summary = await summarize_full_turn(input_arg, clean_story)
+                turn_summary = await summarize_full_turn(input_arg, clean_story, mechanical_updates=mech_updates_arg)
 
                 if chat_id_arg in user_sessions:
                     hist = user_sessions[chat_id_arg].get('history', [])

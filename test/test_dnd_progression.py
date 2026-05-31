@@ -453,7 +453,11 @@ def test_apply_pending_levelups_unknown_class_fallback():
 
 
 def test_apply_pending_levelups_asi_at_l4():
-    """L3 → L4 triggers ASI auto-distribution for Courtier (primary: CHA, INT)."""
+    """L3 → L4: ASI must NOT be auto-distributed (4-fix package change).
+
+    New invariant (2026-05): apply_pending_levelups leaves asi_pending=True
+    and does NOT mutate ability_scores. The player confirms via UI.
+    """
     profile = _dnd_profile_with_hp(level=4, hp_max=22, class_name="Courtier")
     cha_before = profile["ability_scores"]["CHA"]  # 16
     int_before = profile["ability_scores"]["INT"]  # 14
@@ -461,13 +465,25 @@ def test_apply_pending_levelups_asi_at_l4():
     logs = apply_pending_levelups(profile, level_before=3, levels_gained=1, class_name="Courtier")
 
     assert profile["level"] == 4
-    # ASI should have been distributed — at least one primary ability increased
+
+    # NEW INVARIANT: ability_scores must NOT have changed (no auto-ASI)
     cha_after = profile["ability_scores"]["CHA"]
     int_after = profile["ability_scores"]["INT"]
-    assert cha_after + int_after > cha_before + int_before, (
-        f"ASI should have increased CHA or INT. Before: CHA={cha_before}, INT={int_before}. "
-        f"After: CHA={cha_after}, INT={int_after}"
+    assert cha_after == cha_before, (
+        f"CHA must NOT change at L4 (ASI is now player-confirmed). "
+        f"Before: {cha_before}, After: {cha_after}"
     )
+    assert int_after == int_before, (
+        f"INT must NOT change at L4 (ASI is now player-confirmed). "
+        f"Before: {int_before}, After: {int_after}"
+    )
+
+    # NEW INVARIANT: asi_pending must be True (waiting for UI confirmation)
+    assert profile["asi_pending"] is True, (
+        "asi_pending must be True after L4 level-up — player must confirm via UI"
+    )
+
+    # Log must mention pending ASI
     assert any("Ability Score Improvement" in log for log in logs)
 
 

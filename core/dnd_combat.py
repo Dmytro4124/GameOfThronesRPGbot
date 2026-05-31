@@ -233,6 +233,202 @@ def _guess_npc_tier(npc: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# C2 / C3: Proficiency helpers
+# ---------------------------------------------------------------------------
+
+# Weapon category map: Ukrainian and English weapon names → "simple" or "martial".
+# Used by is_proficient_with_weapon for substring lookup. First match wins.
+# Keys are lowercase; lookup uses str.lower() on the weapon name.
+_WEAPON_CATEGORIES: dict[str, str] = {
+    # simple weapons
+    "дубинка": "simple",
+    "club": "simple",
+    "спис": "simple",
+    "spear": "simple",
+    "палиця": "simple",
+    "staff": "simple",
+    "кинджал": "simple",
+    "dagger": "simple",
+    "праща": "simple",
+    "sling": "simple",
+    "булава": "simple",
+    "mace": "simple",
+    "ціп": "simple",
+    "flail": "simple",
+    # martial weapons
+    "довгий меч": "martial",
+    "longsword": "martial",
+    "бойова сокира": "martial",
+    "battleaxe": "martial",
+    "велика сокира": "martial",
+    "greataxe": "martial",
+    "великий меч": "martial",
+    "greatsword": "martial",
+    "бойовий молот": "martial",
+    "warhammer": "martial",
+    "рапіра": "martial",
+    "rapier": "martial",
+    "арбалет": "martial",
+    "crossbow": "martial",
+    "лук": "martial",
+    "bow": "martial",
+    "короткий меч": "martial",
+    "shortsword": "martial",
+    "шабля": "martial",
+    "scimitar": "martial",
+}
+
+# Ukrainian weapon name → canonical English stem.  Lets weapons that arrive
+# with Ukrainian names (e.g. "Довгий меч") match class-specific English
+# proficiency entries (e.g. "longswords") for Spy/Courtier.
+_UA_TO_EN_STEMS: dict[str, str] = {
+    "рапіра":       "rapier",
+    "довгий меч":   "longsword",
+    "короткий меч": "shortsword",
+    "кинджал":      "dagger",
+    "арбалет":      "crossbow",
+    "лук":          "bow",
+    "булава":       "mace",
+    "спис":         "spear",
+    "шабля":        "scimitar",
+}
+
+
+def is_proficient_with_weapon(class_name: str, weapon_name: str) -> bool:
+    """Return True if the given class is proficient with the given weapon.
+
+    Logic:
+    - Read weapon_profs from GOT_CLASSES[class_name].
+    - If profs contains "martial" → proficient with all weapons (True).
+    - If profs contains "simple" but not "martial" → proficient only with
+      simple weapons (look up category via _WEAPON_CATEGORIES substring match).
+    - Profs may also contain specific weapon names (e.g. "rapiers", "longswords")
+      for classes like Spy and Courtier — check those too.
+    - Unknown class or unknown weapon → True (fail-safe; never penalize missing data).
+
+    Args:
+        class_name: character's class name (e.g. "Knight").
+        weapon_name: weapon identifier string (e.g. "Довгий меч", "longsword").
+
+    Returns:
+        bool — True if proficient or data insufficient to determine; False only
+        when we have positive evidence of non-proficiency.
+    """
+    from core.dnd_classes import GOT_CLASSES
+
+    if not class_name or not weapon_name:
+        return True  # fail-safe
+
+    cls = GOT_CLASSES.get(class_name)
+    if cls is None:
+        return True  # unknown class → assume proficient
+
+    weapon_profs: list[str] = cls.weapon_profs  # e.g. ["simple", "martial"]
+    name_lower = weapon_name.lower().strip()
+
+    # Unarmed strike — always proficient
+    if not name_lower or "unarmed" in name_lower or "безозброй" in name_lower:
+        return True
+
+    # "martial" in profs → proficient with everything
+    if "martial" in weapon_profs:
+        return True
+
+    # Check specific weapon names listed in profs (e.g. "rapiers", "longswords",
+    # "hand crossbows").  Match bidirectionally; also try stripping trailing 's'
+    # (English plurals like "rapiers" → "rapier") to handle Ukrainian weapon names
+    # like "рапіра" that won't contain the English plural as a substring.
+    # Additionally check _WEAPON_CATEGORIES: if the weapon maps to a category key
+    # that shares a stem with a specific prof entry, treat as proficient.
+    for specific in weapon_profs:
+        if specific in ("simple", "martial"):
+            continue  # handled separately
+        spec_lower = specific.lower()
+        spec_stem = spec_lower.rstrip("s")  # strip English plural suffix
+        if spec_lower in name_lower or name_lower in spec_lower:
+            return True
+        if spec_stem and (spec_stem in name_lower or name_lower in spec_stem):
+            return True
+    # Cross-check: map Ukrainian weapon names → canonical English stems so they
+    # can be matched against English-named specific proficiency entries like
+    # "rapiers", "longswords", "shortswords", "hand crossbows".
+    en_stem: str | None = None
+    for ua_key, en_val in _UA_TO_EN_STEMS.items():
+        if ua_key in name_lower:
+            en_stem = en_val
+            break
+    if en_stem is not None:
+        for specific in weapon_profs:
+            if specific in ("simple", "martial"):
+                continue
+            spec_lower = specific.lower().rstrip("s")
+            if en_stem == spec_lower or en_stem in spec_lower or spec_lower in en_stem:
+                return True
+
+    # Determine weapon category from _WEAPON_CATEGORIES (substring match)
+    weapon_cat: str | None = None
+    for key, cat in _WEAPON_CATEGORIES.items():
+        if key in name_lower:
+            weapon_cat = cat
+            break
+
+    if weapon_cat is None:
+        # Unknown weapon → fail-safe: assume proficient
+        return True
+
+    # "simple" in profs and weapon is simple → proficient
+    if "simple" in weapon_profs and weapon_cat == "simple":
+        return True
+
+    # "simple" in profs but weapon is martial → NOT proficient
+    return False
+
+
+def is_proficient_with_armor(class_name: str, armor_type: str) -> bool:
+    """Return True if the given class is proficient with armor of the given type.
+
+    armor_type: "light", "medium", or "heavy" (from equipped_armor["type"]).
+    "shields" is treated as a separate proficiency (ignored here — we only check
+    armor for the attack-roll disadvantage rule; shield doesn't cause disadvantage).
+
+    Logic:
+    - Read armor_profs from GOT_CLASSES[class_name].
+    - If profs is empty (e.g. Maester) → not proficient with any armor (False for
+      any non-empty armor_type).
+    - Unknown class or unknown/empty armor_type → True (fail-safe).
+
+    Returns:
+        bool — True if proficient or data insufficient; False only on positive
+        evidence of non-proficiency.
+    """
+    from core.dnd_classes import GOT_CLASSES
+
+    if not class_name or not armor_type:
+        return True  # fail-safe
+
+    cls = GOT_CLASSES.get(class_name)
+    if cls is None:
+        return True  # unknown class → assume proficient
+
+    armor_profs: list[str] = cls.armor_profs  # e.g. ["light", "medium", "heavy", "shields"]
+    armor_lower = armor_type.lower().strip()
+
+    if not armor_lower:
+        return True  # no armor equipped → irrelevant
+
+    # Heavy armor proficiency implies medium and light too (per D&D tiers)
+    if armor_lower == "light":
+        return "light" in armor_profs or "medium" in armor_profs or "heavy" in armor_profs
+    if armor_lower == "medium":
+        return "medium" in armor_profs or "heavy" in armor_profs
+    if armor_lower == "heavy":
+        return "heavy" in armor_profs
+
+    # Unknown type → fail-safe
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -360,15 +556,30 @@ def _roll_damage(
     die_size: int,
     modifier: int,
     critical: bool = False,
+    reroll_1_2: bool = False,
 ) -> int:
-    """Roll damage dice. Critical: roll dice twice (D&D 5e crit rule). Minimum 1."""
+    """Roll damage dice. Critical: roll dice twice (D&D 5e crit rule). Minimum 1.
+
+    reroll_1_2 (B2d Great Weapon Fighting): when True, any die showing 1 or 2
+    after the initial roll is rerolled ONCE and the new value is taken regardless
+    (even if lower — per PHB). Applies to all dice in the pool (doubled on crit too).
+    reroll_1_2 does NOT apply to the flat-damage fallback path (die_size == 0).
+    """
     if die_size == 0:
         # Flat damage (parse_damage_dice fallback path)
         total = max(1, num_dice + modifier)
         return total
 
     dice_count = num_dice * 2 if critical else num_dice
-    total = sum(random.randint(1, die_size) for _ in range(dice_count)) + modifier
+
+    rolls: list[int] = []
+    for _ in range(dice_count):
+        roll = random.randint(1, die_size)
+        if reroll_1_2 and roll <= 2:
+            roll = random.randint(1, die_size)  # reroll once; take new value per PHB
+        rolls.append(roll)
+
+    total = sum(rolls) + modifier
     return max(1, total)
 
 
@@ -531,33 +742,143 @@ def player_attack(
     final_adv = advantage or cond_info["advantage"]
     final_dis = disadvantage or cond_info["disadvantage"]
 
-    # Determine attack ability: use STR or DEX (finesse weapon detection)
-    equipment = player.get("equipment", {})
-    weapon_str = equipment.get("weapon_main", "Unarmed (1d4 bludgeoning)")
-    if weapon_name and weapon_name.lower() not in weapon_str.lower():
-        # Caller provided a specific weapon name not matching main — use as-is for parsing
-        weapon_str = weapon_name
+    # ---------------------------------------------------------------------------
+    # C3: Armor proficiency — non-proficient armor imposes disadvantage on attacks.
+    # D&D 5e PHB: wearing armor you're not proficient with gives disadvantage on
+    # STR/DEX-based attack rolls. Check BEFORE further advantage/disadvantage math.
+    # ---------------------------------------------------------------------------
+    _player_class = player.get("class", "")
+    _equipped_armor = player.get("equipped_armor") or {}
+    if _equipped_armor:
+        _armor_type = _equipped_armor.get("type", "")
+        if _armor_type and not is_proficient_with_armor(_player_class, _armor_type):
+            final_dis = True
 
-    # Finesse weapons: use better of STR/DEX.
-    # PRIMARY path: read structured equipped_weapon["properties"] (P5 fix).
-    # FALLBACK path: keyword detection for legacy profiles without equipped_weapon.
+    # ---------------------------------------------------------------------------
+    # C1: Dodge enforcement — if target NPC took the Dodge action this round,
+    # all attacks against them have disadvantage (PHB p.192).
+    # ---------------------------------------------------------------------------
+    if npc.get("_dodge_this_round", False):
+        final_dis = True
+
+    # ---------------------------------------------------------------------------
+    # A1: Weapon source — primary: equipped_weapon (structured dict); fallback
+    # chain: equipment["weapon_main"] → profile["Зброя"] → Unarmed.
+    # ---------------------------------------------------------------------------
     _equipped_weapon = player.get("equipped_weapon")
-    if _equipped_weapon and isinstance(_equipped_weapon, dict):
-        _is_finesse = "finesse" in _equipped_weapon.get("properties", [])
+    _use_structured = _equipped_weapon and isinstance(_equipped_weapon, dict)
+
+    if _use_structured:
+        # Primary path: structured dict from _build_deterministic_dnd_profile /
+        # generate_initial_stats (new profiles).
+        damage_dice = _equipped_weapon.get("damage_dice", "1d4")
+        dmg_type = str(_equipped_weapon.get("damage_type", "bludgeoning")).strip().lower()
+        properties: list = _equipped_weapon.get("properties", [])
+        # weapon_str is still needed for the log display name and for fallback to
+        # parse_damage_dice on the legacy branches below.  Compose a minimal string
+        # from the structured data so existing logging code stays unchanged.
+        weapon_str = (
+            f"{_equipped_weapon.get('name', 'Зброя')} "
+            f"({damage_dice} {dmg_type})"
+        )
+        num_dice, die_size, dmg_mod_str, _ = parse_damage_dice(f"{damage_dice} {dmg_type}")
+        # dmg_mod_str: modifier embedded in dice string (almost always 0 for named
+        # weapons; kept for correctness if someone stores "1d8+1 slashing").
+        dmg_mod = dmg_mod_str
     else:
-        # Legacy fallback: keyword detection (preserved for existing profiles)
+        # Fallback chain (legacy profiles): equipment["weapon_main"] → "Зброя" → Unarmed.
+        equipment = player.get("equipment", {})
+        weapon_str = (
+            equipment.get("weapon_main")
+            or player.get("Зброя")
+            or "Unarmed (1d4 bludgeoning)"
+        )
+        if weapon_name and weapon_name.lower() not in weapon_str.lower():
+            # Caller specified a weapon by name that doesn't match main — use as-is.
+            weapon_str = weapon_name
+        num_dice, die_size, dmg_mod, dmg_type = parse_damage_dice(weapon_str)
+        properties = []
+
+    # ---------------------------------------------------------------------------
+    # Finesse / ranged / thrown — determines attack_mod AND ability_dmg_mod (A2).
+    # For structured path: use equipped_weapon["properties"] directly.
+    # For legacy path: keyword detection (preserved from original code).
+    # ---------------------------------------------------------------------------
+    if _use_structured:
+        _is_finesse = "finesse" in properties
+        _is_ranged  = "ranged"  in properties
+        _is_thrown  = "thrown"  in properties
+    else:
         _finesse_keywords = ("dagger", "shortsword", "rapier", "кинджал", "рапіра", "короткий меч")
         _is_finesse = any(kw in weapon_str.lower() for kw in _finesse_keywords)
+        _is_ranged  = any(kw in weapon_str.lower() for kw in ("bow", "crossbow", "лук", "арбалет"))
+        _is_thrown  = False  # legacy strings don't encode thrown reliably
 
+    str_mod = _get_str_mod(player)
+    dex_mod = _get_dex_mod(player)
+
+    # attack_mod: which ability drives the to-hit roll.
     if _is_finesse:
-        str_mod = _get_str_mod(player)
-        dex_mod = _get_dex_mod(player)
         attack_mod = max(str_mod, dex_mod)
+    elif _is_ranged:
+        attack_mod = dex_mod
     else:
-        attack_mod = _get_str_mod(player)
+        attack_mod = str_mod
+
+    # ---------------------------------------------------------------------------
+    # A2: ability_dmg_mod — the ability modifier applied to damage rolls.
+    # D&D 5e PHB: melee → STR; finesse → max(STR, DEX); ranged → DEX;
+    # thrown (not finesse) → STR.
+    # ---------------------------------------------------------------------------
+    if _is_finesse:
+        ability_dmg_mod = max(str_mod, dex_mod)
+    elif _is_ranged:
+        ability_dmg_mod = dex_mod
+    else:
+        # melee or thrown (non-finesse)
+        ability_dmg_mod = str_mod
+
+    # ---------------------------------------------------------------------------
+    # B2c / B2d: Fighting Style bonuses applied after A2 ability_dmg_mod is set.
+    # Fail-safe: absent / None fighting_style → no bonus (backward compatible with
+    # profiles created before this feature, and with non-martial classes).
+    # ---------------------------------------------------------------------------
+    _fighting_style: str | None = player.get("fighting_style")
+    _reroll_1_2: bool = False  # B2d Great Weapon Fighting flag for _roll_damage
+
+    if _fighting_style == "Dueling":
+        # B2c: +2 damage when wielding a one-handed weapon with no off-hand weapon.
+        # Two-handed condition: weapon has "two-handed" property, OR weapon is
+        # "versatile" AND player is using it two-handed (no shield).
+        # Per spec: versatile used two-handed DISQUALIFIES Dueling.
+        _has_off_hand = False  # dual-wielding not implemented; treat as no off-hand weapon
+        _is_two_handed_style = "two-handed" in properties or (
+            "versatile" in properties and not player.get("equipped_shield", False)
+        )
+        if not _is_two_handed_style and not _has_off_hand:
+            ability_dmg_mod += 2
+
+    elif _fighting_style == "Great Weapon":
+        # B2d: reroll 1s and 2s on damage dice (once) when wielding a two-handed weapon.
+        # Triggers for: "two-handed" in properties, OR "versatile" in properties AND no shield
+        # (player is gripping with both hands, forgoing the one-handed option).
+        _is_two_handed_gwf = "two-handed" in properties or (
+            "versatile" in properties and not player.get("equipped_shield", False)
+        )
+        if _is_two_handed_gwf:
+            _reroll_1_2 = True
 
     level = player.get("level", 1)
-    prof = proficiency_bonus(level)
+    # ---------------------------------------------------------------------------
+    # C2: Weapon proficiency — only add proficiency bonus when the character is
+    # proficient with the weapon (D&D 5e PHB). Unknown weapons → assume proficient
+    # (fail-safe: don't penalize missing data). _player_class already set above (C3).
+    # ---------------------------------------------------------------------------
+    _weapon_for_prof = _equipped_weapon.get("name", "") if _use_structured else weapon_str
+    if is_proficient_with_weapon(_player_class, _weapon_for_prof):
+        prof = proficiency_bonus(level)
+    else:
+        prof = 0
     target_ac = npc.get("ac", 10)
 
     natural, rolls = roll_d20(final_adv, final_dis)
@@ -569,13 +890,31 @@ def player_attack(
     if not critical and cond_info.get("auto_crit") and hit:
         critical = True
 
-    # Damage
-    num_dice, die_size, dmg_mod, dmg_type = parse_damage_dice(weapon_str)
+    # ---------------------------------------------------------------------------
+    # A3 (versatile check): if weapon is versatile (optionally two-handed)
+    # and player has no shield, use the larger versatile die (two-handed grip).
+    # ---------------------------------------------------------------------------
+    if _use_structured:
+        damage_dice_to_use = damage_dice
+        if "versatile" in properties and not player.get("equipped_shield", False):
+            damage_dice_to_use = _equipped_weapon.get("damage_dice_versatile", damage_dice)
+        if damage_dice_to_use != damage_dice:
+            # Re-parse the larger die for num_dice / die_size.
+            num_dice, die_size, dmg_mod_alt, _ = parse_damage_dice(
+                f"{damage_dice_to_use} {dmg_type}"
+            )
+            dmg_mod = dmg_mod_alt  # keep in sync (normally 0 for standard weapons)
+    # (for legacy path, damage_dice_to_use is already encoded in weapon_str)
+
     damage_total = 0
     damage_dice_str = weapon_str.split("(")[-1].rstrip(")") if "(" in weapon_str else weapon_str
 
     if hit:
-        damage_total = _roll_damage(num_dice, die_size, dmg_mod, critical)
+        # Roll damage dice + string-embedded modifier (dmg_mod from parse_damage_dice).
+        # D&D 5e crit: only dice are doubled, neither modifier is doubled.
+        # B2d: pass _reroll_1_2 for Great Weapon Fighting (reroll 1s/2s once, per PHB).
+        raw_dice_dmg = _roll_damage(num_dice, die_size, 0, critical, reroll_1_2=_reroll_1_2)  # dice only, no mod
+        damage_total = max(1, raw_dice_dmg + dmg_mod + ability_dmg_mod)
         dmg_log = apply_damage(state, target_name, damage_total, dmg_type)
     else:
         dmg_log = ""
@@ -700,6 +1039,12 @@ def npc_attack(
     target_cond = condition_modifies("attack", actor=npc, target=target_profile)
     final_adv = cond_info["advantage"] or target_cond["advantage"]
     final_dis = cond_info["disadvantage"] or target_cond["disadvantage"]
+
+    # C1: Dodge enforcement — if the target (player) took the Dodge action this
+    # round, NPC attacks against them have disadvantage (PHB p.192).
+    if target == "player" or target == player_name:
+        if state.player_snapshot.get("_dodge_this_round", False):
+            final_dis = True
 
     natural, rolls = roll_d20(final_adv, final_dis)
     to_hit_total = natural + to_hit_bonus

@@ -22,7 +22,7 @@ from core.dnd_core import (
 )
 from core.dnd_skills import SKILLS, get_ability_for_skill, is_valid_skill
 from core.dnd_classes import GOT_CLASSES, get_class_features_at_level
-from core.dnd_progression import award_xp, level_up, apply_asi, get_level_for_xp, apply_pending_levelups
+from core.dnd_progression import award_xp, level_up, apply_asi, get_level_for_xp, apply_pending_levelups, XP_TABLE, MAX_LEVEL
 from core.dnd_conditions import (
     apply_condition, remove_condition, has_condition, condition_modifies,
 )
@@ -809,6 +809,15 @@ def recompute_ac(profile: dict) -> int:
     if profile.get("equipped_shield", False):
         new_ac += 2
 
+    # B2b: Fighting Style — Defense (+1 AC while wearing armor).
+    # Only fires when the character has equipped_armor (non-None) AND fighting_style == "Defense".
+    # Fail-safe: missing fighting_style key (None / absent) → no bonus.
+    if (
+        profile.get("fighting_style") == "Defense"
+        and profile.get("equipped_armor") is not None
+    ):
+        new_ac += 1
+
     profile["ac"] = new_ac
     return new_ac
 
@@ -952,7 +961,13 @@ def apply_dnd_impacts(profile: dict, updates: dict) -> tuple[dict, list[str]]:
     xp_award = safe_int(updates.get("xp_award", 0), 0)
     if xp_award > 0:
         xp_result = award_xp(profile, xp_award, reason="action_reward")
-        logs.append(f"XP: +{xp_award} (Всього: {xp_result.xp_after})")
+        _cur_level = profile.get("level", 1)
+        if _cur_level >= MAX_LEVEL:
+            _next_info = "макс. рівень"
+        else:
+            _xp_to_next = max(0, XP_TABLE.get(_cur_level + 1, 0) - xp_result.xp_after)
+            _next_info = f"до {_cur_level + 1}-го рівня: {_xp_to_next}"
+        logs.append(f"XP: +{xp_award} (Всього: {xp_result.xp_after}, {_next_info})")
 
         if xp_result.leveled_up:
             class_name = profile.get("class", "")

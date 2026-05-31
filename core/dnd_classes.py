@@ -1799,6 +1799,36 @@ def get_class_features_at_level(class_name: str, level: int) -> list[Feature]:
     return list(cls.level_features[level])   # loose copy — захист від мутації singleton
 
 
+def get_attacks_per_action(class_name: str, level: int) -> int:
+    """Return the number of attacks the player makes as part of one Attack action.
+
+    Base: 1 attack.
+    Extra Attack (L5, most martial classes): +1 → 2 attacks total.
+    Extra Attack (2) (Sellsword L11): +1 more → 3 attacks total.
+
+    Implementation: inspects GOT_CLASSES[class_name].level_features for Feature entries
+    whose name is exactly "Extra Attack" or "Extra Attack (2)" at levels <= `level`.
+    Each such feature adds +1 to the base of 1.
+
+    Fallback: unknown class or level <= 0 → returns 1 (safe default).
+    """
+    if level <= 0:
+        return 1
+
+    try:
+        cls = GOT_CLASSES[class_name]
+    except KeyError:
+        return 1
+
+    attacks = 1
+    for lvl in range(1, min(level, 20) + 1):
+        for feature in cls.level_features.get(lvl, []):
+            if feature.name in ("Extra Attack", "Extra Attack (2)"):
+                attacks += 1
+
+    return attacks
+
+
 def get_starting_hp(class_name: str, con_mod: int) -> int:
     """Return starting HP at L1: hit_die_max + CON modifier (D&D L1 canon). Minimum 1."""
     cls = get_class(class_name)

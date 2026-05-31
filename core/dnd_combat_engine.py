@@ -13,6 +13,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 from core.ai_client import model_worker, clean_and_parse_json, build_strict_config
+from core.dnd_classes import get_attacks_per_action
 from core.dnd_combat import (
     CombatState,
     initiate_combat,
@@ -372,15 +373,34 @@ async def execute_combat_round(
                     break
 
         if target_npc:
-            attack_res = player_attack(
-                combat_state,
-                target_name=target_npc,
-                weapon_name=weapon or "",
-                advantage=advantage,
-                disadvantage=disadvantage,
-            )
-            player_log_lines.append(attack_res.log_line)
-            combat_state.log.append(attack_res.log_line)
+            # Extra Attack: determine how many attacks the player gets this action.
+            # player_class / player_level are read from the player_snapshot that was
+            # deep-copied into CombatState at initiate_combat time.
+            _player_snap = combat_state.player_snapshot
+            _player_class = _player_snap.get("class", "")
+            _player_level = int(_player_snap.get("level", 1))
+            attacks_count = get_attacks_per_action(_player_class, _player_level)
+
+            for _i in range(attacks_count):
+                # Re-check target alive state before each subsequent attack.
+                _target_npc_data = combat_state.npcs.get(target_npc, {})
+                if not _npc_is_alive(_target_npc_data):
+                    if attacks_count > 1:
+                        player_log_lines.append(
+                            f"{player_name}: {target_npc} вже знешкоджений — "
+                            f"зупиняє атакову серію після {_i} ударів."
+                        )
+                    break
+
+                attack_res = player_attack(
+                    combat_state,
+                    target_name=target_npc,
+                    weapon_name=weapon or "",
+                    advantage=advantage,
+                    disadvantage=disadvantage,
+                )
+                player_log_lines.append(attack_res.log_line)
+                combat_state.log.append(attack_res.log_line)
         else:
             player_log_lines.append(f"{player_name}: немає живих цілей для атаки.")
 
@@ -427,6 +447,7 @@ async def execute_combat_round(
     else:
         # Unknown intent — dodge fallback
         player_log_lines.append(f"{player_name} займає захисну стійку (fallback dodge).")
+        combat_state.player_snapshot["_dodge_this_round"] = True
 
     round_logs.extend(player_log_lines)
 

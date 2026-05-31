@@ -13,7 +13,7 @@ from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from bot.menus import get_dynamic_menu, get_main_menu, build_ability_preview_keyboard, build_point_buy_keyboard
+from bot.menus import get_dynamic_menu, get_main_menu, build_ability_preview_keyboard, build_point_buy_keyboard, build_asi_picker_keyboard
 from bot.utils import send_safe_message, send_game_response
 from database.operations import (
     get_unique_regions, get_houses_by_region, get_house_stats_data,
@@ -751,6 +751,284 @@ async def callback_pb_cancel(call: CallbackQuery):
         await call.answer()
 
 
+# ---------------------------------------------------------------------------
+# ASI picker — helper + callback handlers (B2–B5)
+# ---------------------------------------------------------------------------
+
+_EMPTY_ASI_USED: dict = {"STR": 0, "DEX": 0, "CON": 0, "INT": 0, "WIS": 0, "CHA": 0}
+
+
+async def _check_and_trigger_asi(bot: Bot, chat_id: int) -> None:
+    """Post-turn hook: if profile has asi_pending=True, set WAITING_ASI_CHOICE state
+    and send the picker keyboard.  Called from handle_general_messages after
+    process_game_turn completes successfully (B2).
+
+    Fast path (99% of turns): engine.py caches asi_pending in user_sessions after
+    apply_dnd_impacts.  If False/missing → return immediately without a Sheets read.
+    Slow path (level-up turn): cache is True → fetch profile once from Sheets.
+    """
+    from core.dnd_classes import GOT_CLASSES
+
+    # Fast-path: skip Sheets read when engine reported no pending ASI this turn.
+    if not user_sessions.get(chat_id, {}).get('asi_pending'):
+        return
+
+    profile, _ = await get_user_data(chat_id)
+    if not profile or not profile.get("asi_pending"):
+        return
+
+    # Build default suggestion from class primary_abilities
+    class_name = profile.get("class", "")
+    asi_used = dict(_EMPTY_ASI_USED)  # start zeroed
+    try:
+        if class_name and class_name in GOT_CLASSES:
+            primary = GOT_CLASSES[class_name].primary_abilities
+            ability_scores = profile.get("ability_scores", {})
+            if len(primary) >= 2:
+                # +1/+1 split — skip if primary[0] is already at cap
+                ab0, ab1 = primary[0], primary[1]
+                if ability_scores.get(ab0, 10) < 20:
+                    asi_used[ab0] = 1
+                    if ability_scores.get(ab1, 10) < 20:
+                        asi_used[ab1] = 1
+                    else:
+                        # ab1 at cap, put both in ab0 if room
+                        if ability_scores.get(ab0, 10) + 2 <= 20:
+                            asi_used[ab0] = 2
+                        else:
+                            asi_used = dict(_EMPTY_ASI_USED)  # leave blank
+                else:
+                    # ab0 at cap, try ab1
+                    if ability_scores.get(ab1, 10) + 2 <= 20:
+                        asi_used[ab1] = 2
+                    else:
+                        asi_used = dict(_EMPTY_ASI_USED)
+            elif len(primary) == 1:
+                ab0 = primary[0]
+                if ability_scores.get(ab0, 10) + 2 <= 20:
+                    asi_used[ab0] = 2
+    except Exception as _e:
+        logger.warning("[ASI TRIGGER] Failed to build default suggestion: %s", _e)
+        asi_used = dict(_EMPTY_ASI_USED)
+
+    new_level = profile.get("level", 1)
+
+    if chat_id not in user_sessions:
+        user_sessions[chat_id] = {}
+    user_sessions[chat_id]['state'] = "WAITING_ASI_CHOICE"
+    user_sessions[chat_id]['asi_used'] = asi_used
+
+    current_scores = profile.get("ability_scores", {})
+    # Cache current_scores so the WAITING_ASI_CHOICE hard-gate (B3) can
+    # re-render the picker without an extra Sheets read (WARN #3).
+    user_sessions[chat_id]['asi_current_scores'] = dict(current_scores)
+    kb = build_asi_picker_keyboard(current_scores, asi_used)
+    await bot.send_message(
+        chat_id,
+        (
+            f"Рівень {new_level}! Оберіть розподіл ASI "
+            f"(+2 здібностей всього: +2 в одну АБО +1+1 в дві різні)."
+        ),
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data.startswith("asi_inc_"))
+async def callback_asi_inc(call: CallbackQuery):
+    """Increment a pending ASI delta for one ability."""
+    chat_id = call.message.chat.id
+    ability = call.data[len("asi_inc_"):]  # e.g. "STR"
+
+    try:
+        session = user_sessions.get(chat_id, {})
+        if session.get('state') != "WAITING_ASI_CHOICE":
+            await call.answer()
+            return
+
+        profile, _ = await get_user_data(chat_id)
+        if not profile:
+            await call.answer()
+            return
+
+        asi_used: dict = session.get('asi_used', dict(_EMPTY_ASI_USED))
+        current_scores = profile.get("ability_scores", {})
+        sum_used = sum(asi_used.values())
+        current_delta = asi_used.get(ability, 0)
+        current_score = current_scores.get(ability, 10)
+
+        # Validate: sum headroom AND cap guard
+        if sum_used >= 2 or (current_score + current_delta) >= 20:
+            await call.answer()
+            return
+
+        # Validate: at most 2 distinct abilities may receive points
+        # (distributing to a 3rd ability is forbidden even if sum < 2)
+        abilities_with_points = {ab for ab, v in asi_used.items() if v > 0}
+        if ability not in abilities_with_points and len(abilities_with_points) >= 2:
+            await call.answer()
+            return
+
+        asi_used[ability] = current_delta + 1
+        user_sessions[chat_id]['asi_used'] = asi_used
+
+        kb = build_asi_picker_keyboard(current_scores, asi_used)
+        try:
+            await call.message.edit_reply_markup(reply_markup=kb)
+        except Exception:
+            pass
+        await call.answer()
+    except Exception as e:
+        logger.error(f"[ASI INC] {ability}: {type(e).__name__}: {e}")
+        await call.answer()
+
+
+@router.callback_query(F.data.startswith("asi_dec_"))
+async def callback_asi_dec(call: CallbackQuery):
+    """Decrement a pending ASI delta for one ability."""
+    chat_id = call.message.chat.id
+    ability = call.data[len("asi_dec_"):]
+
+    try:
+        session = user_sessions.get(chat_id, {})
+        if session.get('state') != "WAITING_ASI_CHOICE":
+            await call.answer()
+            return
+
+        profile, _ = await get_user_data(chat_id)
+        if not profile:
+            await call.answer()
+            return
+
+        asi_used: dict = session.get('asi_used', dict(_EMPTY_ASI_USED))
+        current_scores = profile.get("ability_scores", {})
+
+        if asi_used.get(ability, 0) <= 0:
+            await call.answer()
+            return
+
+        asi_used[ability] -= 1
+        user_sessions[chat_id]['asi_used'] = asi_used
+
+        kb = build_asi_picker_keyboard(current_scores, asi_used)
+        try:
+            await call.message.edit_reply_markup(reply_markup=kb)
+        except Exception:
+            pass
+        await call.answer()
+    except Exception as e:
+        logger.error(f"[ASI DEC] {ability}: {type(e).__name__}: {e}")
+        await call.answer()
+
+
+@router.callback_query(F.data == "asi_confirm")
+async def callback_asi_confirm(call: CallbackQuery, bot: Bot):
+    """Validate and apply the chosen ASI, save profile, resume normal play."""
+    chat_id = call.message.chat.id
+
+    try:
+        session = user_sessions.get(chat_id, {})
+        if session.get('state') != "WAITING_ASI_CHOICE":
+            await call.answer("Ця кнопка більше не активна.")
+            return
+
+        asi_used: dict = session.get('asi_used', dict(_EMPTY_ASI_USED))
+        sum_used = sum(asi_used.values())
+        abilities_used = [ab for ab, v in asi_used.items() if v > 0]
+
+        # Validate: exactly 2 points, at most 2 abilities
+        if sum_used != 2 or len(abilities_used) > 2:
+            await call.answer("Розподіліть рівно 2 очки між не більш ніж двома здібностями.")
+            return
+
+        profile, _ = await get_user_data(chat_id)
+        if not profile:
+            await call.answer("Профіль не знайдено. Спробуйте ще раз.")
+            return
+
+        choices = {ab: v for ab, v in asi_used.items() if v > 0}
+
+        from core.dnd_progression import apply_asi
+        from core.dnd_engine import recompute_ac
+
+        try:
+            apply_asi(profile, choices)
+        except ValueError as ve:
+            await call.answer(f"Помилка: {ve}")
+            return
+
+        recompute_ac(profile)
+
+        char_name = profile.get("Ім'я", "")
+        if not await save_user_data(chat_id, profile, char_name):
+            await call.answer("Помилка збереження. Спробуйте ще раз.")
+            return
+
+        # Clear ASI state (including WARN #2/#3 session cache keys)
+        user_sessions[chat_id].pop('asi_used', None)
+        user_sessions[chat_id].pop('asi_current_scores', None)
+        user_sessions[chat_id]['asi_pending'] = False
+        user_sessions[chat_id]['state'] = "GAME_ACTIVE"
+
+        # Remove the picker keyboard
+        try:
+            await call.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+        # Build confirmation strings
+        _LABELS = {
+            "STR": "Сила", "DEX": "Спритність", "CON": "Витривалість",
+            "INT": "Інтелект", "WIS": "Мудрість", "CHA": "Харизма",
+        }
+        choices_str = ", ".join(
+            f"{_LABELS.get(ab, ab)} +{v}" for ab, v in choices.items()
+        )
+        final_scores = profile.get("ability_scores", {})
+        scores_str = "  ".join(
+            f"{ab} {final_scores.get(ab, '?')}"
+            for ab in ["STR", "DEX", "CON", "INT", "WIS", "CHA"]
+        )
+        await bot.send_message(
+            chat_id,
+            f"ASI застосовано! {choices_str}.\nТепер ваші характеристики: {scores_str}",
+        )
+        await call.answer("ASI збережено!")
+    except Exception as e:
+        logger.error(f"[ASI CONFIRM] {type(e).__name__}: {e}", exc_info=True)
+        await call.answer("Виникла помилка. Спробуйте ще раз.")
+        # State intentionally left as WAITING_ASI_CHOICE on failure so the player
+        # can retry without losing their picker.  Success path already set GAME_ACTIVE.
+
+
+@router.callback_query(F.data == "asi_reset")
+async def callback_asi_reset(call: CallbackQuery):
+    """Zero out the ASI allocation and re-render the picker."""
+    chat_id = call.message.chat.id
+
+    try:
+        session = user_sessions.get(chat_id, {})
+        if session.get('state') != "WAITING_ASI_CHOICE":
+            await call.answer()
+            return
+
+        profile, _ = await get_user_data(chat_id)
+        if not profile:
+            await call.answer()
+            return
+
+        user_sessions[chat_id]['asi_used'] = dict(_EMPTY_ASI_USED)
+        current_scores = profile.get("ability_scores", {})
+        kb = build_asi_picker_keyboard(current_scores, dict(_EMPTY_ASI_USED))
+        try:
+            await call.message.edit_reply_markup(reply_markup=kb)
+        except Exception:
+            pass
+        await call.answer("Скинуто.")
+    except Exception as e:
+        logger.error(f"[ASI RESET] {type(e).__name__}: {e}")
+        await call.answer()
+
+
 _SKILL_EMOJI: dict[str, str] = {
     "Athletics": "🏋️",
     "Acrobatics": "🤸",
@@ -1285,6 +1563,23 @@ async def handle_general_messages(message: Message, bot: Bot):
         await start_game_with_character(bot, chat_id, user_text)
         return
 
+    # ── B3: Hard-gate — ASI must be resolved before any new turn ─────────────
+    if state == "WAITING_ASI_CHOICE":
+        asi_used = session.get('asi_used', {"STR": 0, "DEX": 0, "CON": 0, "INT": 0, "WIS": 0, "CHA": 0})
+        # Use the scores snapshot cached when _check_and_trigger_asi first fired
+        # (WARN #3 fix): avoids a redundant Sheets read just to re-render the picker.
+        current_scores = session.get('asi_current_scores', {})
+        if not current_scores:
+            # Fallback: session was cleared or bot restarted — fetch once from Sheets.
+            profile, _ = await get_user_data(chat_id)
+            current_scores = profile.get("ability_scores", {}) if profile else {}
+        kb = build_asi_picker_keyboard(current_scores, asi_used)
+        await message.answer(
+            "Спершу оберіть розподіл ASI через кнопки вище.",
+            reply_markup=kb,
+        )
+        return
+
     if state == "GAME_ACTIVE":
         if msg_id in PROCESSED_MESSAGES: return
         PROCESSED_MESSAGES.add(msg_id)
@@ -1384,6 +1679,12 @@ async def handle_general_messages(message: Message, bot: Bot):
                         logger.info(f"[DEBUG_MODE] File sent OK for chat_id={chat_id}")
                     except Exception as _trace_err:
                         logger.error(f"[DEBUG_TRACE] Failed to send: {type(_trace_err).__name__}: {_trace_err}", exc_info=True)
+
+                # ── ASI pending check (B2) ────────────────────────────────────
+                # After the turn is fully rendered, check if a level-up left an
+                # ASI pending.  If so, gate the player and show the picker.
+                await _check_and_trigger_asi(bot, chat_id)
+
             except Exception as e:
                 if consumer_task:
                     consumer_task.cancel()

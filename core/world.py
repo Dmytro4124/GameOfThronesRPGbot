@@ -29,10 +29,10 @@ _CLASS_BACKGROUNDS: dict[str, str] = {
     "Maester":        "Sage",
     "Septon":         "Acolyte",
     "Sellsword":      "Soldier",
-    "Spy/Whisperer":  "Criminal",
+    "Spy":            "Criminal",
     "Courtier":       "Noble",
     "Bastard":        "Outlander",
-    "Wildling Raider":"Outlander",
+    "Wildling":       "Outlander",
 }
 
 
@@ -152,6 +152,18 @@ def _build_deterministic_dnd_profile(
         for f in get_class_features_at_level(suggested_class, 1)
     ]
 
+    # --- Fighting Style default (B2a) ---
+    # Detect whether the class grants "Fighting Style" at L2 (Knight, Hedge Knight,
+    # Sellsword, Bastard). Derive from class data — do NOT hardcode the class list.
+    # New characters start at L1, so they haven't reached L2 yet; we assign the
+    # field now so it's present in the profile when they hit L2 and the bonus activates.
+    # Default style is "Defense" (safest passive bonus; UI picker is out of scope).
+    _fs_feature_at_l2 = any(
+        f.name == "Fighting Style"
+        for f in cls_def.level_features.get(2, [])
+    )
+    _fighting_style: str | None = "Defense" if _fs_feature_at_l2 else None
+
     # --- Inventory ---
     from core.inventory import parse_inventory as _parse_inv
     items_list: list[str] = list(kit.get("items", []))
@@ -202,6 +214,7 @@ def _build_deterministic_dnd_profile(
         "combat_state_ref": None,
         "asi_pending": False,
         "languages": languages,
+        "fighting_style": _fighting_style,  # B2a: "Defense" for FS classes, None otherwise
 
         # Narrative / character fields
         "Ім'я": char_name,
@@ -241,36 +254,61 @@ def _build_deterministic_dnd_profile(
         _w_name = weapon_main_str.split("(")[0].strip()
         _w_props: list[str] = []
         _w_dice = "1d4"
+        _w_dice_versatile: str | None = None  # A3: second NdS pattern for versatile weapons
         _w_dmg_type = "bludgeoning"
+        _has_dворуч = False  # A3: track whether "дворуч" keyword was seen
+        _dice_parts_seen: list[str] = []  # A3: collect all NdS matches in order
         _inner_match = _re.search(r'\(([^)]+)\)', weapon_main_str)
         if _inner_match:
             _inner = _inner_match.group(1)
             _parts = [p.strip() for p in _inner.split(",")]
             for _p in _parts:
                 _p_lower = _p.lower()
-                if _re.match(r'\d+d\d+', _p_lower):
-                    _dice_match = _re.match(r'(\d+d\d+)\s*(.*)', _p_lower)
-                    if _dice_match:
-                        _w_dice = _dice_match.group(1)
-                        _dmg_raw = _dice_match.group(2).strip()
-                        if _dmg_raw:
-                            _w_dmg_type = _dmg_raw
-                elif any(kw in _p_lower for kw in ("фінесс", "finesse")):
+                # A3 fix: use re.search so dice anywhere in the segment are found,
+                # e.g. "дворуч 1d10" where re.match would fail at the leading word.
+                _dice_match = _re.search(r'(\d+)d(\d+)', _p_lower)
+                if _dice_match:
+                    _dice_str = f"{_dice_match.group(1)}d{_dice_match.group(2)}"
+                    _dice_parts_seen.append(_dice_str)
+                    if len(_dice_parts_seen) == 1:
+                        # First dice pattern → primary damage dice and type.
+                        _w_dice = _dice_str
+                        # Damage type is any trailing word(s) after the dice notation.
+                        _after_dice = _p_lower[_dice_match.end():].strip()
+                        if _after_dice:
+                            _w_dmg_type = _after_dice
+                # Keyword checks are now INDEPENDENT of dice detection (no elif).
+                if any(kw in _p_lower for kw in ("дворуч", "two-handed")):
+                    # A3: Mark дворуч keyword seen; resolve versatile vs two-handed AFTER
+                    # scanning all parts so we know if there's a second dice pattern.
+                    _has_dворуч = True
+                if any(kw in _p_lower for kw in ("фінесс", "finesse")):
                     _w_props.append("finesse")
-                elif any(kw in _p_lower for kw in ("дворуч", "two-handed")):
-                    _w_props.append("two-handed")
-                elif any(kw in _p_lower for kw in ("легка", "light")):
+                if any(kw in _p_lower for kw in ("легка", "light")):
                     _w_props.append("light")
-                elif any(kw in _p_lower for kw in ("метн", "thrown")):
+                if any(kw in _p_lower for kw in ("метн", "thrown")):
                     _w_props.append("thrown")
-                elif any(kw in _p_lower for kw in ("80/", "20/", "range")):
+                if any(kw in _p_lower for kw in ("80/", "20/", "range")):
                     _w_props.append("ranged")
-        profile["equipped_weapon"] = {
+            # A3: Resolve versatile vs two-handed AFTER scanning all parts.
+            if _has_dворуч:
+                if len(_dice_parts_seen) >= 2:
+                    # Two dice patterns → weapon is VERSATILE (can be used one- or two-handed).
+                    # Store the second (larger) dice as damage_dice_versatile.
+                    _w_dice_versatile = _dice_parts_seen[1]
+                    _w_props.append("versatile")
+                else:
+                    # Single dice pattern with дворуч keyword → truly two-handed.
+                    _w_props.append("two-handed")
+        _equipped_weapon_dict: dict = {
             "name": _w_name,
             "damage_dice": _w_dice,
             "damage_type": _w_dmg_type,
             "properties": _w_props,
         }
+        if _w_dice_versatile is not None:
+            _equipped_weapon_dict["damage_dice_versatile"] = _w_dice_versatile
+        profile["equipped_weapon"] = _equipped_weapon_dict
     else:
         profile["equipped_weapon"] = None
 
@@ -561,6 +599,14 @@ async def generate_initial_stats(char_name, house_name, house_data, apply_herita
         for f in get_class_features_at_level(suggested_class, 1)
     ]
 
+    # --- Fighting Style default (B2a) ---
+    # Derive from class data: check whether L2 grants "Fighting Style".
+    _fs_feature_at_l2 = any(
+        f.name == "Fighting Style"
+        for f in cls_def.level_features.get(2, [])
+    )
+    _fighting_style: str | None = "Defense" if _fs_feature_at_l2 else None
+
     # Equipment list for "Інвентар" field — stored as list[dict] (new structured format).
     # parse_inventory handles backward compat on load; new profiles start structured.
     from core.inventory import parse_inventory as _parse_inv
@@ -600,6 +646,7 @@ async def generate_initial_stats(char_name, house_name, house_data, apply_herita
         "combat_state_ref": None,
         "asi_pending": False,
         "languages": llm_data.get("languages", ["Common Tongue"]),
+        "fighting_style": _fighting_style,  # B2a: "Defense" for FS classes, None otherwise
 
         # Narrative / character fields
         "Ім'я": char_name,
@@ -642,7 +689,10 @@ async def generate_initial_stats(char_name, house_name, house_data, apply_herita
         _w_name = weapon_main_str.split("(")[0].strip()
         _w_props: list[str] = []
         _w_dice = "1d4"
+        _w_dice_versatile: str | None = None  # A3: second NdS for versatile weapons
         _w_dmg_type = "bludgeoning"
+        _has_dворуч = False  # A3: track дворуч keyword
+        _dice_parts_seen: list[str] = []  # A3: collect NdS patterns in order
         # Extract content inside parentheses: "1d8 колота, фінесс"
         _inner_match = _re.search(r'\(([^)]+)\)', weapon_main_str)
         if _inner_match:
@@ -650,31 +700,49 @@ async def generate_initial_stats(char_name, house_name, house_data, apply_herita
             _parts = [p.strip() for p in _inner.split(",")]
             for _p in _parts:
                 _p_lower = _p.lower()
-                # Dice pattern: NdM
-                if _re.match(r'\d+d\d+', _p_lower):
-                    _dice_match = _re.match(r'(\d+d\d+)\s*(.*)', _p_lower)
-                    if _dice_match:
-                        _w_dice = _dice_match.group(1)
-                        _dmg_raw = _dice_match.group(2).strip()
-                        if _dmg_raw:
-                            _w_dmg_type = _dmg_raw
-                # Property keywords
-                elif any(kw in _p_lower for kw in ("фінесс", "finesse")):
+                # A3 fix: use re.search so dice anywhere in the segment are found,
+                # e.g. "дворуч 1d10" where re.match would fail at the leading word.
+                _dice_match = _re.search(r'(\d+)d(\d+)', _p_lower)
+                if _dice_match:
+                    _dice_str = f"{_dice_match.group(1)}d{_dice_match.group(2)}"
+                    _dice_parts_seen.append(_dice_str)
+                    if len(_dice_parts_seen) == 1:
+                        # First dice pattern → primary damage dice and type.
+                        _w_dice = _dice_str
+                        # Damage type is any trailing word(s) after the dice notation.
+                        _after_dice = _p_lower[_dice_match.end():].strip()
+                        if _after_dice:
+                            _w_dmg_type = _after_dice
+                # Keyword checks are now INDEPENDENT of dice detection (no elif).
+                if any(kw in _p_lower for kw in ("дворуч", "two-handed")):
+                    # A3: defer versatile vs two-handed decision until all parts scanned
+                    _has_dворуч = True
+                if any(kw in _p_lower for kw in ("фінесс", "finesse")):
                     _w_props.append("finesse")
-                elif any(kw in _p_lower for kw in ("дворуч", "two-handed")):
-                    _w_props.append("two-handed")
-                elif any(kw in _p_lower for kw in ("легка", "light")):
+                if any(kw in _p_lower for kw in ("легка", "light")):
                     _w_props.append("light")
-                elif any(kw in _p_lower for kw in ("метн", "thrown")):
+                if any(kw in _p_lower for kw in ("метн", "thrown")):
                     _w_props.append("thrown")
-                elif any(kw in _p_lower for kw in ("80/", "20/", "range")):
+                if any(kw in _p_lower for kw in ("80/", "20/", "range")):
                     _w_props.append("ranged")
-        profile["equipped_weapon"] = {
+            # A3: Resolve versatile vs two-handed AFTER scanning all parts.
+            if _has_dворуч:
+                if len(_dice_parts_seen) >= 2:
+                    # Two NdS patterns → weapon is VERSATILE.
+                    _w_dice_versatile = _dice_parts_seen[1]
+                    _w_props.append("versatile")
+                else:
+                    # Single dice + дворуч → truly two-handed.
+                    _w_props.append("two-handed")
+        _equipped_weapon_dict: dict = {
             "name": _w_name,
             "damage_dice": _w_dice,
             "damage_type": _w_dmg_type,
             "properties": _w_props,
         }
+        if _w_dice_versatile is not None:
+            _equipped_weapon_dict["damage_dice_versatile"] = _w_dice_versatile
+        profile["equipped_weapon"] = _equipped_weapon_dict
     else:
         profile["equipped_weapon"] = None
 

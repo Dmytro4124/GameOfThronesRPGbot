@@ -283,7 +283,9 @@ def test_player_attack_hit_deals_damage():
     assert result.hit is True
     assert result.natural_roll == 15
     assert result.to_hit_total == 20  # 15+3+2
-    assert result.damage_total == 8   # 5+3
+    # Pack A (A2): ability_dmg_mod now added. Legacy weapon string "1d8+3 slashing":
+    # dmg_mod=3 (from dice string), ability_dmg_mod=STR_mod=+3 → 5 + 3 + 3 = 11.
+    assert result.damage_total == 11  # 5 (die) + 3 (string mod) + 3 (STR mod)
 
 
 def test_player_attack_nat_20_is_critical():
@@ -655,11 +657,13 @@ def test_player_attack_damages_npc_not_self():
         result = player_attack(state, "Тіріон", "Longsword")
 
     assert result.hit is True, "Attack should have hit (15+3+2=20 >= AC 10)"
-    assert result.damage_total == 8, f"Damage must be 5+3=8, got {result.damage_total}"
+    # Pack A (A2): ability_dmg_mod now added. Legacy weapon "1d8+3 slashing":
+    # dmg_mod=3 (string), ability_dmg_mod=STR_mod=+3 → 5 + 3 + 3 = 11.
+    assert result.damage_total == 11, f"Damage must be 5+3+3=11 (A2 fix), got {result.damage_total}"
 
     # NPC took damage
-    assert state.npcs["Тіріон"]["hp_current"] == 12, (
-        f"Тіріон must have 20-8=12 HP, got {state.npcs['Тіріон']['hp_current']}"
+    assert state.npcs["Тіріон"]["hp_current"] == 9, (
+        f"Тіріон must have 20-11=9 HP, got {state.npcs['Тіріон']['hp_current']}"
     )
 
     # Player HP unchanged — the critical invariant for Issue 2

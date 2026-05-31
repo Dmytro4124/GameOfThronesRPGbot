@@ -795,14 +795,17 @@ class TestAutoLevelUp:
             f"Logs must mention level transition 1->2. Got logs: {logs}"
         )
 
-    # 19. xp_award crosses L3→L4 (ASI level): ASI applied to primary_abilities
+    # 19. xp_award crosses L3→L4 (ASI level): asi_pending=True, scores unchanged
     def test_level3_to_level4_asi_applied(self):
         """xp_award=1800 from L3/xp=900 crosses L4 threshold (2700 XP).
-        After apply_dnd_impacts: STR or CHA increased (Knight primary_abilities)."""
+        NEW INVARIANT (4-fix package 2026-05): ASI is NOT auto-applied.
+        apply_dnd_impacts must leave asi_pending=True and ability_scores unchanged.
+        The player confirms via UI; handler calls apply_asi() on confirm.
+        """
         # Knight primary_abilities = ["STR", "CHA"]
         profile = _profile_for_level_up(level=3, xp=900)
-        profile["ability_scores"]["STR"] = 16  # room to grow
-        profile["ability_scores"]["CHA"] = 12  # room to grow
+        profile["ability_scores"]["STR"] = 16  # must stay unchanged
+        profile["ability_scores"]["CHA"] = 12  # must stay unchanged
         updates = _minimal_updates(xp_award=1800)
 
         from core.dnd_engine import apply_dnd_impacts
@@ -811,12 +814,22 @@ class TestAutoLevelUp:
         assert result_profile["level"] == 4, (
             f"Level must be 4 after crossing L4 threshold. Got {result_profile['level']}"
         )
+
+        # NEW: ability_scores must NOT have changed (no auto-ASI)
         str_val = result_profile["ability_scores"]["STR"]
         cha_val = result_profile["ability_scores"]["CHA"]
-        assert str_val == 17 and cha_val == 13, (
-            f"Knight ASI at L4: STR should be 17 and CHA should be 13 "
-            f"(split +1/+1 to primary_abilities). Got STR={str_val}, CHA={cha_val}"
+        assert str_val == 16, (
+            f"STR must be unchanged at L4 (ASI is now player-confirmed). Got {str_val}"
         )
+        assert cha_val == 12, (
+            f"CHA must be unchanged at L4 (ASI is now player-confirmed). Got {cha_val}"
+        )
+
+        # NEW: asi_pending must be True
+        assert result_profile.get("asi_pending") is True, (
+            "asi_pending must be True after L4 level-up — player must confirm via UI"
+        )
+
         asi_logs = [l for l in logs if "Ability Score Improvement" in l]
         assert asi_logs, f"Logs must mention ASI. Got logs: {logs}"
 
@@ -839,13 +852,16 @@ class TestAutoLevelUp:
             f"Got {len(level_logs)}: {level_logs}"
         )
 
-    # 21. ASI cap: STR=19 → ASI {STR:1, CHA:1} → STR=20 (not 21), CHA+1
+    # 21. ASI cap: STR=19 at L4 → asi_pending=True, STR stays 19 (player picks via UI)
     def test_asi_cap_str_at_19(self):
-        """STR=19 at ASI level → split gives STR+1/CHA+1, STR becomes 20 (not 21)."""
+        """STR=19 at ASI level — NEW INVARIANT (4-fix package 2026-05):
+        No auto-ASI; asi_pending=True; STR and CHA stay at their pre-levelup values.
+        Cap enforcement happens later in apply_asi() when player confirms.
+        """
         # L3→L4 is an ASI level for Knight
         profile = _profile_for_level_up(level=3, xp=900)
-        profile["ability_scores"]["STR"] = 19  # one point from cap
-        profile["ability_scores"]["CHA"] = 10
+        profile["ability_scores"]["STR"] = 19  # one point from cap — must stay 19
+        profile["ability_scores"]["CHA"] = 10  # must stay 10
         updates = _minimal_updates(xp_award=1800)  # crosses L4
 
         from core.dnd_engine import apply_dnd_impacts
@@ -853,11 +869,14 @@ class TestAutoLevelUp:
 
         str_val = result_profile["ability_scores"]["STR"]
         cha_val = result_profile["ability_scores"]["CHA"]
-        assert str_val == 20, (
-            f"STR must be capped at 20 (was 19, +1 from split ASI). Got {str_val}"
+        assert str_val == 19, (
+            f"STR must stay 19 at L4 (no auto-ASI in 4-fix package). Got {str_val}"
         )
-        assert cha_val == 11, (
-            f"CHA must be 11 (was 10, +1 from split ASI). Got {cha_val}"
+        assert cha_val == 10, (
+            f"CHA must stay 10 at L4 (no auto-ASI). Got {cha_val}"
+        )
+        assert result_profile.get("asi_pending") is True, (
+            "asi_pending must be True — player will pick STR+1 or STR+1/CHA+1 via UI"
         )
 
     # 22. L20 → level_up raises ValueError, log contains "Max level reached", no exception

@@ -8,6 +8,49 @@
   Сцена    (∞)   — мікро: "загальний зал", "провулок" — вільна творчість ШІ
 """
 
+# === КЛІМАТИЧНІ КОНСТАНТИ ===
+# REGION_CLIMATE_MAP: Регіон → тип клімату.
+# Використовується в engine.py для фільтрації подій світу (world_events):
+# engine звіряє клімат поточного регіону гравця із EVENT_PLAUSIBILITY[day],
+# щоб не показувати гравцеві хуртовину в пустелі або спеку за Стіною.
+#
+# EVENT_PLAUSIBILITY: day_key → список кліматів, де подія правдоподібна.
+# Ключі відповідають ключам world_events у engine.py.
+# Значення "*" означає "будь-який клімат" — подія завжди відбувається.
+
+REGION_CLIMATE_MAP: dict[str, str] = {
+    "Північ": "cold",
+    "За Стіною": "cold",
+    "Долина Аррен": "cold",
+    "Залізні Острови": "temperate",
+    "Вестерлянди": "temperate",
+    "Річкові Землі": "temperate",
+    "Штормові Землі": "temperate",
+    "Простір": "temperate",
+    "Королівство Корони": "temperate",
+    "Ступені": "temperate",
+    "Спірні землі": "temperate",
+    "Дорн": "hot_desert",
+    "Дотракійське море": "hot_desert",
+    "Пентос": "mediterranean",
+    "Браавос": "mediterranean",
+    "Лис": "mediterranean",
+    "Тірош": "mediterranean",
+    "Мір": "mediterranean",
+    "Волантіс": "mediterranean",
+    "Затока Работорговців": "tropical",
+    "Ессос": "temperate",  # generic Essos as safe default
+}
+
+# Per-event plausibility: which climate-tags allow this event.
+# "*" means "any climate" (always plausible regardless of region).
+# Keys match world_events keys in engine.py.
+EVENT_PLAUSIBILITY: dict[int, list[str]] = {
+    5: ["cold"],   # Blizzard — only cold regions
+    14: ["*"],     # Royal cortège — anywhere
+    30: ["*"],     # War declaration — anywhere
+}
+
 # === МАППІНГ: Локація → Регіон ===
 # Єдине джерело правди. VALID_LOCATIONS та VALID_REGIONS auto-derived з цього словника.
 LOCATION_TO_REGION: dict = {

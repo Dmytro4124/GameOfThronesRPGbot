@@ -299,6 +299,18 @@ def apply_asi(profile: dict, choices: dict[str, int]) -> dict:
     profile["ability_scores"] = ability_scores
     profile["asi_pending"] = False
 
+    # A4: Recompute AC after ASI — DEX change would otherwise leave AC stale until
+    # the next inventory event.  try/except guards against circular-import risk in
+    # pure unit-test contexts where dnd_engine may not be importable.
+    try:
+        from core.dnd_engine import recompute_ac
+        recompute_ac(profile)
+    except ImportError as _e:
+        logger.warning(
+            "[DND_PROGRESSION] recompute_ac import failed in apply_asi — AC may be stale: %s",
+            _e,
+        )
+
     return profile
 
 
@@ -331,8 +343,10 @@ def apply_pending_levelups(
     Invariants preserved:
         - ability_scores capped at MAX_ABILITY_SCORE (20) per D&D PHB.
         - HP minimum gain of 1 per level (enforced inside level_up()).
-        - ASI auto-distributed to class primary_abilities; redistributed to
-          other abilities when primaries are at cap.
+        - ASI deferred — `profile['asi_pending']` is left True for UI
+          confirmation.  The handler calls `apply_asi(profile, choices)` after
+          the player selects via the picker.  `ability_scores` are NOT mutated
+          by this function for ASI levels.
         - profile['level'] ends at level_before + levels_gained on success,
           or at the last successfully processed level on ValueError (max level).
     """
@@ -376,58 +390,15 @@ def apply_pending_levelups(
         for feat in level_result.new_features:
             logs.append(f"New feature: {feat.name} -- {feat.desc[:80]}...")
 
-        # Auto-ASI: distribute points to primary_abilities at L4/8/12/16/19
+        # ASI: do NOT auto-distribute. Leave asi_pending=True (already set by
+        # level_up() above). The player must confirm via UI; the handler will
+        # call apply_asi(profile, choices) once the player selects their stat.
         if level_result.asi_pending:
-            ability_scores = profile.get("ability_scores")
-            if not ability_scores:
-                logs.append("ASI skipped: no ability_scores in profile.")
-            else:
-                primary = GOT_CLASSES[class_name].primary_abilities
-                if not primary:
-                    primary = ["STR"]
-
-                # Strategy: split +1/+1 across two primary abilities; +2 if only one
-                if len(primary) >= 2:
-                    asi_choices: dict[str, int] = {primary[0]: 1, primary[1]: 1}
-                else:
-                    asi_choices = {primary[0]: 2}
-
-                # Clamp: no ability may exceed MAX_ABILITY_SCORE (20)
-                for ab, delta in list(asi_choices.items()):
-                    current = ability_scores.get(ab, 10)
-                    if current + delta > MAX_ABILITY_SCORE:
-                        asi_choices[ab] = max(0, MAX_ABILITY_SCORE - current)
-
-                # If sum < 2 after clamping, redistribute to other abilities
-                if sum(asi_choices.values()) < 2:
-                    for ab in ["CON", "DEX", "STR", "WIS", "INT", "CHA"]:
-                        if sum(asi_choices.values()) >= 2:
-                            break
-                        current = ability_scores.get(ab, 10)
-                        if current < MAX_ABILITY_SCORE:
-                            needed = 2 - sum(asi_choices.values())
-                            asi_choices[ab] = asi_choices.get(ab, 0) + min(
-                                needed, MAX_ABILITY_SCORE - current
-                            )
-
-                # Remove zero-valued entries to keep choices clean
-                asi_choices = {ab: v for ab, v in asi_choices.items() if v > 0}
-
-                total_asi_points = sum(asi_choices.values())
-                if total_asi_points == 2:
-                    try:
-                        apply_asi(profile, asi_choices)
-                        logs.append(f"Ability Score Improvement: {asi_choices}")
-                    except ValueError as exc:
-                        logger.warning(
-                            "[DND_PROGRESSION] apply_asi failed unexpectedly: %s", exc
-                        )
-                        logs.append(f"ASI pending (apply_asi error: {exc})")
-                else:
-                    # All primary abilities at 20/20
-                    logs.append(
-                        "ASI pending (all abilities at cap 20/20) -- skipped."
-                    )
+            new_level = profile["level"]
+            logs.append(
+                f"⚠️ Ability Score Improvement (рівень {new_level}): оберіть розподіл"
+                f" через UI — натисніть кнопки на повідомленні."
+            )
 
     return logs
 
