@@ -52,10 +52,10 @@ def test_lannisport_existing_categories_preserved():
 
 
 def test_casterly_rock_extended_private_scenes():
-    """Casterly Rock private scenes extended to 8 (3 NPC-specific + 5 generic)."""
+    """Casterly Rock private scenes extended to 9 (3 NPC-specific + 5 generic + Кімната у Таверні)."""
     private = LOCATION_SCENES["Кастерлі Рок"].get("private", [])
-    assert len(private) == 8, (
-        f"Очікувано 8 private scenes у Кастерлі Рок, знайдено {len(private)}: {private}"
+    assert len(private) == 9, (
+        f"Очікувано 9 private scenes у Кастерлі Рок, знайдено {len(private)}: {private}"
     )
     # NPC-specific preserved:
     assert "Покої Тайвіна" in private, f"'Покої Тайвіна' відсутні. private={private}"
@@ -66,10 +66,11 @@ def test_casterly_rock_extended_private_scenes():
     assert "Покинута Гостьова Кімната" in private, (
         f"'Покинута Гостьова Кімната' відсутня. private={private}"
     )
+    assert "Кімната у Таверні" in private, f"'Кімната у Таверні' відсутня. private={private}"
 
 
-def test_casterly_rock_all_eight_private_scenes():
-    """Всі 8 private scenes присутні у Кастерлі Рок."""
+def test_casterly_rock_all_nine_private_scenes():
+    """Всі 9 private scenes присутні у Кастерлі Рок."""
     private = LOCATION_SCENES["Кастерлі Рок"].get("private", [])
     expected = [
         "Покої Тайвіна",
@@ -80,6 +81,7 @@ def test_casterly_rock_all_eight_private_scenes():
         "Альков у Бібліотеці",
         "Зачинена Зала",
         "Покої Гостей",
+        "Кімната у Таверні",
     ]
     for scene in expected:
         assert scene in private, (
