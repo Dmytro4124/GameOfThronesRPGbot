@@ -823,6 +823,95 @@ def recompute_ac(profile: dict) -> int:
 
 
 # ---------------------------------------------------------------------------
+# HP recompute helper
+# ---------------------------------------------------------------------------
+
+def recompute_hp(profile: dict) -> None:
+    """Recompute hp_max from class.hit_die + CON_mod + level, write to profile.
+
+    D&D 5e PHB formula:
+    - L1: hp_max = hit_die_max + CON_mod  (take maximum on first level)
+    - Each subsequent level adds: hit_die_avg + CON_mod
+      where hit_die_avg = (hit_die // 2) + 1  (PHB rounding: d6 avg=4, d8 avg=5, d10 avg=6, d12 avg=7)
+
+    Simplified as:
+      hp_max = hit_die + (level - 1) * ((hit_die // 2) + 1) + level * CON_mod
+
+    hp_current is preserved proportionally:
+    - ratio = hp_current / old_hp_max  (clamped to [0, 1])
+    - new_hp_current = round(new_hp_max * ratio), floor 0
+    - If old_hp_max == 0, hp_current is set to new_hp_max (full health assumed)
+
+    Floor: hp_max >= 1 per D&D (even CON -5 at L1 cannot reduce to 0).
+    Legacy UI sync: profile["Здоров'я"] is updated to 0-100 percentage per §5.2.
+
+    No-op if hp_max is already correct (avoids spurious Sheets writes on unchanged profiles).
+
+    Boundary conditions:
+    - CON_mod negative: reduces hp_max, but floor of 1 still applies.
+    - Level 0 or missing: treated as 1 (safe fallback; profile invariant is level >= 1).
+    - Unknown class: falls back to hit_die=8 (Sellsword / median; logged as warning).
+    - No ability_scores key: CON treated as 10 (mod 0) — neutral, safe.
+    """
+    # Local imports — keep GOT_CLASSES/ability_modifier rebound on each call so
+    # tests can monkeypatch via core.dnd_classes / core.dnd_core namespaces.
+    from core.dnd_classes import GOT_CLASSES
+    from core.dnd_core import ability_modifier as _ab_mod
+
+    # --- Read profile fields ---
+    class_name: str = str(profile.get("class", "")).strip()
+    level: int = max(1, safe_int(profile.get("level", 1), 1))
+    con_score: int = safe_int(profile.get("ability_scores", {}).get("CON", 10), 10)
+    con_mod: int = _ab_mod(con_score)
+
+    # --- Resolve hit_die ---
+    cls_def = GOT_CLASSES.get(class_name)
+    if cls_def is None:
+        logger.warning(
+            "[DND_ENGINE] recompute_hp: unknown class %r — using hit_die=8 (fallback).",
+            class_name,
+        )
+        hit_die: int = 8
+    else:
+        hit_die = cls_def.hit_die
+
+    # --- D&D 5e formula ---
+    # L1: hit_die + CON_mod
+    # Per level above 1: hit_die_avg + CON_mod   (hit_die_avg = hit_die//2 + 1, PHB average)
+    hit_die_avg: int = (hit_die // 2) + 1
+    new_hp_max: int = max(1, hit_die + con_mod + (level - 1) * (hit_die_avg + con_mod))
+
+    # --- No-op check ---
+    old_hp_max: int = safe_int(profile.get("hp_max", 0), 0)
+    if old_hp_max == new_hp_max:
+        return  # nothing to do — avoid unnecessary mutations
+
+    # --- Preserve hp_current ratio ---
+    old_hp_current: int = safe_int(profile.get("hp_current", old_hp_max), old_hp_max)
+    if old_hp_max > 0:
+        ratio: float = max(0.0, min(1.0, old_hp_current / old_hp_max))
+        new_hp_current: int = max(0, round(new_hp_max * ratio))
+    else:
+        # old_hp_max was 0 (corrupt profile) — assume full health
+        new_hp_current = new_hp_max
+
+    # --- Write back ---
+    profile["hp_max"] = new_hp_max
+    profile["hp_current"] = new_hp_current
+
+    # Legacy UI sync: handlers.py reads "Здоров'я" as 0-100 percentage (§5.2)
+    # new_hp_max is guaranteed >= 1 by max(1, ...) above, so no division guard needed.
+    profile["Здоров'я"] = round(100 * new_hp_current / new_hp_max)
+
+    logger.info(
+        "[DND_ENGINE] recompute_hp: class=%s L%d CON=%d(mod%+d) "
+        "hp_max %d→%d  hp_current %d→%d",
+        class_name, level, con_score, con_mod,
+        old_hp_max, new_hp_max, old_hp_current, new_hp_current,
+    )
+
+
+# ---------------------------------------------------------------------------
 # apply_dnd_impacts
 # ---------------------------------------------------------------------------
 

@@ -311,6 +311,17 @@ def apply_asi(profile: dict, choices: dict[str, int]) -> dict:
             _e,
         )
 
+    # Recompute HP after ASI — CON change must update hp_max immediately.
+    # Same circular-import guard pattern as recompute_ac above.
+    try:
+        from core.dnd_engine import recompute_hp
+        recompute_hp(profile)
+    except ImportError as _e:
+        logger.warning(
+            "[DND_PROGRESSION] recompute_hp import failed in apply_asi — hp_max may be stale: %s",
+            _e,
+        )
+
     return profile
 
 

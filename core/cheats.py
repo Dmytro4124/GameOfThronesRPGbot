@@ -414,8 +414,25 @@ async def cmd_setability(message, bot, chat_id, args):
     old_val = ability_scores.get(ability, "?")
     ability_scores[ability] = raw_val
     profile["ability_scores"] = ability_scores
+
+    # Recompute AC when DEX changes (§5.2 — AC depends on DEX modifier).
+    # Recompute HP when CON changes (§5.2 — hp_max depends on CON modifier).
+    try:
+        from core.dnd_engine import recompute_ac, recompute_hp
+        if ability == "DEX":
+            recompute_ac(profile)
+        if ability == "CON":
+            recompute_hp(profile)
+    except ImportError:
+        pass  # non-fatal — values will be corrected on next normal turn
+
     await _save_profile(chat_id, profile)
-    await message.answer(f"✅ {ability}: {old_val} → {raw_val}")
+    if ability == "CON" and "hp_max" in profile:
+        hp_c = profile.get("hp_current", "?")
+        hp_m = profile.get("hp_max", "?")
+        await message.answer(f"✅ {ability}: {old_val} → {raw_val}  |  hp_max recomputed → {hp_c}/{hp_m}")
+    else:
+        await message.answer(f"✅ {ability}: {old_val} → {raw_val}")
 
 
 async def cmd_tp(message, bot, chat_id, args):
