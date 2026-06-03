@@ -666,6 +666,10 @@ def build_normal_resolve_prompt(
     skill_profs = profile.get("skill_profs", [])
     conditions = profile.get("conditions", [])
     cond_line = ", ".join(c.get("name", str(c)) for c in conditions) if conditions else "none"
+    try:
+        gold = int(profile.get("Особисте Золото", profile.get("gold", 0)) or 0)
+    except (TypeError, ValueError):
+        gold = 0
 
     # Build equipped_weapon block — only when structured weapon data is present
     equipped_weapon = profile.get("equipped_weapon")
@@ -809,6 +813,7 @@ Ability scores: {ab_line}
 Proficiency bonus: +{prof}
 Skill proficiencies: {skill_profs}
 Active conditions: {cond_line}
+Gold: {gold} золотих
 Current location: {loc_str}
 Current scene: {scene_str}{equipped_weapon_block}
 </player_state>
