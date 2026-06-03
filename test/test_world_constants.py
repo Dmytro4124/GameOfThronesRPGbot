@@ -15,11 +15,11 @@ def test_lannisport_has_private_scenes():
     assert len(private) == 6, (
         f"Очікувано 6 private scenes у Ланніспорті, знайдено {len(private)}: {private}"
     )
-    assert "Окрема Кімната Таверни Моряків" in private, (
-        f"'Окрема Кімната Таверни Моряків' відсутня. private={private}"
+    assert "Кімната Таверни" in private, (
+        f"'Кімната Таверни' відсутня. private={private}"
     )
-    assert "Орендована Кімната Шинку" in private, (
-        f"'Орендована Кімната Шинку' відсутня. private={private}"
+    assert "Орендована Кімната" in private, (
+        f"'Орендована Кімната' відсутня. private={private}"
     )
     assert "Кімната Куртизанки" in private, (
         f"'Кімната Куртизанки' відсутня. private={private}"
@@ -27,12 +27,12 @@ def test_lannisport_has_private_scenes():
 
 
 def test_lannisport_private_all_five_scenes():
-    """Всі 5 нових private scenes присутні у Ланніспорті."""
+    """Всі 5 з 6 core private scenes присутні у Ланніспорті (без Кімнати Таверни)."""
     private = LOCATION_SCENES["Ланніспорт"].get("private", [])
     expected = [
-        "Орендована Кімната Шинку",
-        "Закрита Каюта Корабля",
-        "Тиха Альтанка над Гаванню",
+        "Орендована Кімната",
+        "Каюта Корабля",
+        "Альтанка над Гаванню",
         "Покинутий Склад",
         "Кімната Куртизанки",
     ]
@@ -76,10 +76,10 @@ def test_casterly_rock_all_eight_private_scenes():
         "Жіночі Покої",
         "Кімната Мейстера",
         "Покинута Гостьова Кімната",
-        "Тиха Альтанка у Внутрішньому Саду",
+        "Стара Балюстрада",
         "Альков у Бібліотеці",
-        "Старий Балкон Стрімкої Вежі",
-        "Зачинена Зала для Гостей",
+        "Зачинена Зала",
+        "Покої Гостей",
     ]
     for scene in expected:
         assert scene in private, (

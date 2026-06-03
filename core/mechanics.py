@@ -376,7 +376,8 @@ async def validate_action(user_input, profile, debug_trace: dict | None = None):
     _inv_items = parse_inventory(profile.get("Інвентар", []))
     inventory_list = format_inventory(_inv_items) if _inv_items else "порожній"
 
-    prompt = build_validate_action_prompt(char_name, user_input, inventory_list)
+    gold = safe_int(profile.get("Особисте Золото", profile.get("gold", 0)), 0)
+    prompt = build_validate_action_prompt(char_name, user_input, inventory_list, gold)
     if debug_trace is not None:
         debug_trace["censor"]["prompt"] = prompt
     try:

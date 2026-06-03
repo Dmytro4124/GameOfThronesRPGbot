@@ -252,12 +252,13 @@ def _build_npc_roster_block(npc_context_text, curr_scene, departing_roster_text=
 
 # ── Validate action ───────────────────────────────────────────────────────────
 
-def build_validate_action_prompt(char_name, user_input, inventory_list) -> str:
+def build_validate_action_prompt(char_name, user_input, inventory_list, gold: int = 0) -> str:
     return f"""You are the Lore Keeper for "Game of Thrones" (Medieval Fantasy Adult RPG). Check the player's action for legality.
 
         PLAYER: {char_name}
         ACTION: "{user_input}"
         INVENTORY: {inventory_list}
+        GOLD: {gold} золотих
 
         === GENRE DECLARATION (HIGHEST PRIORITY — READ FIRST) ===
         This is Westeros: BLACK FANTASY. The tone of the entire world is grimdark.
@@ -274,6 +275,7 @@ def build_validate_action_prompt(char_name, user_input, inventory_list) -> str:
         ✅ "Я займаюся коханням з повією" — sexual act: valid.
         ✅ "Я кричу що я справжній король" — declaration: valid.
         ✅ "Я кажу що маю яйце дракона" — lie/bluff: valid.
+        ✅ "Я плачу 50 золотих" (гравець має 10) — gold is a resource, engine clamps to 0: valid.
 
         === CRITICAL OVERRIDE — VERBAL & ATTEMPT ACTIONS (CHECK FIRST) ===
         If the action is PURELY verbal (speech, commands, declarations, boasts, lies, threats, seduction)
@@ -290,6 +292,9 @@ def build_validate_action_prompt(char_name, user_input, inventory_list) -> str:
         3. ITEM FRAUD: Player PHYSICALLY produces or uses an item NOT listed in INVENTORY.
            BLOCKED: "Я виймаю валірійський меч" (not in inventory).
            ALLOWED: Any item that IS in inventory, or purely verbal claims about items.
+           GOLD IS A RESOURCE, NOT AN ITEM. Even if the player declares paying or pledging
+           MORE gold than they have, this is NOT item fraud. The engine handles insufficient
+           gold separately (gold balance clamps to 0; action proceeds). Do NOT block on gold quantity.
         4. ANACHRONISMS: Modern technology or concepts (firearms, F-16, telephone, internet, NATO, etc.).
         5. META-GAMING: Player controls the narrative as author ("Перемотай до кінця", "Дракон рятує мене").
 
