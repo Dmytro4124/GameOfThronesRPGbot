@@ -327,7 +327,7 @@ async def _finalise_character_and_start(bot: Bot, chat_id: int, full_profile: di
     ability_accept and pb_confirm callbacks share the same path.
 
     Precondition: full_profile already has heritage bonuses applied and
-    recompute_ac() already called by the caller.
+    recompute_ac() and recompute_hp() already called by the caller.
     """
     user_id = chat_id
     char_name = full_profile.get("Ім'я", "")
@@ -468,7 +468,7 @@ async def callback_ability_accept(call: CallbackQuery, bot: Bot):
 
     try:
         from core.dnd_heritages import apply_heritage_bonuses
-        from core.dnd_engine import recompute_ac
+        from core.dnd_engine import recompute_ac, recompute_hp
 
         profile = session.get('temp_profile')
         if not profile:
@@ -479,6 +479,7 @@ async def callback_ability_accept(call: CallbackQuery, bot: Bot):
         # Apply heritage bonuses to the base profile
         profile = apply_heritage_bonuses(profile, heritage_name, ability_choices=None)
         recompute_ac(profile)
+        recompute_hp(profile)
 
         # Remove the preview inline keyboard
         try:
@@ -642,7 +643,7 @@ async def callback_pb_confirm(call: CallbackQuery, bot: Bot):
     try:
         from core.character_creation import point_buy_remaining
         from core.dnd_heritages import apply_heritage_bonuses
-        from core.dnd_engine import recompute_ac
+        from core.dnd_engine import recompute_ac, recompute_hp
 
         profile = session.get('temp_profile')
         if not profile:
@@ -660,6 +661,7 @@ async def callback_pb_confirm(call: CallbackQuery, bot: Bot):
         heritage_name = profile.get("heritage", "")
         profile = apply_heritage_bonuses(profile, heritage_name, ability_choices=None)
         recompute_ac(profile)
+        recompute_hp(profile)
 
         try:
             await call.message.edit_reply_markup(reply_markup=None)
