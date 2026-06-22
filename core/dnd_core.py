@@ -146,6 +146,97 @@ def clamp_dc(value: int) -> int:
     return best
 
 
+# ---------------------------------------------------------------------------
+# Reputation → DC band-matrix (§5.2 hard rule, implemented in Python engine)
+# ---------------------------------------------------------------------------
+
+# Action severity tiers — source of truth for reputation_adjusted_dc.
+# Worker returns action_severity ∈ SEVERITY_TIERS; engine translates to DC.
+SEVERITY_TIERS: tuple[str, ...] = ("TRIVIAL", "NORMAL", "HARD", "HORRIBLE")
+
+# DC boundaries for the band-matrix.
+REP_DC_FLOOR: int = 2   # DC can never go below 2 (LEGAL_DCS[0])
+CRIT_ONLY_DC: int = 22  # DC 22 = "crit-only" (nat-20 auto-success still fires)
+
+# Fallback / documentation base-DC per severity (baseline band 0..20).
+# Used as quick reference; authoritative values are in REP_DC_MATRIX.
+SEVERITY_BASE_DC: dict[str, int] = {
+    "TRIVIAL":  5,
+    "NORMAL":  10,
+    "HARD":    15,
+    "HORRIBLE": 20,
+}
+
+# Reputation→DC band-matrix.
+# Each entry: ((score_low, score_high), {tier: dc}).
+# All DC values are already legal (∈ LEGAL_DCS).
+# Bands are inclusive, non-overlapping, and cover -100..100 exhaustively.
+# Neutral band (score == 0) is listed explicitly for readability even though
+# it shares DC values with the 1..20 band.
+REP_DC_MATRIX: list[tuple[tuple[int, int], dict[str, int]]] = [
+    # (low, high)   TRIVIAL  NORMAL  HARD  HORRIBLE
+    ((81,  100), {"TRIVIAL":  2, "NORMAL":  2, "HARD":  2, "HORRIBLE":  2}),
+    ((61,   80), {"TRIVIAL":  2, "NORMAL":  2, "HARD":  2, "HORRIBLE":  5}),
+    ((41,   60), {"TRIVIAL":  2, "NORMAL":  2, "HARD":  5, "HORRIBLE": 10}),
+    ((21,   40), {"TRIVIAL":  2, "NORMAL":  5, "HARD": 12, "HORRIBLE": 15}),
+    (( 1,   20), {"TRIVIAL":  5, "NORMAL": 10, "HARD": 15, "HORRIBLE": 20}),
+    (( 0,    0), {"TRIVIAL":  5, "NORMAL": 10, "HARD": 15, "HORRIBLE": 20}),
+    ((-20,  -1), {"TRIVIAL": 10, "NORMAL": 12, "HARD": 17, "HORRIBLE": 22}),
+    ((-40, -21), {"TRIVIAL": 10, "NORMAL": 15, "HARD": 20, "HORRIBLE": 22}),
+    ((-60, -41), {"TRIVIAL": 15, "NORMAL": 17, "HARD": 20, "HORRIBLE": 22}),
+    ((-80, -61), {"TRIVIAL": 15, "NORMAL": 20, "HARD": 22, "HORRIBLE": 22}),
+    ((-100, -81), {"TRIVIAL": 20, "NORMAL": 20, "HARD": 22, "HORRIBLE": 22}),
+]
+
+
+def reputation_adjusted_dc(severity: str, rep_score: int | None) -> int:
+    """Return DC from the reputation band-matrix for the given severity and reputation score.
+
+    Args:
+        severity: action severity string. Normalized to .strip().upper() internally.
+            Must be one of SEVERITY_TIERS; if not — returns sentinel -1 (caller keeps
+            Worker-supplied difficulty unchanged).
+        rep_score: numeric reputation score for the target NPC (-100..100).
+            None → treated as baseline band (1..20), same as neutral/unknown NPC.
+
+    Returns:
+        int DC ∈ LEGAL_DCS (2..22), or -1 if severity is invalid/unknown.
+
+    Guarantees:
+        - Never raises on valid inputs (severity str + int/None rep_score).
+        - rep_score outside -100..100 is clamped to the nearest extremal band.
+        - Every returned DC passes through clamp_dc() as a safety-net even though
+          matrix values are pre-validated as legal.
+        - DC floor: REP_DC_FLOOR (2), DC ceiling: CRIT_ONLY_DC (22).
+    """
+    # --- Normalize severity ---
+    norm_severity = severity.strip().upper() if severity else ""
+    if norm_severity not in SEVERITY_TIERS:
+        return -1  # sentinel: caller must leave difficulty unchanged
+
+    # --- Resolve rep_score: None → baseline band (same as 1..20) ---
+    if rep_score is None:
+        rep_score = 1  # lands in the (1, 20) band
+
+    # --- Clamp score to matrix coverage: -100..100 ---
+    # Scores outside this range are theoretical (profile clamp should prevent them),
+    # but clamp here defensively so we never miss all matrix rows.
+    if rep_score > 100:
+        rep_score = 100
+    elif rep_score < -100:
+        rep_score = -100
+
+    # --- Linear scan: first matching band wins ---
+    for (low, high), tier_map in REP_DC_MATRIX:
+        if low <= rep_score <= high:
+            raw_dc = tier_map[norm_severity]
+            # Safety-net clamp (values are pre-validated, but invariant must hold)
+            return clamp_dc(raw_dc)
+
+    # Should never reach here (matrix covers -100..100 fully), but be safe:
+    return clamp_dc(SEVERITY_BASE_DC[norm_severity])
+
+
 @dataclass
 class CheckResult:
     """Full result of a d20 ability/skill/saving throw check."""

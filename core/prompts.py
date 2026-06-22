@@ -871,7 +871,55 @@ Pick ABILITY: STR(lift/melee) DEX(stealth/ranged) CON(endure) INT(lore/investiga
 Pick SKILL (optional, from <output_schema> list). RULE: skill_used≠"None" → ability_used must be non-None.
 No real resistance → ability_used="None", skill_used="None", difficulty=2.
 
+[GATE A — ACTION_SEVERITY (виконується ПІСЛЯ GATE 2, ДО GATE 3)]
+Оціни інтринсік-складність САМОЇ дії незалежно від того, хто її виконує і проти кого.
+
+!! КРИТИЧНО: оцінюй ЛИШЕ внутрішню складність дії, НЕ ставлення NPC !!
+Репутацію/прихильність NPC engine застосовує автоматично поверх severity.
+НЕ знижуй і НЕ підвищуй severity через те, що NPC дружній або ворожий.
+Дружній і ворожий NPC ОДНАКОВО отримають той самий severity — engine сам скоригує DC.
+
+Чотири тири:
+  TRIVIAL  — дізнатись де хтось є, проста відкрита інформація (розклад варти),
+             дрібне прохання (дати дорогу, відчинити браму), купити звичайний товар за ціною.
+             Приклади: "Де знаходиться Джон?", "Дай мені свічку", "Чи відчинена таверна?".
+
+  NORMAL   — плітки та чутки, звичайний торг (збити ціну на 20-30%), пересічне переконання
+             (попросити впустити без черги, умовити розповісти загальновідоме).
+             Приклади: "Переконую варту впустити мене", "Торгуюсь за ціну коня",
+             "Розпитую про останні новини при дворі".
+
+  HARD     — витягти СПРАВЖНЮ таємницю (що охоронець знає але зобов'язаний мовчати),
+             найняти вбивцю як замовник, серйозна інтрига (підробити наказ, схилити посадовця до зради),
+             переконати NPC зробити щось суттєво проти його інтересів.
+             Приклади: "Підкупляю митника щоб пропустив заборонений товар",
+             "Переконую мейстера розкрити зміст листа лорда",
+             "Домовляюсь з найманцем убити конкурента".
+
+  HORRIBLE — попросити NPC скоїти монструозне, що він за будь-яких обставин вважає неприйнятним:
+             вбити дитину, зрадити власний дім/сюзерена заради ворога, вчинити публічну ганьбу роду.
+             Навіть найлояльніший союзник чинить внутрішній спротив. Дія рідкісна — не ставити
+             HORRIBLE без явних маркерів монструозності у тексті дії.
+             Приклади: "Переконую охоронця вбити власну дитину",
+             "Схиляю лорда Старка зрадити Північ і присягнути Ланністерам у таємному листі".
+
+Якщо дія НЕ спрямована на NPC (рух, спостереження, взаємодія із середовищем, самостійні дії):
+  → постав чесний severity (зазвичай TRIVIAL або NORMAL залежно від складності дії).
+  → engine не застосує rep-модифікатор без конкретного target — severity все одно потрібен.
+
+Запиши результат у JSON-поле action_severity. Продовжуй до GATE 3.
+
 [GATE 3 — DC — STRICT ENUM {_LEGAL_DCS_NORMAL}]
+Якщо дія не NPC-спрямована — difficulty = baseline по action_severity нижче.
+Якщо дія NPC-спрямована — difficulty = той самий baseline: engine додасть rep-модифікатор сам.
+НЕ враховуй репутацію при виборі difficulty — цей крок виконує engine після Worker.
+
+BASELINE difficulty по action_severity (відправна точка):
+  TRIVIAL  → DC 5  (trivial-with-flavor; інколи DC 2 якщо GATE 1 вже спрацював)
+  NORMAL   → DC 10 (easy; реальний виклик без тренування)
+  HARD     → DC 15 (hard; реальний виклик для proficient L1)
+  HORRIBLE → DC 20 (epic; межа можливостей без репутаційної допомоги)
+
 Anchor points (use the LOWEST DC that honestly fits the action):
   DC 2  → ULTRA-TRIVIAL: просаїчні дії без жодного опору чи навичкового аспекту
            (взяти яблуко зі столу, посміхнутися, роздивитися, кивнути, сісти).
@@ -896,8 +944,6 @@ BIAS RULE: Якщо ти обираєш DC ≥ 12 — СТОП. Запитай �
 
 ДЕФОЛТ: ULTRA-TRIVIAL → DC 2, trivial-with-flavor → DC 5, easy → DC 10. Більший DC лише якщо є явна причина.
 
-Rep modifier: score≥60→-2DC; score≤-60→+5DC. Escalation: request→12-15; threat→17-20; assassination→20-22.
-
 [GATE 4 — GOLD]
 Gold physically left player? NO→gold_impact="none". YES voluntary→exact tag. YES involuntary→"-N".
 
@@ -913,12 +959,32 @@ If player_action is a physical attack TARGETING an NPC (атак*, удар*, б
   → ALWAYS combat_imminent=true, REGARDLESS of likely outcome.
   → ALWAYS set hp_damage_dice="none" — NPC damage resolves in the COMBAT pipeline next turn.
   → Do NOT use hp_damage_dice to represent damage dealt BY the player TO an NPC.
-  → MANDATORY TARGET RULE: when combat_imminent=true you MUST identify the attacked NPC by name.
-      Step 1: Read player_action and find the NPC being physically attacked.
-      Step 2: Match that NPC's exact name from the NPCs present list above.
-      Step 3: Set reputation_target_npc = that exact name. NEVER leave it empty when combat_imminent=true.
-      If player_action is ambiguous ("атакую першого-ліпшого") → pick the NPC most consistent with the scene.
-      Justify your choice in reputation_reasoning (one sentence).
+
+MANDATORY TARGET RULE (розширена, не лише для combat_imminent):
+reputation_target_npc заповнюється для БУДЬ-ЯКОЇ дії, спрямованої на конкретного ПРИСУТНЬОГО NPC:
+  — фізична атака (combat_imminent=true)
+  — соціальна дія: переконання, обман, лестощі, залякування, прохання, погроза
+  — скіл-дія: крадіжка у конкретного NPC, допит, підкуп, шпигунство за конкретною особою
+  — будь-яка дія де NPC є цільовим учасником, а не просто спостерігачем
+
+  Step 1: Визнач, чи дія спрямована на КОНКРЕТНОГО присутнього NPC (не натовп, не оточення).
+  Step 2: Якщо так — знайди точне ім'я NPC зі списку "NPCs present" вище.
+  Step 3: Set reputation_target_npc = точне ім'я. NEVER leave it empty for NPC-directed actions.
+  Якщо дія не спрямована на конкретного NPC (рух, спостереження, взаємодія із середовищем,
+    дія на натовп/"всіх присутніх") → reputation_target_npc = "".
+  Якщо player_action неоднозначна → pick the NPC most consistent with the scene.
+  Justify your choice in reputation_reasoning (one sentence).
+
+ДОДАТКОВЕ ПРАВИЛО для NPC-directed дій (крім фізичної атаки):
+  Якщо reputation_target_npc ≠ "" і дія є соціальною/скіл-перевіркою →
+  ability_used ПОВИНЕН бути ≠ "None". Для соціальних дій зазвичай CHA + відповідний skill:
+    persuasion/торг → CHA + Persuasion
+    обман/брехня   → CHA + Deception
+    залякування    → CHA + Intimidation
+    підкуп          → CHA + Persuasion (або Deception, якщо прихований)
+    крадіжка у NPC → DEX + Sleight of Hand
+    допит/тиск     → CHA + Intimidation (або Insight для читання реакції)
+  Це необхідно щоб engine міг виконати кидок кубика. Без ability_used кидка не буде.
 
 hp_damage_dice PURPOSE — PLAYER SELF-DAMAGE ONLY:
   hp_damage_dice is ONLY for damage received BY the PLAYER (falling, poison, starvation, trap, environmental).
@@ -1181,14 +1247,23 @@ location_impact: exact canonical name when player moves to a different canonical
 MANDATORY KEYS — all must be present, no extras required at top level:
 
 action_type      : "standard" | "training" — GATE 7 verdict (training = explicit practice/study)
+action_severity  : "TRIVIAL" | "NORMAL" | "HARD" | "HORRIBLE"
+                   GATE A verdict: інтринсік-складність САМОЇ дії, НЕ залежить від ставлення NPC.
+                   Engine застосовує репутаційний модифікатор поверх severity автоматично.
+                   TRIVIAL = відкрита інформація / дрібне прохання
+                   NORMAL  = звичайне переконання / торг / плітки
+                   HARD    = витягти таємницю / підкуп посадовця / інтрига проти інтересів NPC
+                   HORRIBLE = просити NPC скоїти монструозне
 ability_used     : {_LEGAL_ABILITIES}
 skill_used       : {_LEGAL_SKILLS_18}
 difficulty       : one integer from {{{_LEGAL_DCS_NORMAL}}}
+                   BASELINE (без rep-модифікатора): TRIVIAL→5, NORMAL→10, HARD→15, HORRIBLE→20.
+                   НЕ враховуй репутацію — engine додає її сам.
 advantage_reason : string — WHY the player has advantage (empty string if none)
 disadvantage_reason : string — WHY the player has disadvantage (empty string if none)
 combat_imminent  : bool — true only if PHYSICAL attack initiated this turn
 skill_check_reasoning : string ≥40 chars — GATE 1-2 walkthrough
-difficulty_reasoning  : string ≥20 chars — GATE 3 walkthrough
+difficulty_reasoning  : string ≥20 chars — GATE 3 walkthrough (включаючи вибраний action_severity та baseline DC)
 gold_reasoning        : string ≥20 chars — GATE 4 walkthrough
 verdict_text     : string — 1 sentence for GM context (Ukrainian)
 xp_award         : one integer from {{{_LEGAL_XP}}}
@@ -1213,8 +1288,11 @@ reputation_delta_failure : integer -7..+7 — relation change IF the roll FAILS.
   рідко позитивний — лише якщо сама спроба вразила (failure +1 max)
   • Action NOT directed at any specific NPC → 0
 reputation_target_npc : string — exact NPC name or "".
-                    REQUIRED (non-empty) when combat_imminent=true — must be the name of the NPC
-                    the player is physically attacking, matched exactly from the NPCs present list.
+                    REQUIRED (non-empty) для БУДЬ-ЯКОЇ дії спрямованої на конкретного присутнього NPC:
+                    фізична атака, переконання, обман, залякування, прохання, підкуп, крадіжка у NPC,
+                    допит, погроза, інтрига проти конкретної особи.
+                    Пусто ("") ЛИШЕ якщо дія не спрямована на конкретного NPC (рух, спостереження,
+                    взаємодія із середовищем, дія на натовп). Ім'я — точно зі списку NPCs present.
 updates (object):
   minutes_passed  : integer 1..600
   location_impact : "none" | exact canonical location name | "В дорозі"
@@ -1242,12 +1320,13 @@ rest_type  : "none" | "short" | "long" — GATE R verdict (default: "none")
 OUTPUT STRICTLY VALID JSON. NO MARKDOWN. NO BACKTICKS:
 {{
     "skill_check_reasoning": "GATE 1: Is this a free action? [YES/NO]. GATE 2: Which ability? Which skill? Why?",
-    "difficulty_reasoning": "GATE 3: Nature of action → which DC from enum and why?",
+    "difficulty_reasoning": "GATE 3: Nature of action → which DC from enum and why? action_severity=NORMAL → baseline DC 10.",
     "gold_reasoning": "GATE 4: Did gold physically leave possession? [YES/NO] → final value?",
     "action_type": "standard",
+    "action_severity": "NORMAL",
     "ability_used": "STR",
     "skill_used": "Athletics",
-    "difficulty": 15,
+    "difficulty": 10,
     "advantage_reason": "",
     "disadvantage_reason": "",
     "combat_imminent": false,

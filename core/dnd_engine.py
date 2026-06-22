@@ -18,7 +18,7 @@ from core.ai_client import model_worker, clean_and_parse_json, build_strict_conf
 from core.dnd_core import (
     roll_d20, ability_modifier, proficiency_bonus, clamp_dc,
     LEGAL_DCS, skill_check, ability_check, saving_throw, CheckResult,
-    score_to_relation_text,
+    score_to_relation_text, reputation_adjusted_dc, SEVERITY_TIERS,
 )
 from core.dnd_skills import SKILLS, get_ability_for_skill, is_valid_skill
 from core.dnd_classes import GOT_CLASSES, get_class_features_at_level
@@ -228,6 +228,7 @@ async def resolve_normal_action(
             "action_type": "standard",
             "skill_used": "None",
             "ability_used": "None",
+            "action_severity": "",   # no severity → rep-DC branch no-ops
             "outcome": "SUCCESS",
             "natural_roll": 0,
             "total_score": 0,
@@ -261,6 +262,7 @@ async def resolve_normal_action(
     ability_used: str = str(data.get("ability_used", "None")).strip()
     skill_used: str = str(data.get("skill_used", "None")).strip()
     raw_difficulty: int = safe_int(data.get("difficulty", AUTO_SUCCESS_MAX_DC), AUTO_SUCCESS_MAX_DC)
+    action_severity: str = str(data.get("action_severity", "")).strip().upper()
     advantage_reason: str = str(data.get("advantage_reason", "")).strip()
     disadvantage_reason: str = str(data.get("disadvantage_reason", "")).strip()
     combat_imminent: bool = bool(data.get("combat_imminent", False))
@@ -442,6 +444,47 @@ async def resolve_normal_action(
         logger.info(f"[DND_ENGINE] Danger floor applied: DC → {clamped_dc}")
 
     difficulty: int = clamped_dc
+    # Danger-floor for rep-matrix: only physically hazardous actions must not
+    # fall below _DANGER_DC_FLOOR regardless of rep. Non-dangerous actions use
+    # LEGAL_DCS[0] (=2) as the floor — effectively "no floor" since any legal
+    # adj_dc is already ≥ 2. This allows rep-matrix to *lower* DC for friendly
+    # NPCs on normal actions (e.g. HARD + rep 85 → DC 2).
+    _danger_floor_dc: int = (
+        clamp_dc(_DANGER_DC_FLOOR) if _has_danger_keyword(user_input) else LEGAL_DCS[0]
+    )
+
+    # --- 5b. Reputation → DC band-matrix (hard rule, §5.2) ---
+    # action_severity from Worker (TRIVIAL/NORMAL/HARD/HORRIBLE) overrides
+    # Worker-supplied difficulty entirely when valid — anti-double-count.
+    # rep_score is None when target NPC is not in scene → baseline band.
+    _rep_target: str = reputation_target_npc  # already read at line ~277
+    rep_score: int | None = (
+        (npc_reputation_context or {}).get(_rep_target)
+        if _rep_target else None
+    )
+    rep_directed: bool = bool(_rep_target) and rep_score is not None
+
+    if not rep_directed and _rep_target:
+        # NPC named but not in scene — log and fall through to baseline treatment
+        logger.info(
+            f"[DND_ENGINE] rep target '{_rep_target}' not in scene → baseline DC"
+        )
+
+    if action_severity in SEVERITY_TIERS:
+        _adj = reputation_adjusted_dc(action_severity, rep_score)
+        if _adj != -1:
+            # Danger-floor must not be undercut by a friendly reputation.
+            # If user triggered the danger-floor (e.g. jumping), keep at least
+            # that floor even if the NPC is the player's best friend.
+            difficulty = max(_adj, _danger_floor_dc)
+            logger.info(
+                f"[DND_ENGINE] rep-DC: severity={action_severity} "
+                f"rep={rep_score} → adj_DC={_adj} "
+                f"danger_floor={_danger_floor_dc} → final DC={difficulty}"
+            )
+        # If _adj == -1 (invalid severity — should not happen after in-check above):
+        # leave difficulty unchanged (Worker fallback).
+    # If action_severity absent/invalid → difficulty stays as Worker-supplied / danger-floor.
 
     # --- 6. Validate XP award ---
     xp_award: int = raw_xp if raw_xp in _LEGAL_XP else 0
@@ -473,10 +516,13 @@ async def resolve_normal_action(
             disadvantage_reason = "[СИСТЕМНА ВТОМА: Гравець ледве тримається на ногах]"
 
     # --- 8. Check if action is free (no roll) ---
+    # NPC-directed actions (rep_directed=True) always force a roll — even at DC 2.
+    # Owner decision: nat-1 / nat-20 must always be possible for directed actions.
     is_free_action = (
         skill_used in ("None", "none", "", "Немає")
         and ability_used in ("None", "none", "", "Немає")
         and difficulty <= AUTO_SUCCESS_MAX_DC
+        and not rep_directed
     )
 
     if is_free_action:
@@ -538,8 +584,22 @@ async def resolve_normal_action(
                 proficient=proficient,
             )
         else:
-            # No skill, no ability — treat as free action
-            result = _fake_auto_success_result(difficulty)
+            # No skill, no ability specified.
+            # If this is an NPC-directed action (rep_directed), force CHA ability_check
+            # so nat-1 / nat-20 can fire instead of routing to fake auto-success.
+            if rep_directed:
+                ability_used = "CHA"
+                result: CheckResult = ability_check(
+                    profile=profile,
+                    ability="CHA",
+                    dc=difficulty,
+                    advantage=has_advantage,
+                    disadvantage=has_disadvantage,
+                    proficient=False,
+                )
+            else:
+                # No NPC target — treat as free action (no roll)
+                result = _fake_auto_success_result(difficulty)
 
         natural_roll = result.natural
         total_score = result.total
