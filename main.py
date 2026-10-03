@@ -70,8 +70,9 @@ async def on_shutdown(bot: Bot):
         await drain_pending_sheet_writes(timeout=10)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"drain_pending_sheet_writes failed: {type(e).__name__}")
-    if WEBHOOK_URL:
-        await bot.delete_webhook()
+    # Webhook тут НЕ видаляємо: на Render free tier інстанс засинає після 15 хв простою (SIGTERM),
+    # і без webhook Telegram більше не доставляє апдейти -- сервіс ніколи не прокинеться.
+    # Також при деплої shutdown старого інстансу стер би webhook, який щойно виставив новий (race).
     await bot.session.close()
 
 
@@ -81,6 +82,7 @@ def main():
 
     if WEBHOOK_URL:
         app = web.Application()
+        app.router.add_get('/', health_check)
         webhook_requests_handler = SimpleRequestHandler(
             dispatcher=dp,
             bot=bot,
