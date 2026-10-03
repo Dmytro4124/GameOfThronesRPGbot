@@ -21,3 +21,4 @@ qa_logs/
 # Intro narrative cache (persisted on disk, not tracked in git)
 intro_cache.json
 intro_cache.tmp
+logs/

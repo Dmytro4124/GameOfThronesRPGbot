@@ -96,6 +96,11 @@ from core.world import _build_deterministic_dnd_profile
 from core.dnd_heritages import apply_heritage_bonuses
 from core.dnd_engine import recompute_ac
 
+# Restore real database modules immediately: later-collected test files (e.g.
+# test_engine.py) import core.engine, which would otherwise permanently bind
+# MagicMock database.operations (save_user_data etc.) into core.engine.
+_restore_db_mocks()
+
 
 # ---------------------------------------------------------------------------
 # Helpers

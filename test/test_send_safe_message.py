@@ -224,3 +224,41 @@ def test_send_safe_message_all_three_fail_raises():
         f"All three attempts must be made before raise. "
         f"Actual call_count={bot.send_message.call_count}"
     )
+
+
+# ─── send_safe_message returns list of sent message_ids (Narrator A/B cleanup) ──
+
+def _msg(mid):
+    m = MagicMock()
+    m.message_id = mid
+    return m
+
+
+def test_send_safe_message_returns_single_id():
+    from bot.utils import send_safe_message
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=_msg(41))
+    assert run_async(send_safe_message(bot, 1, "hello")) == [41]
+
+
+def test_send_safe_message_returns_all_chunk_ids():
+    from bot.utils import send_safe_message
+    bot = MagicMock()
+    bot.send_message = AsyncMock(side_effect=[_msg(1), _msg(2), _msg(3)])
+    with patch("bot.utils.asyncio.sleep", new=AsyncMock()):
+        ids = run_async(send_safe_message(bot, 1, "a" * 8500, parse_mode=None))
+    assert ids == [1, 2, 3]
+
+
+def test_send_safe_message_fallback_send_id_is_returned():
+    from bot.utils import send_safe_message
+    bot = MagicMock()
+    bot.send_message = AsyncMock(side_effect=[Exception("bad markdown"), _msg(77)])
+    assert run_async(send_safe_message(bot, 1, "hello")) == [77]
+
+
+def test_send_safe_message_non_int_message_id_is_skipped():
+    from bot.utils import send_safe_message
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=MagicMock())  # message_id is a MagicMock, not int
+    assert run_async(send_safe_message(bot, 1, "hello")) == []

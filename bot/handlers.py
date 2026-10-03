@@ -10,7 +10,8 @@ import traceback
 from datetime import datetime
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.menus import get_dynamic_menu, get_main_menu, build_ability_preview_keyboard, build_point_buy_keyboard, build_asi_picker_keyboard
@@ -27,7 +28,11 @@ from core.world import (
 from core.intro_cache import get_cached_intro, set_cached_intro
 from core.world_constants import format_player_map
 from core.engine import process_game_turn, user_sessions
-from config import ADMIN_TELEGRAM_IDS, EROTIC_USERS, BOT_VERSION, MODEL_MAIN_NAME
+from core.narrator_ab import (
+    get_pending, pop_pending, is_expired, resolve_pick, finalize_record,
+    append_log, append_note,
+)
+from config import ADMIN_TELEGRAM_IDS, EROTIC_USERS, BOT_VERSION, MODEL_MAIN_NAME, NARRATOR_AB_LOG_PATH
 from bot.help_text import HELP_TEXT, ADMIN_HELP_TEXT
 
 
@@ -1349,6 +1354,7 @@ async def callback_restart_confirm_handler(call: CallbackQuery):
     chat_id = call.message.chat.id
     user_id = call.from_user.id
     await call.message.edit_reply_markup(reply_markup=None)
+    await _abandon_pending(chat_id)
     await call.message.answer("💀 Старий світ зникає у темряві...")
 
     # 1. Блокуємо ігрові дії під час ініціалізації
@@ -1524,6 +1530,159 @@ async def _send_debug_trace_file(bot: Bot, chat_id: int, trace: dict) -> None:
     )
 
 
+# ───────────────────────── Narrator A/B (blind vote) ─────────────────────────
+
+async def _abandon_pending(chat_id: int) -> None:
+    """Скидає pending A/B-вибір без коміту в історію (рестарт гри). Лог: reason=abandoned."""
+    p = pop_pending(chat_id)
+    if p is None:
+        return
+    await append_log(finalize_record(p.log_record, vote=None, vote_raw=None, vote_ms=None,
+                                     reason="abandoned"))
+
+
+async def _commit_choice(chat_id: int, p, winner, *, vote, vote_raw, vote_ms, reason=None) -> str | None:
+    """Коммітить історію переможця і ЗАВЖДИ пише лог. Повертає текст помилки коміту (або None)."""
+    err = None
+    try:
+        from core.engine import commit_narration_to_history  # lazy: keeps module import light
+        await commit_narration_to_history(
+            chat_id, p.deferred_history["user_input"], winner.text, p.deferred_history["mech_updates"])
+    except Exception as e:  # noqa: BLE001
+        err = f"{type(e).__name__}: {str(e)[:200]}"
+        logger.error(f"[NARRATOR_AB] commit failed chat_id={chat_id}: {err}", exc_info=True)
+    finally:
+        await append_log(finalize_record(
+            p.log_record, vote=vote, vote_raw=vote_raw, vote_ms=vote_ms,
+            reason=reason or (f"commit_error: {err}" if err else None)))
+    return err
+
+
+async def _expire_pending(chat_id: int) -> None:
+    """TTL сплив: автокоміт випадкового варіанту, vote=None, reason=ttl_expired."""
+    p = pop_pending(chat_id)
+    if p is None:
+        return
+    winner, _ = resolve_pick(p, "tie")
+    await _commit_choice(chat_id, p, winner, vote=None, vote_raw=None, vote_ms=None,
+                         reason="ttl_expired")
+
+
+async def _delete_messages(bot: Bot, chat_id: int, ids: list) -> None:
+    for mid in ids:
+        try:
+            await bot.delete_message(chat_id, mid)
+        except TelegramBadRequest:
+            pass
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[NARRATOR_AB] delete_message failed: {type(e).__name__}: {str(e)[:100]}")
+
+
+def _ab_intent_prefix(p) -> str:
+    """Той самий префікс, що й у normal-шляху (`🗣️ _intent_` + порожній рядок), або ''."""
+    di = getattr(p, "display_intent", "") or ""
+    return f"🗣️ _{di}_\n\n" if di else ""
+
+
+async def _send_ab_variants(bot: Bot, chat_id: int, p) -> None:
+    """Надсилає два безіменні варіанти + повідомлення з кнопками вибору."""
+    ids: list[int] = []
+    p.variant_message_ids = ids  # заповнюється по ходу, щоб cleanup бачив частково надіслане
+    for n, r in enumerate(p.order, start=1):
+        icon = "🅰" if n == 1 else "🅱"
+        prefix = _ab_intent_prefix(p) if n == 1 else ""  # один раз над обома варіантами
+        ids.extend(await send_safe_message(bot, chat_id, f"{prefix}{icon} Варіант {n}\n\n{r.text}") or [])
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Обираю 1", callback_data=f"ab_{p.turn_id}_1")
+    kb.button(text="Обираю 2", callback_data=f"ab_{p.turn_id}_2")
+    kb.button(text="Обидва ок", callback_data=f"ab_{p.turn_id}_tie")
+    kb.adjust(3)
+    m = await bot.send_message(chat_id, "Який варіант кращий?", reply_markup=kb.as_markup())
+    ids.append(m.message_id)
+
+
+@router.callback_query(F.data.startswith("ab_"))
+async def callback_ab_vote(cq: CallbackQuery, bot: Bot):
+    # chat_id == user_id (приватні чати); cq.message може бути None (недоступне повідомлення).
+    chat_id = cq.from_user.id
+    parts = (cq.data or "").split("_")
+    if len(parts) != 3 or parts[2] not in ("1", "2", "tie"):
+        await cq.answer("Вибір вже зроблено або застарів")
+        return
+    _, turn_id, pick = parts
+    # Той самий user lock, що й у ході. Перевірка ДО pop_pending, щоб голос можна було повторити.
+    if chat_id in active_processing:
+        await cq.answer("Зачекай, хід ще обробляється")
+        return
+    active_processing.add(chat_id)
+    try:
+        p = pop_pending(chat_id, turn_id)  # єдина точка істини проти double-click
+        if p is None:
+            await cq.answer("Вибір вже зроблено або застарів")
+            return
+        try:
+            winner, vote = resolve_pick(p, pick)
+            vote_ms = int((time.time() - p.created) * 1000)
+            await _commit_choice(chat_id, p, winner, vote=vote, vote_raw=pick, vote_ms=vote_ms)
+            await _delete_messages(bot, chat_id, list(p.variant_message_ids))
+            await send_game_response(bot, chat_id, _ab_intent_prefix(p) + winner.text + p.change_log,
+                                     p.suggested_actions)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"[NARRATOR_AB] vote handler failed: {type(e).__name__}: {str(e)[:200]}", exc_info=True)
+        finally:
+            try:
+                await cq.answer()
+            except Exception:  # noqa: BLE001
+                pass
+    finally:
+        active_processing.discard(chat_id)
+
+
+@router.message(Command("ab_note"))
+async def cmd_ab_note(message: Message, command: CommandObject):
+    note = (command.args or "").strip()
+    if not note:
+        await message.answer("Використання: /ab_note <текст нотатки>", parse_mode=None)
+        return
+    ok = await append_note(message.chat.id, message.from_user.id, note)
+    await message.answer("Нотатку збережено" if ok else "Немає A/B-ходу для нотатки")
+
+
+def _read_ab_votes(path: str) -> list[dict]:
+    rows = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("type") == "turn" and rec.get("shown_order") is not None:
+                    rows.append(rec)
+    except FileNotFoundError:
+        pass
+    return rows
+
+
+@router.message(Command("ab_stats"))
+async def cmd_ab_stats(message: Message, command: CommandObject):
+    if message.chat.id not in ADMIN_TELEGRAM_IDS:
+        return
+    rows = await asyncio.to_thread(_read_ab_votes, NARRATOR_AB_LOG_PATH)
+    total = len(rows)
+    null = sum(1 for r in rows if r.get("vote") is None)
+    ties = sum(1 for r in rows if r.get("vote") == "tie")
+    picks = [r for r in rows if r.get("vote_raw") in ("1", "2")]
+    v1 = sum(1 for r in picks if r.get("vote_raw") == "1")
+    share = f"{100 * v1 / len(picks):.0f}%" if picks else "n/a"
+    lines = [f"A/B: ходів з парою {total}", f"Нічиї: {ties}", f"Без голосу: {null}",
+             f"Частка 'Варіант 1': {share} ({v1}/{len(picks)})"]
+    if (command.args or "").strip().lower() == "reveal":
+        for key in ("gemma", "flash_lite"):
+            lines.append(f"Перемоги {key}: {sum(1 for r in rows if r.get('vote') == key)}")
+    await message.answer("\n".join(lines), parse_mode=None)
+
+
 @router.message()
 async def handle_general_messages(message: Message, bot: Bot):
     chat_id = message.chat.id
@@ -1597,6 +1756,14 @@ async def handle_general_messages(message: Message, bot: Bot):
                 display_intent = resolved_intent
             user_text = resolved_intent
 
+        # Narrator A/B gate: поки не обрано варіант — новий хід заборонено.
+        _pend = get_pending(chat_id)
+        if _pend is not None:
+            if not is_expired(_pend):
+                await message.answer("Спершу обери варіант вище 👆")
+                return
+            # Прострочений: автокоміт відбудеться ВСЕРЕДИНІ active_processing (нижче).
+
         # КРОК 1: User Lock — блокуємо паралельні ходи одного гравця
         if chat_id in active_processing:
             await message.answer("⏳ Зачекайте, ваш попередній хід ще обробляється Майстром...")
@@ -1604,6 +1771,14 @@ async def handle_general_messages(message: Message, bot: Bot):
         active_processing.add(chat_id)
 
         try:
+            # TTL-автокоміт під локом: новий хід читає вже закомічену історію.
+            if _pend is not None:
+                try:
+                    await _expire_pending(chat_id)
+                except Exception as _exp_err:  # noqa: BLE001
+                    logger.error(f"[NARRATOR_AB] expire failed: {type(_exp_err).__name__}: {str(_exp_err)[:200]}",
+                                 exc_info=True)
+
             # КРОК 3: Тематична заглушка (буде оновлюватись прогресивно)
             temp_msg = await message.reply(random.choice(PLACEHOLDER_PHRASES))
 
@@ -1656,6 +1831,7 @@ async def handle_general_messages(message: Message, bot: Bot):
             response_text: str | None = None
             suggested_actions: list = []
             try:
+                _t_turn = time.time()
                 response_text, suggested_actions = await process_game_turn(
                     chat_id, user_text,
                     progress_callback=_progress,
@@ -1664,10 +1840,33 @@ async def handle_general_messages(message: Message, bot: Bot):
                 if consumer_task:
                     await consumer_task
 
-                if display_intent:
-                    response_text = f"🗣️ _{display_intent}_\n\n{response_text}"
-                await send_game_response(bot, chat_id, response_text, suggested_actions,
-                                         edit_message=temp_msg)
+                _ab_p = get_pending(chat_id)
+                if _ab_p is not None and _ab_p.created >= _t_turn:
+                    # A/B pair mode: текстів немає в response_text, показуємо два варіанти.
+                    try:
+                        await temp_msg.delete()
+                    except Exception:
+                        pass
+                    _ab_p.display_intent = display_intent or ""
+                    try:
+                        await _send_ab_variants(bot, chat_id, _ab_p)
+                    except Exception as _ab_err:
+                        # Не лишаємо гравця заблокованим: автокоміт випадкового варіанту.
+                        logger.error(f"[NARRATOR_AB] variant send failed: {type(_ab_err).__name__}: {_ab_err}")
+                        _p2 = pop_pending(chat_id, _ab_p.turn_id)
+                        if _p2 is not None:
+                            _w, _ = resolve_pick(_p2, "tie")
+                            await _commit_choice(chat_id, _p2, _w, vote=None, vote_raw=None,
+                                                 vote_ms=None, reason="send_failed")
+                            await _delete_messages(bot, chat_id, list(_p2.variant_message_ids))
+                            await send_game_response(bot, chat_id,
+                                                     _ab_intent_prefix(_p2) + _w.text + _p2.change_log,
+                                                     _p2.suggested_actions)
+                else:
+                    if display_intent:
+                        response_text = f"🗣️ _{display_intent}_\n\n{response_text}"
+                    await send_game_response(bot, chat_id, response_text, suggested_actions,
+                                             edit_message=temp_msg)
 
                 # Debug trace dispatch — decoupled from in-memory DEBUG_USERS.
                 # Engine saves last_debug_trace whenever _debug_active (in-memory set OR profile flag).

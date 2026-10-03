@@ -468,7 +468,7 @@ async def generate_initial_stats(char_name, house_name, house_data, apply_herita
 
     prompt = build_initial_stats_prompt(char_name, house_name, origin_region, valid_locations_str, scenes_block_str=_scenes_block)
 
-    # Gemma 4 31B — одноразова генерація, якість важливіша за швидкість
+    # MODEL_MAIN_NAME (Flash-Lite за замовчуванням) — одноразова генерація, якість важливіша за швидкість
     try:
         _stats_cfg = build_strict_config(model_gm_logic)
         def _sync_gen_profile():
@@ -483,7 +483,7 @@ async def generate_initial_stats(char_name, house_name, house_data, apply_herita
         response = await asyncio.to_thread(_sync_gen_profile)
         llm_data = clean_and_parse_json(response.text)
     except Exception as e:
-        print(f"❌ [D&D] Помилка генерації профілю (Gemma 4): {e}")
+        print(f"❌ [D&D] Помилка генерації профілю (LLM): {e}")
         llm_data = None
 
     if not llm_data:

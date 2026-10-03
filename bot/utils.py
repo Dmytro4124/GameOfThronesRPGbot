@@ -36,6 +36,7 @@ async def send_safe_message(bot: Bot, chat_id: int, text: str, reply_to_message_
     # Санітайзер потрібен лише якщо Telegram парситиме маркдаун
     safe_text = _sanitize_markdown(text) if parse_mode else text
     max_len = 4000
+    sent_ids: list[int] = []  # message_id усіх надісланих повідомлень (для A/B cleanup)
 
     # edit_text приймає тільки InlineKeyboardMarkup, але ми використовуємо ReplyKeyboardMarkup.
     # Тому видаляємо placeholder і надсилаємо нове повідомлення через send_message.
@@ -48,20 +49,26 @@ async def send_safe_message(bot: Bot, chat_id: int, text: str, reply_to_message_
 
     if len(safe_text) <= max_len:
         try:
-            await bot.send_message(
+            _m = await bot.send_message(
                 chat_id, safe_text,
                 reply_to_message_id=reply_to_message_id,
                 parse_mode=parse_mode,
                 reply_markup=reply_markup
             )
+            _mid = getattr(_m, "message_id", None)
+            if isinstance(_mid, int):
+                sent_ids.append(_mid)
         except Exception as e:
             logger.warning(
                 f"[SAFE_MSG_PRIMARY_FAIL] {type(e).__name__}: {str(e)[:200]} "
                 f"(parse_mode={parse_mode}, len={len(safe_text)}, has_markup={bool(reply_markup)})"
             )
             try:
-                await bot.send_message(chat_id, safe_text, reply_to_message_id=reply_to_message_id,
-                                       reply_markup=reply_markup)
+                _m = await bot.send_message(chat_id, safe_text, reply_to_message_id=reply_to_message_id,
+                                            reply_markup=reply_markup)
+                _mid = getattr(_m, "message_id", None)
+                if isinstance(_mid, int):
+                    sent_ids.append(_mid)
             except Exception as fallback_err:
                 logger.error(
                     f"[SAFE_MSG_FALLBACK_FAIL] {type(fallback_err).__name__}: {str(fallback_err)[:200]} "
@@ -69,7 +76,10 @@ async def send_safe_message(bot: Bot, chat_id: int, text: str, reply_to_message_
                 )
                 try:
                     trimmed = safe_text[:500] if len(safe_text) > 500 else safe_text
-                    await bot.send_message(chat_id, trimmed, reply_to_message_id=reply_to_message_id)
+                    _m = await bot.send_message(chat_id, trimmed, reply_to_message_id=reply_to_message_id)
+                    _mid = getattr(_m, "message_id", None)
+                    if isinstance(_mid, int):
+                        sent_ids.append(_mid)
                 except Exception as last_err:
                     logger.error(
                         f"[SAFE_MSG_LAST_RESORT_FAIL] {type(last_err).__name__}: {str(last_err)[:200]}"
@@ -80,14 +90,20 @@ async def send_safe_message(bot: Bot, chat_id: int, text: str, reply_to_message_
         for i, part in enumerate(parts):
             markup = reply_markup if i == len(parts) - 1 else None
             try:
-                await bot.send_message(chat_id, part, parse_mode=parse_mode, reply_markup=markup)
+                _m = await bot.send_message(chat_id, part, parse_mode=parse_mode, reply_markup=markup)
+                _mid = getattr(_m, "message_id", None)
+                if isinstance(_mid, int):
+                    sent_ids.append(_mid)
             except Exception as e:
                 logger.warning(
                     f"[SAFE_MSG_CHUNK_FAIL] chunk {i+1}/{len(parts)}: {type(e).__name__}: {str(e)[:200]} "
                     f"(parse_mode={parse_mode}, len={len(part)}, has_markup={bool(markup)})"
                 )
                 try:
-                    await bot.send_message(chat_id, part, reply_markup=markup)
+                    _m = await bot.send_message(chat_id, part, reply_markup=markup)
+                    _mid = getattr(_m, "message_id", None)
+                    if isinstance(_mid, int):
+                        sent_ids.append(_mid)
                 except Exception as chunk_fallback_err:
                     logger.error(
                         f"[SAFE_MSG_CHUNK_FALLBACK_FAIL] chunk {i+1}/{len(parts)}: "
@@ -97,6 +113,8 @@ async def send_safe_message(bot: Bot, chat_id: int, text: str, reply_to_message_
 
             if i < len(parts) - 1:
                 await asyncio.sleep(0.5)
+
+    return sent_ids
 
 
 async def send_game_response(bot: Bot, chat_id: int, text: str, suggested_actions: list = None,

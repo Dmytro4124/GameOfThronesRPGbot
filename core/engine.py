@@ -7,8 +7,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from core.ai_client import model_worker, model_gm_logic, model_narrator, clean_and_parse_json, clear_thoughts, get_thoughts_log, record_thought, hedged_generate_content_async, build_strict_config
-from config import MODEL_NARRATOR_NAME
+from core.ai_client import model_worker, model_gm_logic, model_narrator, model_narrator_alt, clean_and_parse_json, clear_thoughts, get_thoughts_log, record_thought, hedged_generate_content_async, build_strict_config
+from config import MODEL_NARRATOR_NAME, NARRATOR_AB_ENABLED
+from core.narrator_ab import (
+    NarrationResult, PendingChoice, new_turn_id, set_pending, shuffle_variants,
+    build_log_record, append_log,
+)
 from core.mechanics import apply_system_impacts, process_training_request, safe_int, validate_action
 from core.dnd_engine import resolve_normal_action, apply_dnd_impacts
 from core.dnd_classes import GOT_CLASSES
@@ -367,6 +371,191 @@ def _is_debug_active(chat_id: int, profile: dict, debug_users: set) -> bool:
     - ``profile["_debug_mode"]``  — persistent flag stored in Google Sheets
     """
     return (chat_id in debug_users) or bool(profile.get("_debug_mode", False))
+
+
+async def _run_narrator_chain(model_wrapper, narrator_prompt, model_key) -> NarrationResult:
+    """BLOCKING narrator chain: attempt 1 (hedged) -> quality checks -> attempt 2 -> attempt 3 (temp 0.5, 90s).
+
+    Returns NarrationResult. If all attempts fail -> used_fallback=True, text=None
+    (the caller builds the deterministic narrative). Exceptions from attempt 2
+    propagate exactly as in the pre-refactor inline code.
+    """
+    t_chain = time.time()
+    attempt_ms: list = []
+    _mname = getattr(model_wrapper, "model_name", None) or model_key
+
+    def _res(text, final, fallback=False):
+        return NarrationResult(
+            model_key=model_key, text=text,
+            total_ms=int((time.time() - t_chain) * 1000),
+            attempt_ms=list(attempt_ms), final_attempt=final,
+            used_fallback=fallback, error=None,
+        )
+
+    # --- Attempt 1: hedged (2 parallel requests, first success wins) ---
+    _t = time.time()
+    try:
+        narrator_response = await hedged_generate_content_async(
+            model_wrapper, narrator_prompt, hedge_count=2, max_retries=2
+        )
+        story = narrator_response.text.strip() if narrator_response and narrator_response.text else ""
+    except Exception as _hedge_exc:
+        logger.warning(
+            f"[NARRATOR_FAIL] model={model_key}({_mname}) Attempt 1 (hedged) raised "
+            f"{type(_hedge_exc).__name__}: {str(_hedge_exc)[:120]} — fallthrough до Шар 2 retry"
+        )
+        story = ""
+    attempt_ms.append(int((time.time() - _t) * 1000))
+
+    # --- Quality checks (Шар 1) ---
+    _story_truncated = story and len(story) > 20 and not story.rstrip().endswith(('.', '!', '?', '…', '"', '*'))
+    _is_placeholder = story and any(marker in story.lower() for marker in _PLACEHOLDER_MARKERS)
+    _is_hard_fail = not story or _is_placeholder or len(story) < 20
+
+    if _story_truncated and not _is_hard_fail:
+        if len(story) >= 100:
+            logger.info(
+                f"[NARRATOR_FAIL] model={model_key} Attempt 1 truncated but substantial "
+                f"({len(story)} chars) — accepted with ellipsis. tail={story[-50:]!r}"
+            )
+            story = story.rstrip() + "…"
+        else:
+            _is_hard_fail = True
+
+    if not _is_hard_fail:
+        return _res(story, 1)
+
+    _fail_reason = (
+        "empty" if not story
+        else "placeholder" if _is_placeholder
+        else f"too_short({len(story)})" if len(story) < 20
+        else f"truncated_short({len(story)})"
+    )
+    logger.info(
+        f"[NARRATOR_FAIL] model={model_key} Attempt 1 failed. reason={_fail_reason} "
+        f"prompt_len={len(narrator_prompt)} "
+        f"story_preview={story[:200]!r}"
+    )
+
+    # --- Attempt 2: blocking retry ---
+    def _sync_gen_narrator_retry():
+        _t0 = time.time()
+        resp = model_wrapper.generate_content(narrator_prompt)
+        _elapsed = time.time() - _t0
+        try:
+            fr = resp.candidates[0].finish_reason if resp and resp.candidates else None
+        except Exception:
+            fr = None
+        try:
+            safety = resp.candidates[0].safety_ratings if resp and resp.candidates else None
+        except Exception:
+            safety = None
+        try:
+            block_reason = resp.prompt_feedback.block_reason if resp and resp.prompt_feedback else None
+        except Exception:
+            block_reason = None
+        _text = (resp.text or "") if resp else ""
+        logger.info(
+            f"[NARRATOR_FAIL] model={model_key} Attempt 2 (blocking) done. elapsed={_elapsed:.2f}s "
+            f"finish_reason={fr} block_reason={block_reason} "
+            f"safety={safety} "
+            f"text_len={len(_text)} preview={_text[:200]!r}"
+        )
+        return resp
+
+    _t = time.time()
+    try:
+        retry_resp = await _safe_to_thread(_sync_gen_narrator_retry)
+    finally:
+        attempt_ms.append(int((time.time() - _t) * 1000))
+    story = retry_resp.text.strip() if retry_resp and retry_resp.text else ""
+
+    if story and len(story) >= 20:
+        return _res(story, 2)
+
+    logger.info(
+        f"[NARRATOR_FAIL] model={model_key} Attempts 1+2 failed (blocking). "
+        f"prompt_len={len(narrator_prompt)} story={story!r} "
+        f"— proceeding to Attempt 3 (blocking low-temp)"
+    )
+
+    # --- Attempt 3: low-temp blocking ---
+    def _sync_gen_narrator_third_blocking():
+        _t0 = time.time()
+        try:
+            from google.genai import types as _gtypes
+            _cfg = _gtypes.GenerateContentConfig(temperature=0.5)
+            resp = model_wrapper.generate_content(narrator_prompt, config=_cfg)
+        except Exception:
+            resp = model_wrapper.generate_content(narrator_prompt)
+        _elapsed = time.time() - _t0
+        _text = (resp.text or "") if resp else ""
+        logger.info(
+            f"[NARRATOR_FAIL] model={model_key} Attempt 3 (blocking low-temp) done. "
+            f"elapsed={_elapsed:.2f}s text_len={len(_text)} "
+            f"preview={_text[:200]!r}"
+        )
+        return resp
+
+    _t = time.time()
+    try:
+        third_resp = await asyncio.wait_for(
+            _safe_to_thread(_sync_gen_narrator_third_blocking),
+            timeout=90.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"[NARRATOR_FAIL] model={model_key} Attempt 3 timed out after 90s — falling through to deterministic fallback")
+        third_resp = None
+    except Exception as _exc:
+        logger.warning(f"[NARRATOR_FAIL] model={model_key} Attempt 3 exception: {type(_exc).__name__}: {_exc} — falling through")
+        third_resp = None
+    attempt_ms.append(int((time.time() - _t) * 1000))
+    third_text = third_resp.text.strip() if third_resp and third_resp.text else ""
+    if third_text and len(third_text) >= 50:
+        return _res(third_text, 3)
+
+    logger.warning(
+        f"[NARRATOR_FAIL] model={model_key} All 3 attempts failed (blocking path)."
+    )
+    return _res(None, "fallback", fallback=True)
+
+
+async def commit_narration_to_history(chat_id, user_input, story, mech_updates):
+    """Summarize the turn, append it to session history and run sliding-window compression.
+
+    Public: called by the production path (at the end of background_task) and,
+    in Narrator A/B mode, by the vote handler after the player picks a variant.
+    `story` is the final chosen text (the "📊" change-log tail is stripped here).
+    """
+    try:
+        clean_story = story.split("📊")[0][:800]
+        turn_summary = await summarize_full_turn(user_input, clean_story, mechanical_updates=mech_updates)
+
+        if chat_id in user_sessions:
+            hist = user_sessions[chat_id].get('history', [])
+            hist.append({"role": "Turn", "content": turn_summary})
+
+            if len(hist) > 20:
+                # Sliding window: стискаємо старі записи, зберігаємо останні 15 verbatim
+                old_part = hist[:-15]
+                recent_part = hist[-15:]
+                history_to_compress = "\n".join([f"{m['role']}: {m['content']}" for m in old_part])
+                summary_prompt = build_history_summary_prompt(history_to_compress)
+                try:
+                    def _sync_gen_sum():
+                        return model_worker.generate_content(summary_prompt)
+
+                    summary_resp = await asyncio.to_thread(_sync_gen_sum)
+                    user_sessions[chat_id]['history'] = [
+                        {"role": "SYSTEM", "content": f"PREVIOUS EVENTS SUMMARY:\n{summary_resp.text.strip()}"}
+                    ] + recent_part
+                except Exception as ex:
+                    print(f"⚠️ Помилка стиснення: {ex}")
+                    user_sessions[chat_id]['history'] = hist[-20:]
+            else:
+                user_sessions[chat_id]['history'] = hist
+    except Exception as e:
+        logger.error(f"[BG] commit_narration_to_history failed: {e}", exc_info=True)
 
 
 async def process_game_turn(chat_id, user_input, progress_callback=None, narrator_queue=None):
@@ -1294,6 +1483,9 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             if _debug_trace is not None:
                 _debug_trace["narrator"]["prompt"] = narrator_prompt
 
+        _narrator_failed = False  # прапор: всі три спроби провалились
+        _ab_results = []   # Narrator A/B: results of both chains (blocking mode only)
+        _ab_mode = None    # None | "pair" | "single" | "none"
         if narrator_queue is not None:
             # === STREAMING MODE: стрімимо narrator-текст чанками через queue ===
             _loop = asyncio.get_event_loop()
@@ -1339,28 +1531,64 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             story = story.strip() if story else ""
             # None надсилається ПІСЛЯ перевірки на обрізання — див. нижче
         else:
-            # === BLOCKING MODE: hedged call (2 parallel requests, first success wins) ===
-            # Робастність: _safe_to_thread / hedging _safe_call конвертують StopIteration.
-            # При hedging exception (TimeoutError / 500 INTERNAL / RuntimeError циркуіт-брейкер)
-            # → story="" → Шар 2 (retry) і Шар 3 (low-temp blocking) фолбек спрацьовують нижче.
-            try:
-                narrator_response = await hedged_generate_content_async(
-                    model_narrator, narrator_prompt, hedge_count=2, max_retries=2
+            # === BLOCKING MODE: chain (hedged attempt 1 -> attempt 2 -> attempt 3) ===
+            if NARRATOR_AB_ENABLED:
+                _t_ab = time.time()
+                _ab_raw = await asyncio.gather(
+                    _run_narrator_chain(model_narrator, narrator_prompt, "gemma"),
+                    _run_narrator_chain(model_narrator_alt, narrator_prompt, "flash_lite"),
+                    return_exceptions=True,
                 )
-                story = narrator_response.text.strip() if narrator_response and narrator_response.text else ""
-            except Exception as _hedge_exc:
-                logger.warning(
-                    f"[NARRATOR_FAIL] Attempt 1 (hedged) raised {type(_hedge_exc).__name__}: "
-                    f"{str(_hedge_exc)[:120]} — fallthrough до Шар 2 retry"
-                )
-                story = ""
+                _ab_results = []
+                for _k, _r in zip(("gemma", "flash_lite"), _ab_raw):
+                    if isinstance(_r, asyncio.CancelledError):
+                        raise _r
+                    if isinstance(_r, BaseException):
+                        logger.warning(f"[NARRATOR_AB] chain {_k} raised {type(_r).__name__}: {str(_r)[:160]}")
+                        _r = NarrationResult(
+                            model_key=_k, text=None,
+                            total_ms=int((time.time() - _t_ab) * 1000),
+                            attempt_ms=[], final_attempt="fallback", used_fallback=True,
+                            error=f"{type(_r).__name__}: {str(_r)[:200]}",
+                        )
+                    _ab_results.append(_r)
+                _ab_ok = [_r for _r in _ab_results if _r.ok]
+                _ab_mode = "pair" if len(_ab_ok) == 2 else ("single" if len(_ab_ok) == 1 else "none")
+                if _ab_mode == "single":
+                    story = _ab_ok[0].text
+                elif _ab_mode == "none":
+                    logger.warning(
+                        f"[NARRATOR_LAST_RESORT] A/B: both narrators failed. "
+                        f"updates_keys={list(mechanical_updates.keys())} — building deterministic narrative."
+                    )
+                    story = _build_deterministic_narrative(
+                        mechanical_updates, profile, old_location, old_scene
+                    )
+                    _narrator_failed = True
+                else:
+                    story = ""  # texts are held in _ab_results until the vote
+            else:
+                _chain_res = await _run_narrator_chain(model_narrator, narrator_prompt, "gemma")
+                if _chain_res.used_fallback:
+                    logger.warning(
+                        f"[NARRATOR_LAST_RESORT] All 3 attempts failed (blocking path). "
+                        f"updates_keys={list(mechanical_updates.keys())} "
+                        f"— building deterministic narrative."
+                    )
+                    story = _build_deterministic_narrative(
+                        mechanical_updates, profile, old_location, old_scene
+                    )
+                    _narrator_failed = True
+                else:
+                    story = _chain_res.text
 
         # === Шар 1: обрізаний, але змістовний текст — приймаємо без retry ===
         # Визначаємо "справжній" failure: порожньо, placeholder або надто короткий.
         # Трункований текст (≥100 символів, не placeholder) — НЕ є failure: додаємо "…" і рухаємось далі.
-        _story_truncated = story and len(story) > 20 and not story.rstrip().endswith(('.', '!', '?', '…', '"', '*'))
-        _is_placeholder = story and any(marker in story.lower() for marker in _PLACEHOLDER_MARKERS)
-        _is_hard_fail = not story or _is_placeholder or len(story) < 20
+        # Blocking mode: the chain (_run_narrator_chain) already did these checks.
+        _story_truncated = narrator_queue is not None and story and len(story) > 20 and not story.rstrip().endswith(('.', '!', '?', '…', '"', '*'))
+        _is_placeholder = narrator_queue is not None and story and any(marker in story.lower() for marker in _PLACEHOLDER_MARKERS)
+        _is_hard_fail = narrator_queue is not None and (not story or _is_placeholder or len(story) < 20)
 
         if _story_truncated and not _is_hard_fail:
             if len(story) >= 100:
@@ -1374,8 +1602,6 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             else:
                 # Коротший обрізаний текст — все одно retry
                 _is_hard_fail = True
-
-        _narrator_failed = False  # прапор: всі три спроби провалились
 
         if _is_hard_fail:
             # --- Логування Attempt 1 failure ---
@@ -1501,91 +1727,20 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                             pass
 
                 narrator_queue.put_nowait(None)  # сигнал завершення після retry
-            else:
-                def _sync_gen_narrator_retry():
-                    _t0 = time.time()
-                    resp = model_narrator.generate_content(narrator_prompt)
-                    _elapsed = time.time() - _t0
-                    # Логування діагностики blocking retry
-                    try:
-                        fr = resp.candidates[0].finish_reason if resp and resp.candidates else None
-                    except Exception:
-                        fr = None
-                    try:
-                        safety = resp.candidates[0].safety_ratings if resp and resp.candidates else None
-                    except Exception:
-                        safety = None
-                    try:
-                        block_reason = resp.prompt_feedback.block_reason if resp and resp.prompt_feedback else None
-                    except Exception:
-                        block_reason = None
-                    _text = (resp.text or "") if resp else ""
-                    logger.info(
-                        f"[NARRATOR_FAIL] Attempt 2 (blocking) done. elapsed={_elapsed:.2f}s "
-                        f"finish_reason={fr} block_reason={block_reason} "
-                        f"safety={safety} "
-                        f"text_len={len(_text)} preview={_text[:200]!r}"
-                    )
-                    return resp
-
-                retry_resp = await _safe_to_thread(_sync_gen_narrator_retry)
-                story = retry_resp.text.strip() if retry_resp and retry_resp.text else ""
-
-                if not story or len(story) < 20:
-                    logger.info(
-                        f"[NARRATOR_FAIL] Attempts 1+2 failed (blocking). "
-                        f"prompt_len={len(narrator_prompt)} story={story!r} "
-                        f"— proceeding to Attempt 3 (blocking low-temp)"
-                    )
-                    # === Шар 3: третя блокуюча спроба з нижчою температурою ===
-                    def _sync_gen_narrator_third_blocking():
-                        _t0 = time.time()
-                        try:
-                            from google.genai import types as _gtypes
-                            _cfg = _gtypes.GenerateContentConfig(temperature=0.5)
-                            resp = model_narrator.generate_content(narrator_prompt, config=_cfg)
-                        except Exception:
-                            resp = model_narrator.generate_content(narrator_prompt)
-                        _elapsed = time.time() - _t0
-                        _text = (resp.text or "") if resp else ""
-                        logger.info(
-                            f"[NARRATOR_FAIL] Attempt 3 (blocking low-temp) done. "
-                            f"elapsed={_elapsed:.2f}s text_len={len(_text)} "
-                            f"preview={_text[:200]!r}"
-                        )
-                        return resp
-
-                    # Hard timeout 90s + захист від exceptions (StopIteration з exhausted mock тощо)
-                    try:
-                        third_resp = await asyncio.wait_for(
-                            _safe_to_thread(_sync_gen_narrator_third_blocking),
-                            timeout=90.0,
-                        )
-                    except asyncio.TimeoutError:
-                        logger.warning("[NARRATOR_FAIL] Attempt 3 timed out after 90s — falling through to deterministic fallback")
-                        third_resp = None
-                    except Exception as _exc:
-                        logger.warning(f"[NARRATOR_FAIL] Attempt 3 exception: {type(_exc).__name__}: {_exc} — falling through")
-                        third_resp = None
-                    third_text = third_resp.text.strip() if third_resp and third_resp.text else ""
-                    if third_text and len(third_text) >= 50:
-                        story = third_text
-                    else:
-                        logger.warning(
-                            f"[NARRATOR_LAST_RESORT] All 3 attempts failed (blocking path). "
-                            f"updates_keys={list(mechanical_updates.keys())} "
-                            f"— building deterministic narrative."
-                        )
-                        story = _build_deterministic_narrative(
-                            mechanical_updates, profile, old_location, old_scene
-                        )
-                        _narrator_failed = True
         elif narrator_queue is not None:
             # Перший стрім вдався — надсилаємо сигнал завершення
             narrator_queue.put_nowait(None)
 
         duration_narrator = time.time() - t_narrator
         timing_details.append(f"✍️ Narrator: {duration_narrator:.2f}s")
+        if _ab_results:
+            timing_details.append(
+                "🆚 Narrator A/B: " + " | ".join(
+                    f"{_r.model_key} {_r.total_ms}ms att={_r.attempt_ms} final={_r.final_attempt}"
+                    f"{' ERR' if _r.error else ''}"
+                    for _r in _ab_results
+                ) + f" [{_ab_mode}]"
+            )
 
         # === DEBUG TRACE: stage-aware capture (thoughts already collected per-stage above) ===
         # Narrator thoughts + final text captured here; censor/worker/gm_logic already set.
@@ -1593,7 +1748,12 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             _debug_trace["narrator"]["thoughts"] = [
                 e.get("thought", "") for e in get_thoughts_log() if e.get("thought")
             ]
-            _debug_trace["narrator"]["final_text"] = story
+            if _ab_mode == "pair":
+                _debug_trace["narrator"]["final_text"] = "\n\n=====\n\n".join(
+                    f"[A/B {_r.model_key}]\n{_r.text}" for _r in _ab_results
+                )
+            else:
+                _debug_trace["narrator"]["final_text"] = story
             _debug_trace["logs"] = list(logs)
             # Store in session for handlers.py pickup
             user_sessions.setdefault(chat_id, {})["last_debug_trace"] = _debug_trace
@@ -1612,8 +1772,9 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             safe_int(profile.get("Здоров'я", 100)) <= 0
             or ("hp_current" in profile and safe_int(profile.get("hp_current", 1)) <= 0)
         )
+        _DEATH_SUFFIX = "\n\n💀 *ВАШ ДОЗОР ЗАКІНЧИВСЯ. Ви загинули.*"
         if _is_dead:
-            story += "\n\n💀 *ВАШ ДОЗОР ЗАКІНЧИВСЯ. Ви загинули.*"
+            story += _DEATH_SUFFIX
             user_sessions.setdefault(chat_id, {})["action_intents"] = {}
             suggested_actions = ["🔄 Почати заново"]
 
@@ -1715,7 +1876,8 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                                   npc_changes_arg, legal_names_arg, mech_updates_arg=None,
                                   new_location_arg=None, player_location_changed_arg=False,
                                   player_new_scene_arg=None, player_scene_changed_arg=False,
-                                  companion_npcs_arg=None, frozen_fields_reason_arg=""):
+                                  companion_npcs_arg=None, frozen_fields_reason_arg="",
+                                  commit_history_arg=True):
             try:
                 # Profile already persisted synchronously above; only secondary
                 # writes remain here (NPC DB, reputation, history summarization).
@@ -1748,33 +1910,10 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                             rep_change=rep_delta
                         )
 
-                # Один AI-виклик замість двох: об'єднана сумаризація input + story
-                clean_story = story_arg.split("📊")[0][:800]
-                turn_summary = await summarize_full_turn(input_arg, clean_story, mechanical_updates=mech_updates_arg)
-
-                if chat_id_arg in user_sessions:
-                    hist = user_sessions[chat_id_arg].get('history', [])
-                    hist.append({"role": "Turn", "content": turn_summary})
-
-                    if len(hist) > 20:
-                        # Sliding window: стискаємо старі записи, зберігаємо останні 15 verbatim
-                        old_part = hist[:-15]
-                        recent_part = hist[-15:]
-                        history_to_compress = "\n".join([f"{m['role']}: {m['content']}" for m in old_part])
-                        summary_prompt = build_history_summary_prompt(history_to_compress)
-                        try:
-                            def _sync_gen_sum():
-                                return model_worker.generate_content(summary_prompt)
-
-                            summary_resp = await asyncio.to_thread(_sync_gen_sum)
-                            user_sessions[chat_id_arg]['history'] = [
-                                {"role": "SYSTEM", "content": f"PREVIOUS EVENTS SUMMARY:\n{summary_resp.text.strip()}"}
-                            ] + recent_part
-                        except Exception as ex:
-                            print(f"⚠️ Помилка стиснення: {ex}")
-                            user_sessions[chat_id_arg]['history'] = hist[-20:]
-                    else:
-                        user_sessions[chat_id_arg]['history'] = hist
+                # Summary + append Turn to history + compression. In Narrator A/B mode this is
+                # deferred: the vote handler calls commit_narration_to_history after the choice.
+                if commit_history_arg:
+                    await commit_narration_to_history(chat_id_arg, input_arg, story_arg, mech_updates_arg)
             except Exception as e:
                 logger.error(f"[BG] background_task failed: {e}", exc_info=True)
 
@@ -1790,6 +1929,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 player_scene_changed_arg=_player_scene_changed,
                 companion_npcs_arg=companion_npcs,
                 frozen_fields_reason_arg=ai_data.get("frozen_fields_change_reason", ""),
+                commit_history_arg=(_ab_mode != "pair"),
             ))
 
         duration = time.time() - t_start
@@ -1809,8 +1949,55 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         # _narrator_failed=True означає, що story містить детерміністичний last-resort абзац
         # від _build_deterministic_narrative. Це художній текст — повертаємо з impact-summary як завжди.
 
-        story = _sanitize_story(story)
         change_log = "\n\n📊 " + " | ".join(logs) if logs else ""
+
+        if _ab_mode is not None:
+            # --- Narrator A/B bookkeeping (blocking mode, NARRATOR_AB_ENABLED) ---
+            _mech_log = {
+                k: mechanical_updates.get(k)
+                for k in ("outcome", "natural_roll", "skill_val", "total_score", "difficulty",
+                          "ability_used", "skill_used", "dice_roll", "mechanics_verdict")
+            }
+            if profile.get("mode") == "COMBAT":
+                _mech_log["combat_round"] = mechanical_updates.get("combat_round")
+                _mech_log["combat_phase"] = mechanical_updates.get("combat_phase")
+            _ab_turn_id = new_turn_id()
+
+            def _ab_post(_text):
+                return _sanitize_story((_text or "") + (_DEATH_SUFFIX if _is_dead else ""))
+
+            if _ab_mode == "pair":
+                for _r in _ab_results:
+                    _r.text = _ab_post(_r.text)
+                _order = shuffle_variants(_ab_results[0], _ab_results[1])
+                _rec = build_log_record(
+                    turn_id=_ab_turn_id, user_id=user_id, chat_id=chat_id,
+                    mode=profile.get("mode"), narrator_prompt=narrator_prompt,
+                    mechanics=_mech_log, results=_ab_results,
+                    shown_order=[_r.model_key for _r in _order], reason=None,
+                )
+                set_pending(PendingChoice(
+                    turn_id=_ab_turn_id, chat_id=chat_id, user_id=user_id,
+                    created=time.time(), order=_order, change_log=change_log,
+                    suggested_actions=suggested_actions,
+                    deferred_history={"user_input": user_input, "mech_updates": mechanical_updates},
+                    log_record=_rec,
+                ))
+                return change_log, suggested_actions
+
+            # single_variant / both_failed: normal flow, vote=null
+            try:
+                _rec = build_log_record(
+                    turn_id=_ab_turn_id, user_id=user_id, chat_id=chat_id,
+                    mode=profile.get("mode"), narrator_prompt=narrator_prompt,
+                    mechanics=_mech_log, results=_ab_results, shown_order=None,
+                    reason="single_variant" if _ab_mode == "single" else "both_failed",
+                )
+                await append_log(_rec)
+            except Exception as _ab_log_exc:
+                logger.warning(f"[NARRATOR_AB] log write failed: {_ab_log_exc}")
+
+        story = _sanitize_story(story)
 
         return story + change_log, suggested_actions
 

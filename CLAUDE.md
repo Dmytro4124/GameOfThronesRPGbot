@@ -16,7 +16,8 @@ Telegram-бот текстової RPG у світі Гри Престолів. 
 - **Python 3.10+**
 - **Telegram:** aiogram 3.x + aiohttp (webhook через `WEBHOOK_URL`, fallback на polling)
 - **LLM:** google-genai SDK
-  - Worker, GM_Logic, Narrator: `gemma-4-31b-it`
+  - Main, Worker (+Censor), GM_Logic: Gemini Flash-Lite (`FLASH_LITE_MODEL_ID` у `config.py`; ENV-override `MODEL_MAIN_NAME` / `MODEL_WORKER_NAME` / `MODEL_GM_LOGIC_NAME`, rollback = `gemma-4-31b-it`)
+  - Narrator: `gemma-4-31b-it` (під A/B-тестом)
   - Embeddings: `gemini-embedding-2-preview`
 - **БД:** Google Sheets через gspread + Service Account
   - `Users_DB` — профіль користувача як JSON-string у 3-й колонці
@@ -152,7 +153,8 @@ TelegramGameOfThronesBot/
 ├── main.py                  # точка входу: webhook або polling
 ├── config.py                # ENV, моделі, режими (godmode/puppet/erotic)
 ├── scripts/
-│   └── dnd_migrate.py       # CLI tool для Phase 9 migration (НЕ runtime)
+│   ├── dnd_migrate.py       # CLI tool для Phase 9 migration (НЕ runtime)
+│   └── ab_report.py         # звіт по Narrator A/B лог-файлу (НЕ runtime)
 ├── bot/
 │   ├── handlers.py          # aiogram-роутер (всі апдейти, монолітом)
 │   ├── menus.py             # reply-клавіатури
@@ -177,6 +179,7 @@ TelegramGameOfThronesBot/
 │   ├── dnd_engine.py        # resolve_normal_action + apply_dnd_impacts (NORMAL pipeline)
 │   ├── dnd_combat_engine.py # COMBAT round execution (spotlight pattern)
 │   ├── dnd_migration.py     # backup + LLM-regen NPC + wipe utilities
+│   ├── narrator_ab.py       # Narrator A/B: сліпий вибір Gemma vs Flash-Lite, pending-стан + JSONL лог
 │   └── reputation.py        # apply_reputation_step: asymmetric magnitude-gated reputation math (mechanics-dev domain)
 ├── database/
 │   ├── canon_npc.py         # ~100 канонічних NPC (хардкод)
@@ -290,6 +293,7 @@ In-memory структури без локів — навмисний компр
 - `_thoughts_log_var: ContextVar[list]` (`core/ai_client.py`) — per-async-task ізоляція thoughts (ContextVar, НЕ global list). Кожен Telegram update = окремий Task = окремий context, тож логи паралельних гравців НЕ змішуються. `process_game_turn` робить snapshot у `user_sessions[chat_id]['last_thoughts']` для `/thoughts` cheat (інший Task context не бачить ContextVar напряму).
 - `combat_state._combat_states: dict[chat_id, CombatState]` (`core/combat_state.py`) — стан активного бою
 - `combat_state._state_locks: dict[chat_id, asyncio.Lock]` (`core/combat_state.py`) — атомарність COMBAT pipeline
+- `narrator_ab._pending: dict[chat_id, PendingChoice]` / `_last_turn_id` (`core/narrator_ab.py`) — in-memory, губляться при рестарті. `pop_pending` — єдина точка звільнення (vote-callback, TTL-expiry, рестарт гри); історія пишеться через `commit_narration_to_history` лише після pop, у `try/finally` з `append_log`.
 
 **COMBAT lock pattern** (обов'язково при integration з `combat_state`):
 ```python
@@ -319,8 +323,11 @@ python main.py
 # Запуск у webhook-режимі
 WEBHOOK_URL=https://your.domain PORT=8080 python main.py
 
-# Юніт-тести
+# Юніт-тести (test/conftest.py ізолює Sheets/мережу: dummy env, fake gspread, блок non-loopback сокетів; ALLOW_LIVE_TESTS=1 вимикає захист)
 pytest test/ -v
+
+# Narrator A/B (опційно): NARRATOR_AB_ENABLED=1 у .env; звіт по логу
+python scripts/ab_report.py
 
 # E2E QA-харнес
 python qa_auto_test.py

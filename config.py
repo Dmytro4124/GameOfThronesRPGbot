@@ -29,11 +29,20 @@ TAB_KNOWLEDGE = 'KnowledgeBase'
 TAB_USERS = 'Users_DB'
 TAB_NPC = 'NPC_DB'
 
-# Налаштування моделей Gemini (всі — Gemma 4)
-MODEL_MAIN_NAME = 'gemma-4-31b-it'           # Gemma 4 31B: утиліта (summarize, validate, NPC gen, intro)
-MODEL_WORKER_NAME = 'gemma-4-31b-it'         # Gemma 4 31B: точна механіка (кубики, DC, JSON)
-MODEL_GM_LOGIC_NAME = 'gemma-4-31b-it'       # Dense flagship (складна NPC логіка, стан світу)
-MODEL_NARRATOR_NAME = 'gemma-4-31b-it'       # Dense flagship (художній текст)
+# Налаштування моделей Gemini: Main/Worker(+Censor)/GM_Logic -> Flash-Lite, Narrator -> Gemma 4
+# Точний id Flash-Lite ОБОВ'ЯЗКОВО звірити в AI Studio. Пізніше перевикористовується для MODEL_NARRATOR_ALT_NAME.
+FLASH_LITE_MODEL_ID = "gemini-3.5-flash-lite"
+# ENV-rollback: MODEL_*_NAME=gemma-4-31b-it повертає стару модель без зміни коду
+MODEL_MAIN_NAME = os.getenv("MODEL_MAIN_NAME", FLASH_LITE_MODEL_ID)            # утиліта (summarize, NPC gen, intro)
+MODEL_WORKER_NAME = os.getenv("MODEL_WORKER_NAME", FLASH_LITE_MODEL_ID)        # Censor + Worker: механіка (кубики, DC, JSON)
+MODEL_GM_LOGIC_NAME = os.getenv("MODEL_GM_LOGIC_NAME", FLASH_LITE_MODEL_ID)    # складна NPC логіка, стан світу
+MODEL_NARRATOR_NAME = 'gemma-4-31b-it'       # Dense flagship (художній текст), під A/B-тестом
+
+# Narrator A/B (сліпе порівняння Gemma vs Flash-Lite). Вимкнено за замовчуванням.
+NARRATOR_AB_ENABLED = os.getenv("NARRATOR_AB_ENABLED", "0") == "1"
+MODEL_NARRATOR_ALT_NAME = os.getenv("MODEL_NARRATOR_ALT_NAME", FLASH_LITE_MODEL_ID)
+NARRATOR_AB_CHOICE_TTL = 3600  # сек; після цього pending-вибір вважається простроченим
+NARRATOR_AB_LOG_PATH = os.getenv("NARRATOR_AB_LOG_PATH", "logs/narrator_ab.jsonl")
 
 # Налаштування температури моделей
 MODEL_MAIN_TEMP = 0.7   # Для генерації сюжету та креативних описів
