@@ -403,6 +403,213 @@ async def get_relevant_context(user_text, current_location):
         return "Немає особливих відомостей."
 
 
+# ================= A/B LOG (Narrator) =================
+
+TAB_AB_LOG = "AB_Log"
+AB_LOG_HEADERS = [
+    "ts", "type", "turn_id", "user_id", "mode", "vote", "vote_raw", "vote_ms", "reason",
+    "shown_order", "gemma_ms", "flash_lite_ms", "gemma_attempt", "flash_lite_attempt",
+    "gemma_fallback", "flash_lite_fallback", "gemma_len", "flash_lite_len",
+    "outcome", "difficulty", "natural_roll", "note", "gemma_text", "flash_lite_text",
+    "record_json",
+]
+AB_CELL_LIMIT = 45000
+_AB_MODELS = ("gemma", "flash_lite")
+_ab_log_lock = asyncio.Lock()
+_ab_sheet_ready = False
+_ab_ws = None  # кешований worksheet (щоб не робити зайвий worksheet() lookup на кожен append)
+
+
+def _ab_cell(v) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, (list, dict)):
+        v = json.dumps(v, ensure_ascii=False, default=str)
+    return str(v)[:AB_CELL_LIMIT]
+
+
+def _ab_truncate_text(s, limit: int):
+    if not isinstance(s, str) or len(s) <= limit:
+        return s
+    cut = len(s) - limit
+    return s[:max(limit, 0)] + f"…[truncated {cut} chars]"
+
+
+def _ab_record_json(record: dict) -> str:
+    """JSON запису, гарантовано <= AB_CELL_LIMIT символів (обрізає prompt, потім тексти результатів)."""
+    full = json.dumps(record, ensure_ascii=False, default=str)
+    if len(full) <= AB_CELL_LIMIT:
+        return full
+    rec = _copy.deepcopy(record)
+    prompt = rec.get("narrator_prompt")
+    if isinstance(prompt, str):
+        excess = len(full) - AB_CELL_LIMIT + 60  # запас під маркер
+        keep = max(len(prompt) - excess, 0)
+        rec["narrator_prompt"] = prompt[:keep] + f"…[truncated {len(prompt) - keep} chars]"
+    out = json.dumps(rec, ensure_ascii=False, default=str)
+    if len(out) <= AB_CELL_LIMIT:
+        return out
+    results = rec.get("results")
+    if isinstance(results, dict):
+        for r in results.values():
+            if isinstance(r, dict) and isinstance(r.get("text"), str):
+                r["text"] = _ab_truncate_text(r["text"], 8000)
+    rec["narrator_prompt"] = _ab_truncate_text(rec.get("narrator_prompt"), 2000)
+    out = json.dumps(rec, ensure_ascii=False, default=str)
+    if len(out) > AB_CELL_LIMIT:
+        out = out[:AB_CELL_LIMIT]  # останній рубіж (JSON буде зіпсований -> read відновить з колонок)
+    return out
+
+
+def _ab_build_row(record: dict) -> list:
+    results = record.get("results") or {}
+    mech = record.get("mechanics") or {}
+    cols = {
+        "ts": record.get("ts"), "type": record.get("type"), "turn_id": record.get("turn_id"),
+        "user_id": record.get("user_id"), "mode": record.get("mode"), "vote": record.get("vote"),
+        "vote_raw": record.get("vote_raw"), "vote_ms": record.get("vote_ms"),
+        "reason": record.get("reason"), "shown_order": record.get("shown_order"),
+        "outcome": mech.get("outcome"), "difficulty": mech.get("difficulty"),
+        "natural_roll": mech.get("natural_roll"), "note": record.get("note"),
+    }
+    for m in _AB_MODELS:
+        r = results.get(m) or {}
+        cols[f"{m}_ms"] = r.get("total_ms")
+        cols[f"{m}_attempt"] = r.get("final_attempt")
+        cols[f"{m}_fallback"] = r.get("used_fallback")
+        cols[f"{m}_len"] = r.get("len")
+        cols[f"{m}_text"] = r.get("text")
+    cols["record_json"] = _ab_record_json(record)
+    return [_ab_cell(cols.get(h)) for h in AB_LOG_HEADERS]
+
+
+def _ab_get_or_create_sheet(create: bool):
+    """Sync. Повертає worksheet або None (create=False і аркуша нема)."""
+    global _ab_sheet_ready, _ab_ws
+    if _ab_sheet_ready and _ab_ws is not None:
+        return _ab_ws
+    try:
+        ws = db.spreadsheet.worksheet(TAB_AB_LOG)
+        _ab_sheet_ready, _ab_ws = True, ws
+        return ws
+    except gspread.exceptions.WorksheetNotFound:
+        if not create:
+            return None
+    try:
+        ws = db.spreadsheet.add_worksheet(title=TAB_AB_LOG, rows=1000, cols=len(AB_LOG_HEADERS))
+        ws.append_row(AB_LOG_HEADERS, value_input_option="RAW")
+    except Exception:
+        # race: аркуш міг бути створений паралельно
+        ws = db.spreadsheet.worksheet(TAB_AB_LOG)
+    _ab_sheet_ready, _ab_ws = True, ws
+    return ws
+
+
+async def append_ab_log_row(record: dict) -> bool:
+    """Додає один рядок в аркуш AB_Log. Never raises: при помилці лог + False."""
+    try:
+        def _sync():
+            row = _ab_build_row(record)
+            ws = _ab_get_or_create_sheet(create=True)
+            try:
+                ws.append_row(row, value_input_option="RAW")
+            except gspread.exceptions.WorksheetNotFound:
+                # аркуш видалили вручну -> скинути кеш і створити знову
+                global _ab_sheet_ready
+                _ab_sheet_ready = False  # скинути кеш
+                ws2 = _ab_get_or_create_sheet(create=True)
+                ws2.append_row(row, value_input_option="RAW")
+            return True
+
+        async with _ab_log_lock:
+            return await asyncio.to_thread(_sync)
+    except Exception as e:  # noqa: BLE001
+        print(f"[AB_LOG ERROR] append failed: {type(e).__name__}: {e}")
+        return False
+
+
+def _ab_int(v):
+    try:
+        return int(str(v).strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _ab_bool(v) -> bool:
+    return str(v).strip().lower() in ("true", "1", "yes")
+
+
+def _ab_rebuild_record(d: dict) -> dict:
+    """Мінімальний dict з колонок (коли record_json зіпсований/порожній)."""
+    shown = d.get("shown_order") or ""
+    try:
+        shown_parsed = json.loads(shown) if shown else None
+    except (ValueError, TypeError):
+        shown_parsed = None
+    results = {}
+    for m in _AB_MODELS:
+        text = d.get(f"{m}_text") or ""
+        ms = _ab_int(d.get(f"{m}_ms"))
+        ln = _ab_int(d.get(f"{m}_len"))
+        if not (text or ms is not None or ln is not None or d.get(f"{m}_attempt")):
+            continue
+        att = d.get(f"{m}_attempt") or None
+        att_i = _ab_int(att)
+        results[m] = {
+            "text": text or None,
+            "len": ln if ln is not None else len(text),
+            "total_ms": ms if ms is not None else 0,
+            "final_attempt": att_i if att_i is not None else att,
+            "used_fallback": _ab_bool(d.get(f"{m}_fallback")),
+        }
+    rec = {
+        "type": d.get("type") or "turn",
+        "ts": d.get("ts") or "",
+        "turn_id": d.get("turn_id") or "",
+        "user_id": d.get("user_id") or "",
+        "mode": d.get("mode") or "",
+        "vote": d.get("vote") or None,
+        "vote_raw": d.get("vote_raw") or None,
+        "vote_ms": _ab_int(d.get("vote_ms")),
+        "reason": d.get("reason") or None,
+        "shown_order": shown_parsed,
+        "results": results,
+    }
+    if d.get("note"):
+        rec["note"] = d["note"]
+    return rec
+
+
+async def read_ab_log_records() -> list[dict]:
+    """Читає всі записи з AB_Log. Missing sheet -> []. Never raises."""
+    try:
+        def _sync():
+            ws = _ab_get_or_create_sheet(create=False)
+            if ws is None:
+                return []
+            return ws.get_all_values()
+
+        rows = await asyncio.to_thread(_sync)
+        out = []
+        for row in rows[1:]:
+            if not any(str(c).strip() for c in row):
+                continue
+            padded = list(row) + [""] * (len(AB_LOG_HEADERS) - len(row))
+            d = dict(zip(AB_LOG_HEADERS, padded))
+            rec = None
+            try:
+                rec = json.loads(d.get("record_json") or "")
+            except (ValueError, TypeError):
+                rec = None
+            if not isinstance(rec, dict):
+                rec = _ab_rebuild_record(d)
+            out.append(rec)
+        return out
+    except Exception as e:  # noqa: BLE001
+        print(f"[AB_LOG ERROR] read failed: {type(e).__name__}: {e}")
+        return []
+
+
 # ================= РОБОТА З NPC =================
 
 FROZEN_NPC_FIELDS = ("description", "character", "goal", "secrets")

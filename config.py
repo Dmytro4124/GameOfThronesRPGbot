@@ -43,6 +43,9 @@ NARRATOR_AB_ENABLED = os.getenv("NARRATOR_AB_ENABLED", "0") == "1"
 MODEL_NARRATOR_ALT_NAME = os.getenv("MODEL_NARRATOR_ALT_NAME", FLASH_LITE_MODEL_ID)
 NARRATOR_AB_CHOICE_TTL = 3600  # сек; після цього pending-вибір вважається простроченим
 NARRATOR_AB_LOG_PATH = os.getenv("NARRATOR_AB_LOG_PATH", "logs/narrator_ab.jsonl")
+NARRATOR_AB_SINK = os.getenv("NARRATOR_AB_SINK", "both").strip().lower()  # file|sheets|both
+if NARRATOR_AB_SINK not in ("file", "sheets", "both"):
+    NARRATOR_AB_SINK = "both"
 
 # Налаштування температури моделей
 MODEL_MAIN_TEMP = 0.7   # Для генерації сюжету та креативних описів

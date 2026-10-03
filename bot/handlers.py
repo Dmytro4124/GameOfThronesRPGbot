@@ -1648,8 +1648,9 @@ async def cmd_ab_note(message: Message, command: CommandObject):
     await message.answer("Нотатку збережено" if ok else "Немає A/B-ходу для нотатки")
 
 
-def _read_ab_votes(path: str) -> list[dict]:
-    rows = []
+def _read_ab_all(path: str) -> list[dict]:
+    """Усі записи (turn + note) з JSONL-файлу."""
+    recs = []
     try:
         with open(path, encoding="utf-8") as f:
             for line in f:
@@ -1657,18 +1658,45 @@ def _read_ab_votes(path: str) -> list[dict]:
                     rec = json.loads(line)
                 except ValueError:
                     continue
-                if rec.get("type") == "turn" and rec.get("shown_order") is not None:
-                    rows.append(rec)
+                if isinstance(rec, dict):
+                    recs.append(rec)
     except FileNotFoundError:
         pass
-    return rows
+    return recs
+
+
+async def _load_ab_records() -> tuple[list[dict], str]:
+    """(records, source): спершу лист AB_Log (Sheets), fallback -- локальний JSONL."""
+    try:
+        from database.operations import read_ab_log_records
+        recs = await read_ab_log_records()
+        if recs:
+            return recs, "Sheets"
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[NARRATOR_AB] read_ab_log_records failed: {type(e).__name__}: {str(e)[:200]}")
+    recs = await asyncio.to_thread(_read_ab_all, NARRATOR_AB_LOG_PATH)
+    return recs, "файл"
+
+
+@router.message(Command("ab_export"))
+async def cmd_ab_export(message: Message, bot: Bot):
+    if message.chat.id not in ADMIN_TELEGRAM_IDS:
+        return
+    recs, source = await _load_ab_records()
+    if not recs:
+        await message.answer("Лог порожній", parse_mode=None)
+        return
+    data = "\n".join(json.dumps(r, ensure_ascii=False, default=str) for r in recs) + "\n"
+    fname = f"narrator_ab_{datetime.now().strftime('%Y%m%d_%H%M')}.jsonl"
+    await bot.send_document(message.chat.id, BufferedInputFile(data.encode("utf-8"), filename=fname))
 
 
 @router.message(Command("ab_stats"))
 async def cmd_ab_stats(message: Message, command: CommandObject):
     if message.chat.id not in ADMIN_TELEGRAM_IDS:
         return
-    rows = await asyncio.to_thread(_read_ab_votes, NARRATOR_AB_LOG_PATH)
+    recs, source = await _load_ab_records()
+    rows = [r for r in recs if r.get("type") == "turn" and r.get("shown_order") is not None]
     total = len(rows)
     null = sum(1 for r in rows if r.get("vote") is None)
     ties = sum(1 for r in rows if r.get("vote") == "tie")
@@ -1676,7 +1704,7 @@ async def cmd_ab_stats(message: Message, command: CommandObject):
     v1 = sum(1 for r in picks if r.get("vote_raw") == "1")
     share = f"{100 * v1 / len(picks):.0f}%" if picks else "n/a"
     lines = [f"A/B: ходів з парою {total}", f"Нічиї: {ties}", f"Без голосу: {null}",
-             f"Частка 'Варіант 1': {share} ({v1}/{len(picks)})"]
+             f"Частка 'Варіант 1': {share} ({v1}/{len(picks)})", f"джерело: {source}"]
     if (command.args or "").strip().lower() == "reveal":
         for key in ("gemma", "flash_lite"):
             lines.append(f"Перемоги {key}: {sum(1 for r in rows if r.get('vote') == key)}")

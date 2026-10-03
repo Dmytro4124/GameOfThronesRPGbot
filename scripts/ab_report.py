@@ -5,6 +5,7 @@
 
 Запуск:
     python scripts/ab_report.py [--log logs/narrator_ab.jsonl] [--cliches scripts/ab_cliches.txt]
+    python scripts/ab_report.py --from-sheets   # records з листа AB_Log (потрібні .env/credentials)
 
 Markdown іде в stdout. Залежності: лише stdlib. LLM-викликів немає.
 """
@@ -99,6 +100,40 @@ def load_log(path: str) -> tuple[list[dict], int, int]:
             elif t == "turn":
                 turns.append(row)
     return turns, notes, bad
+
+
+def split_records(records: list[dict]) -> tuple[list[dict], int]:
+    """Повертає (turns, notes_count) зі списку записів."""
+    turns: list[dict] = []
+    notes = 0
+    for row in records:
+        if not isinstance(row, dict):
+            continue
+        t = row.get("type", "turn")
+        if t == "note":
+            notes += 1
+        elif t == "turn":
+            turns.append(row)
+    return turns, notes
+
+
+def load_from_sheets() -> list[dict]:
+    """Читає записи з листа AB_Log. Lazy import; зрозуміла помилка без credentials/.env."""
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+    try:
+        import asyncio
+        from database.operations import read_ab_log_records
+        return asyncio.run(read_ab_log_records())
+    except Exception as e:  # noqa: BLE001
+        raise SystemExit(
+            f"Не вдалося прочитати AB_Log з Sheets ({type(e).__name__}: {str(e)[:200]}). "
+            "Перевірте .env (SPREADSHEET_ID, GOOGLE_CREDENTIALS_JSON) / credentials.json."
+        )
 
 
 def load_cliches(path: str) -> list[str]:
@@ -351,10 +386,23 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Narrator A/B report (unblinds models; admin-only)")
     ap.add_argument("--log", default=DEFAULT_LOG)
     ap.add_argument("--cliches", default=DEFAULT_CLICHES)
+    ap.add_argument("--from-sheets", action="store_true",
+                    help="читати записи з листа AB_Log замість --log")
     args = ap.parse_args(argv)
-    turns, notes, bad = load_log(args.log)
+    if args.from_sheets:
+        records = load_from_sheets()
+        if not records:
+            print("AB_Log порожній або не вдалося прочитати (перевір .env / credentials.json)",
+                  file=sys.stderr)
+            return 1
+        turns, notes = split_records(records)
+        bad = 0
+        source = "Sheets:AB_Log"
+    else:
+        turns, notes, bad = load_log(args.log)
+        source = args.log
     cliches = load_cliches(args.cliches)
-    out = build_report(turns, notes, bad, cliches, args.log)
+    out = build_report(turns, notes, bad, cliches, source)
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:  # noqa: BLE001

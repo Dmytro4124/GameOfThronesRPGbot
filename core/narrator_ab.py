@@ -21,6 +21,7 @@ from config import (
     MODEL_NARRATOR_ALT_NAME,
     NARRATOR_AB_CHOICE_TTL,
     NARRATOR_AB_LOG_PATH,
+    NARRATOR_AB_SINK,
 )
 
 logger = logging.getLogger(__name__)
@@ -163,13 +164,48 @@ def _write_line(path: str, line: str) -> None:
 
 
 async def append_log(record: dict) -> None:
-    """Append one JSON line. Never raises."""
+    """Append record to the configured sink(s) (file JSONL and/or AB_Log sheet). Never raises."""
+    sink = NARRATOR_AB_SINK
+    if sink in ("file", "both"):
+        try:
+            line = json.dumps(record, ensure_ascii=False, default=str)
+            async with _log_lock:
+                await asyncio.to_thread(_write_line, NARRATOR_AB_LOG_PATH, line)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("narrator_ab: failed to append log: %s", e)
+    if sink in ("sheets", "both"):
+        try:
+            task = asyncio.create_task(_sheets_append(dict(record)))
+            _pending_sheet_tasks.add(task)
+            task.add_done_callback(_pending_sheet_tasks.discard)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("narrator_ab: failed to schedule AB_Log row: %s", e)
+
+
+_pending_sheet_tasks: set = set()
+SHEETS_APPEND_TIMEOUT = 30
+
+
+async def _sheets_append(record: dict) -> None:
+    """Fire-and-forget Sheets leg: never raises, bounded by SHEETS_APPEND_TIMEOUT."""
     try:
-        line = json.dumps(record, ensure_ascii=False, default=str)
-        async with _log_lock:
-            await asyncio.to_thread(_write_line, NARRATOR_AB_LOG_PATH, line)
+        from database.operations import append_ab_log_row
+        await asyncio.wait_for(append_ab_log_row(record), timeout=SHEETS_APPEND_TIMEOUT)
+    except BaseException as e:  # noqa: BLE001
+        if isinstance(e, asyncio.CancelledError):
+            raise
+        logger.warning("narrator_ab: failed to append AB_Log row: %s: %s", type(e).__name__, e)
+
+
+async def drain_pending_sheet_writes(timeout: float = 10) -> None:
+    """Await outstanding Sheets writes (tests/shutdown). Swallows errors and timeout."""
+    tasks = list(_pending_sheet_tasks)
+    if not tasks:
+        return
+    try:
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=timeout)
     except Exception as e:  # noqa: BLE001
-        logger.warning("narrator_ab: failed to append log: %s", e)
+        logger.warning("narrator_ab: drain_pending_sheet_writes: %s", type(e).__name__)
 
 
 async def append_note(chat_id, user_id, note: str) -> bool:

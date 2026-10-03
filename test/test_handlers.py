@@ -647,3 +647,90 @@ def test_ab_stats_missing_log_does_not_crash(ab):
     msg = _mk_message(chat_id=_ADMIN)
     _arun(ab.hm.cmd_ab_stats(msg, MagicMock(args=None)))
     assert "ходів з парою 0" in msg.answer.await_args.args[0]
+
+
+# --- /ab_stats source + /ab_export (Sheets sink) ------------------------------
+
+def _set_sheet_records(monkeypatch, value=None, exc=None):
+    ops_mod = sys.modules["database.operations"]
+    fn = AsyncMock(side_effect=exc) if exc is not None else AsyncMock(return_value=value)
+    monkeypatch.setattr(ops_mod, "read_ab_log_records", fn, raising=False)
+    return fn
+
+
+_SHEET_RECS = [
+    {"type": "turn", "shown_order": ["gemma", "flash_lite"], "vote": "gemma", "vote_raw": "1"},
+    {"type": "turn", "shown_order": ["gemma", "flash_lite"], "vote": "tie", "vote_raw": "tie"},
+    {"type": "note", "note": "n"},
+]
+
+
+def _export_ctx():
+    bot = MagicMock()
+    bot.send_document = AsyncMock()
+    return bot
+
+
+def test_ab_stats_uses_sheets_source(ab, monkeypatch):
+    _set_sheet_records(monkeypatch, _SHEET_RECS)
+    msg = _mk_message(chat_id=_ADMIN)
+    _arun(ab.hm.cmd_ab_stats(msg, MagicMock(args=None)))
+    out = msg.answer.await_args.args[0]
+    assert "ходів з парою 2" in out and "Нічиї: 1" in out and "джерело: Sheets" in out
+
+
+def test_ab_stats_falls_back_to_file_on_empty_sheet(ab, monkeypatch):
+    _seed_stats(ab.log)
+    _set_sheet_records(monkeypatch, [])
+    msg = _mk_message(chat_id=_ADMIN)
+    _arun(ab.hm.cmd_ab_stats(msg, MagicMock(args=None)))
+    out = msg.answer.await_args.args[0]
+    assert "ходів з парою 5" in out and "джерело: файл" in out
+
+
+def test_ab_stats_falls_back_to_file_on_exception(ab, monkeypatch):
+    _seed_stats(ab.log)
+    _set_sheet_records(monkeypatch, exc=RuntimeError("sheets down"))
+    msg = _mk_message(chat_id=_ADMIN)
+    _arun(ab.hm.cmd_ab_stats(msg, MagicMock(args=None)))
+    out = msg.answer.await_args.args[0]
+    assert "ходів з парою 5" in out and "джерело: файл" in out
+
+
+def test_ab_export_non_admin_ignored(ab, monkeypatch):
+    _set_sheet_records(monkeypatch, _SHEET_RECS)
+    msg, bot = _mk_message(chat_id=_USER), _export_ctx()
+    _arun(ab.hm.cmd_ab_export(msg, bot))
+    bot.send_document.assert_not_awaited()
+    msg.answer.assert_not_awaited()
+
+
+def test_ab_export_empty_log(ab, monkeypatch):
+    _set_sheet_records(monkeypatch, [])
+    msg, bot = _mk_message(chat_id=_ADMIN), _export_ctx()
+    _arun(ab.hm.cmd_ab_export(msg, bot))
+    bot.send_document.assert_not_awaited()
+    assert "Лог порожній" in msg.answer.await_args.args[0]
+
+
+def test_ab_export_admin_sends_valid_jsonl(ab, monkeypatch):
+    recs = _SHEET_RECS + [{"type": "turn", "turn_id": "ukr", "results": {"gemma": {"text": "Привіт\nсвіте"}}}]
+    _set_sheet_records(monkeypatch, recs)
+    msg, bot = _mk_message(chat_id=_ADMIN), _export_ctx()
+    _arun(ab.hm.cmd_ab_export(msg, bot))
+    bot.send_document.assert_awaited_once()
+    args = bot.send_document.await_args.args
+    assert args[0] == _ADMIN
+    doc = args[1]
+    assert doc.filename.startswith("narrator_ab_") and doc.filename.endswith(".jsonl")
+    lines = doc.data.decode("utf-8").splitlines()
+    assert [_json.loads(l) for l in lines] == recs
+
+
+def test_ab_export_file_fallback(ab, monkeypatch):
+    _seed_stats(ab.log)
+    _set_sheet_records(monkeypatch, [])
+    msg, bot = _mk_message(chat_id=_ADMIN), _export_ctx()
+    _arun(ab.hm.cmd_ab_export(msg, bot))
+    lines = bot.send_document.await_args.args[1].data.decode("utf-8").splitlines()
+    assert len(lines) == 7  # broken line skipped

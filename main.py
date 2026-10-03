@@ -65,6 +65,11 @@ async def on_startup(bot: Bot):
 
 async def on_shutdown(bot: Bot):
     logger.info("🛑 Зупинка системи...")
+    try:
+        from core.narrator_ab import drain_pending_sheet_writes
+        await drain_pending_sheet_writes(timeout=10)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"drain_pending_sheet_writes failed: {type(e).__name__}")
     if WEBHOOK_URL:
         await bot.delete_webhook()
     await bot.session.close()

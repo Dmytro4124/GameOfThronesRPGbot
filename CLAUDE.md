@@ -23,6 +23,7 @@ Telegram-бот текстової RPG у світі Гри Престолів. 
   - `Users_DB` — профіль користувача як JSON-string у 3-й колонці
   - `NPC_DB` — заповнюється з `database/canon_npc.py` на старті
   - `KnowledgeBase` — лор для RAG
+  - `AB_Log` — лог Narrator A/B (1 рядок на завершений хід/нотатку; sink керується `NARRATOR_AB_SINK`)
 - **RAG:** numpy евклідова відстань, кеш у `lore_embeddings.npy` + MD5 у `lore_hash.txt`
 - **Тести:** pytest (юніти у `test/`), окремий E2E QA-харнес (`qa_auto_test.py`)
 
@@ -221,6 +222,8 @@ TelegramGameOfThronesBot/
 
 ### 5.3. JSON-контракти pipeline
 
+> Narrator A/B лог (`core/narrator_ab.py`: `type: turn|note` записи) пишеться в JSONL і/або лист `AB_Log` (`append_ab_log_row` / `read_ab_log_records` у `database/operations.py`; 1 рядок на завершений хід/нотатку). Схема запису спільна для обох sink-ів.
+
 Це найкритичніший інваріант продукту. Ламати його — означає поламати весь хід гри.
 
 Pipeline складається з 4 ролей. Перші три повертають JSON, **четверта (Narrator) — чистий художній текст**, не JSON.
@@ -328,6 +331,10 @@ pytest test/ -v
 
 # Narrator A/B (опційно): NARRATOR_AB_ENABLED=1 у .env; звіт по логу
 python scripts/ab_report.py
+# звіт з листа AB_Log (Sheets) замість файлу
+python scripts/ab_report.py --from-sheets
+# NARRATOR_AB_SINK=file|sheets|both (default both) -- куди писати A/B лог
+# Адмін-команди бота: /ab_stats [reveal] (джерело Sheets, fallback файл), /ab_export (JSONL-файл у чат)
 
 # E2E QA-харнес
 python qa_auto_test.py
