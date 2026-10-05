@@ -60,9 +60,14 @@ def test_defaults_are_flash_lite(monkeypatch, load_config):
     assert cfg.MODEL_GM_LOGIC_NAME == cfg.FLASH_LITE_MODEL_ID
 
 
-def test_narrator_stays_gemma(monkeypatch, load_config):
-    for name in MODEL_ENVS:
-        monkeypatch.delenv(name, raising=False)
+def test_narrator_defaults_to_flash_lite(monkeypatch, load_config):
+    monkeypatch.delenv("MODEL_NARRATOR_NAME", raising=False)
+    cfg = load_config()
+    assert cfg.MODEL_NARRATOR_NAME == cfg.FLASH_LITE_MODEL_ID
+
+
+def test_narrator_env_override(monkeypatch, load_config):
+    monkeypatch.setenv("MODEL_NARRATOR_NAME", "gemma-4-31b-it")
     assert load_config().MODEL_NARRATOR_NAME == "gemma-4-31b-it"
 
 
@@ -76,10 +81,12 @@ def test_env_override(monkeypatch, load_config, env_name, attr):
     assert getattr(load_config(), attr) == "gemma-4-31b-it"
 
 
-def test_env_override_does_not_affect_narrator(monkeypatch, load_config):
+def test_other_model_envs_do_not_affect_narrator(monkeypatch, load_config):
+    monkeypatch.delenv("MODEL_NARRATOR_NAME", raising=False)
     for name in MODEL_ENVS:
         monkeypatch.setenv(name, "some-other-model")
-    assert load_config().MODEL_NARRATOR_NAME == "gemma-4-31b-it"
+    cfg = load_config()
+    assert cfg.MODEL_NARRATOR_NAME == cfg.FLASH_LITE_MODEL_ID
 
 
 def test_narrator_ab_disabled_by_default(monkeypatch, load_config):
@@ -89,8 +96,55 @@ def test_narrator_ab_disabled_by_default(monkeypatch, load_config):
 
 @pytest.mark.parametrize("val,expected", [("1", True), ("0", False), ("true", False)])
 def test_narrator_ab_flag_parsing(monkeypatch, load_config, val, expected):
+    monkeypatch.setenv("MODEL_NARRATOR_NAME", "gemma-4-31b-it")
+    monkeypatch.delenv("MODEL_NARRATOR_ALT_NAME", raising=False)
     monkeypatch.setenv("NARRATOR_AB_ENABLED", val)
     assert load_config().NARRATOR_AB_ENABLED is expected
+
+
+def _ab_env(monkeypatch, flag, narrator=None):
+    monkeypatch.delenv("MODEL_NARRATOR_ALT_NAME", raising=False)
+    for name, val in (("NARRATOR_AB_ENABLED", flag), ("MODEL_NARRATOR_NAME", narrator)):
+        if val is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, val)
+
+
+def _ab_warnings(caplog):
+    return [r for r in caplog.records
+            if r.levelname == "WARNING" and "Narrator A/B disabled" in r.getMessage()]
+
+
+def test_ab_flag_with_identical_models_is_disabled_and_warns(monkeypatch, load_config, caplog):
+    _ab_env(monkeypatch, "1")
+    with caplog.at_level("WARNING"):
+        cfg = load_config()
+    assert cfg.NARRATOR_AB_ENABLED is False
+    assert len(_ab_warnings(caplog)) == 1
+
+
+def test_ab_flag_with_distinct_models_is_enabled_no_warning(monkeypatch, load_config, caplog):
+    _ab_env(monkeypatch, "1", "gemma-4-31b-it")
+    with caplog.at_level("WARNING"):
+        cfg = load_config()
+    assert cfg.NARRATOR_AB_ENABLED is True
+    assert _ab_warnings(caplog) == []
+
+
+@pytest.mark.parametrize("flag", ["0", None])
+def test_ab_flag_off_is_disabled_no_warning(monkeypatch, load_config, caplog, flag):
+    _ab_env(monkeypatch, flag)
+    with caplog.at_level("WARNING"):
+        cfg = load_config()
+    assert cfg.NARRATOR_AB_ENABLED is False
+    assert _ab_warnings(caplog) == []
+
+
+@pytest.mark.parametrize("flag", ["0", None])
+def test_ab_flag_off_with_distinct_models_still_disabled(monkeypatch, load_config, flag):
+    _ab_env(monkeypatch, flag, "gemma-4-31b-it")
+    assert load_config().NARRATOR_AB_ENABLED is False
 
 
 def test_narrator_alt_defaults_to_flash_lite(monkeypatch, load_config):

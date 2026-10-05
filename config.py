@@ -1,4 +1,5 @@
 # config.py
+import logging
 import os
 from dotenv import load_dotenv
 
@@ -29,18 +30,27 @@ TAB_KNOWLEDGE = 'KnowledgeBase'
 TAB_USERS = 'Users_DB'
 TAB_NPC = 'NPC_DB'
 
-# Налаштування моделей Gemini: Main/Worker(+Censor)/GM_Logic -> Flash-Lite, Narrator -> Gemma 4
+# Налаштування моделей Gemini: Main/Worker(+Censor)/GM_Logic/Narrator -> Flash-Lite
 # Точний id Flash-Lite ОБОВ'ЯЗКОВО звірити в AI Studio. Пізніше перевикористовується для MODEL_NARRATOR_ALT_NAME.
 FLASH_LITE_MODEL_ID = "gemini-3.5-flash-lite"
 # ENV-rollback: MODEL_*_NAME=gemma-4-31b-it повертає стару модель без зміни коду
 MODEL_MAIN_NAME = os.getenv("MODEL_MAIN_NAME", FLASH_LITE_MODEL_ID)            # утиліта (summarize, NPC gen, intro)
 MODEL_WORKER_NAME = os.getenv("MODEL_WORKER_NAME", FLASH_LITE_MODEL_ID)        # Censor + Worker: механіка (кубики, DC, JSON)
 MODEL_GM_LOGIC_NAME = os.getenv("MODEL_GM_LOGIC_NAME", FLASH_LITE_MODEL_ID)    # складна NPC логіка, стан світу
-MODEL_NARRATOR_NAME = 'gemma-4-31b-it'       # Dense flagship (художній текст), під A/B-тестом
+MODEL_NARRATOR_NAME = os.getenv("MODEL_NARRATOR_NAME", FLASH_LITE_MODEL_ID)    # художній текст; rollback: MODEL_NARRATOR_NAME=gemma-4-31b-it
 
 # Narrator A/B (сліпе порівняння Gemma vs Flash-Lite). Вимкнено за замовчуванням.
-NARRATOR_AB_ENABLED = os.getenv("NARRATOR_AB_ENABLED", "0") == "1"
+# Повторний A/B з Gemma = MODEL_NARRATOR_NAME=gemma-4-31b-it + NARRATOR_AB_ENABLED=1.
+# Якщо обидві моделі збігаються -- A/B автоматично вимкнено (порівнювати нічого).
 MODEL_NARRATOR_ALT_NAME = os.getenv("MODEL_NARRATOR_ALT_NAME", FLASH_LITE_MODEL_ID)
+_AB_FLAG = os.getenv("NARRATOR_AB_ENABLED", "0") == "1"
+NARRATOR_AB_ENABLED = _AB_FLAG and MODEL_NARRATOR_NAME != MODEL_NARRATOR_ALT_NAME
+if _AB_FLAG and not NARRATOR_AB_ENABLED:
+    logging.getLogger(__name__).warning(
+        "Narrator A/B disabled: NARRATOR_AB_ENABLED=1 but both narrator models are identical (%s). "
+        "Set MODEL_NARRATOR_NAME=gemma-4-31b-it to re-run the A/B.",
+        MODEL_NARRATOR_NAME,
+    )
 NARRATOR_AB_CHOICE_TTL = 3600  # сек; після цього pending-вибір вважається простроченим
 NARRATOR_AB_LOG_PATH = os.getenv("NARRATOR_AB_LOG_PATH", "logs/narrator_ab.jsonl")
 NARRATOR_AB_SINK = os.getenv("NARRATOR_AB_SINK", "both").strip().lower()  # file|sheets|both

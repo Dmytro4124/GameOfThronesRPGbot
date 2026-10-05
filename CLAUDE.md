@@ -17,7 +17,7 @@ Telegram-бот текстової RPG у світі Гри Престолів. 
 - **Telegram:** aiogram 3.x + aiohttp (webhook через `WEBHOOK_URL`, fallback на polling)
 - **LLM:** google-genai SDK
   - Main, Worker (+Censor), GM_Logic: Gemini Flash-Lite (`FLASH_LITE_MODEL_ID` у `config.py`; ENV-override `MODEL_MAIN_NAME` / `MODEL_WORKER_NAME` / `MODEL_GM_LOGIC_NAME`, rollback = `gemma-4-31b-it`)
-  - Narrator: `gemma-4-31b-it` (під A/B-тестом)
+  - Narrator: Gemini Flash-Lite (ENV-override `MODEL_NARRATOR_NAME`, rollback = `gemma-4-31b-it`). A/B Gemma vs Flash-Lite завершено (2026-10); `NARRATOR_AB_ENABLED=1` діє лише коли `MODEL_NARRATOR_NAME != MODEL_NARRATOR_ALT_NAME` (повтор тесту: `MODEL_NARRATOR_NAME=gemma-4-31b-it`)
   - Embeddings: `gemini-embedding-2-preview`
 - **БД:** Google Sheets через gspread + Service Account
   - `Users_DB` — профіль користувача як JSON-string у 3-й колонці
