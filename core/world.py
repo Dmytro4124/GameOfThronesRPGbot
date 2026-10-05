@@ -11,7 +11,7 @@ from core.prompts import (
     build_initial_stats_prompt, build_game_intro_prompt, build_populate_npcs_prompt,
     INITIAL_STATS_SCHEMA,
 )
-from core.world_constants import get_region_for_location, get_locations_for_region, is_valid_location, VALID_LOCATIONS_ORDERED, format_scenes_for_prompt, LOCATION_SCENES
+from core.world_constants import get_region_for_location, get_locations_for_region, is_valid_location, VALID_LOCATIONS_ORDERED, format_scenes_for_prompt, LOCATION_SCENES, is_valid_scene, get_scenes_for_location
 from database.canon_npc import get_canon_npcs_copy
 
 logger = logging.getLogger(__name__)
@@ -392,6 +392,131 @@ async def get_canon_characters(house_name):
     return result if result else []
 
 
+# ── Стартова позиція героя (Location/Scene) ───────────────────────────────────
+
+def _region_hub_location(region: str) -> str:
+    """Перша канонічна локація регіону (hub), інакше VALID_LOCATIONS_ORDERED[0]."""
+    locs = get_locations_for_region(region)
+    return locs[0] if locs else VALID_LOCATIONS_ORDERED[0]
+
+
+def _hub_scene(location: str) -> str:
+    """Публічна hub-сцена локації; fallback — перша валідна сцена або назва локації."""
+    hub = LOCATION_SCENES.get(location, {}).get("hub", [])
+    if hub:
+        return hub[0]
+    if location not in LOCATION_SCENES:
+        return location  # legacy: локація без сцен -> сцена = назва локації
+    scenes = get_scenes_for_location(location)
+    return scenes[0] if scenes else location
+
+
+def format_start_locations_for_prompt(region: str) -> str:
+    """Блок валідних локацій регіону з канонічними сценами для build_initial_stats_prompt.
+
+    Формат (без NPC-пулів):
+        ЛОКАЦІЇ РЕГІОНУ «<region>» ТА ЇХНІ КАНОНІЧНІ СЦЕНИ (...):
+        - "<Локація>": "<сцена 1>", "<сцена 2>", ...
+    Сцени впорядковані: hub, semi_public, далі решта категорій (як у LOCATION_SCENES).
+    """
+    locs = get_locations_for_region(region) or [VALID_LOCATIONS_ORDERED[0]]
+    lines = [f"ЛОКАЦІЇ РЕГІОНУ «{region}» ТА ЇХНІ КАНОНІЧНІ СЦЕНИ "
+             f"(Location — одна з цих локацій; Scene — ТІЛЬКИ зі списку саме обраної локації):"]
+    for loc in locs:
+        loc_data = LOCATION_SCENES.get(loc, {})
+        priority = [c for c in ("hub", "semi_public") if c in loc_data]
+        rest = [c for c in loc_data if c not in ("hub", "semi_public")]
+        ordered = priority + rest
+        names: list = []
+        for c in ordered:
+            for sc in loc_data[c]:
+                if sc not in names:
+                    names.append(sc)
+        if not names:
+            names = get_scenes_for_location(loc)
+        lines.append(f'- "{loc}": ' + ", ".join(f'"{n}"' for n in names))
+    return "\n".join(lines)
+
+
+HERO_NAME_MATCH_THRESHOLD = 0.8   # поріг збігу імені героя з канонічним NPC (anchoring + виключення двійника)
+SCENE_CORRECTION_CUTOFF = 0.6     # difflib cutoff автокорекції невалідної сцени
+
+
+def _is_same_hero(hero_name, canon_name) -> bool:
+    """Симетричний збіг імені героя з канонічним NPC.
+
+    Нормалізує ОБИДВА рядки (lower/strip) перед find_best_match (той лоуеркейсить лише query),
+    тому результат не залежить від регістру/напрямку; єдиний поріг для anchoring і виключення двійника.
+    """
+    h = str(hero_name or "").lower().strip()
+    c = str(canon_name or "").lower().strip()
+    if not h or not c:
+        return False
+    return bool(find_best_match(h, [c], threshold=HERO_NAME_MATCH_THRESHOLD))
+
+
+def _find_hero_twin(hero_name, candidate_names):
+    """Єдиний двійник героя серед candidate_names: кандидат з найвищим ratio серед тих, що
+    пройшли _is_same_hero (при рівності — перший у списку), або None.
+
+    Запобігає колізіям (Джорах/Джіор Мормонт): виключається/якориться лише ОДИН запис.
+    """
+    hero_low = str(hero_name or "").lower().strip()
+    best, best_ratio = None, -1.0
+    for cand in candidate_names:
+        if not _is_same_hero(hero_name, cand):
+            continue
+        ratio = difflib.SequenceMatcher(None, hero_low, str(cand).lower().strip()).ratio()
+        if ratio > best_ratio:
+            best, best_ratio = cand, ratio
+    return best
+
+
+def _validate_start_position(loc, scene, origin_region: str) -> tuple:
+    """Повертає валідну (location, scene): невалідна локація -> hub регіону;
+    невалідна сцена -> difflib-автокорекція (cutoff 0.6), інакше hub[0]."""
+    loc = str(loc or "").strip()
+    if not is_valid_location(loc):
+        fallback_loc = _region_hub_location(origin_region)
+        logger.warning(f"[D&D] Невалідна локація '{loc}' -> замінено на '{fallback_loc}'")
+        loc = fallback_loc
+    scene = str(scene or "").strip()
+    if not scene or scene.lower() in ("невідомо", "global", "unknown"):
+        scene = _hub_scene(loc)
+        logger.warning(f"[D&D SCENE FALLBACK] no scene for '{loc}'; using '{scene}'.")
+    elif not is_valid_scene(loc, scene):
+        close = difflib.get_close_matches(scene, get_scenes_for_location(loc), n=1,
+                                          cutoff=SCENE_CORRECTION_CUTOFF)
+        new_scene = close[0] if close else _hub_scene(loc)
+        logger.info(f"[D&D SCENE] '{scene}' невалідна для '{loc}' -> '{new_scene}'")
+        scene = new_scene
+    return loc, scene
+
+
+def _canon_start_position(char_name: str):
+    """(location, scene) канонічного NPC, чиє ім'я збігається з героєм, або None.
+
+    Використовує _is_same_hero (той самий хелпер і поріг, що й виключення героя в
+    background_canon_generation), тож 'Еддард Старк' != 'Бенджен Старк'.
+    """
+    try:
+        canon = get_canon_npcs_copy()
+        twin = _find_hero_twin(char_name, [n.get("Name", "") for n in canon])
+        if twin is None:
+            return None
+        npc = next(n for n in canon if n.get("Name", "") == twin)
+        loc = npc.get("Location", "")
+        if not is_valid_location(loc):
+            return None
+        scene = npc.get("Scene") or ""
+        if not is_valid_scene(loc, scene):
+            scene = _hub_scene(loc)
+        return loc, scene
+    except Exception as e:
+        logger.warning(f"[WORLD] canon anchoring failed for '{char_name}': {e}")
+        return None
+
+
 async def generate_initial_stats_legacy(char_name, house_name, house_data):
     """Legacy 2d50-profile generator.
 
@@ -465,7 +590,8 @@ async def generate_initial_stats(char_name, house_name, house_data, apply_herita
     print(f"🎲 [D&D] Генерую статистику для {char_name}...")
 
     valid_locations_str = ", ".join(f'"{loc}"' for loc in VALID_LOCATIONS_ORDERED)
-    _scenes_block = format_scenes_for_prompt(origin_region)
+    _scenes_block = format_start_locations_for_prompt(origin_region)
+    _canon_pos = _canon_start_position(char_name)
 
     prompt = build_initial_stats_prompt(char_name, house_name, origin_region, valid_locations_str, scenes_block_str=_scenes_block)
 
@@ -483,7 +609,7 @@ async def generate_initial_stats(char_name, house_name, house_data, apply_herita
 
     if not llm_data:
         logger.warning("[WORLD] LLM stat generation failed — using deterministic D&D fallback")
-        return _build_deterministic_dnd_profile(
+        _fb_profile = _build_deterministic_dnd_profile(
             char_name=char_name,
             house_name=house_name,
             origin_region=origin_region,
@@ -491,26 +617,27 @@ async def generate_initial_stats(char_name, house_name, house_data, apply_herita
             suggested_heritage="Westerosi (Andal)",
             apply_heritage=apply_heritage,
         )
+        if _canon_pos and isinstance(_fb_profile, dict):
+            _fb_profile["Поточне місцезнаходження"], _fb_profile["Поточна сцена"] = _canon_pos
+            _fb_profile["Регіон"] = get_region_for_location(_canon_pos[0]) or origin_region
+        return _fb_profile
 
-    # --- Validate location and scene (same as legacy) ---
+    # --- Validate location and scene ---
     llm_data["Ім'я"] = char_name
     llm_data["Дім"] = house_name
-    loc = llm_data.get("Поточне місцезнаходження", "")
-    if not is_valid_location(loc):
-        fallback_loc = VALID_LOCATIONS_ORDERED[0]
-        print(f"⚠️ [D&D] Невалідна локація '{loc}' → замінено на '{fallback_loc}'")
-        llm_data["Поточне місцезнаходження"] = fallback_loc
-        loc = fallback_loc
+    if _canon_pos:
+        # A3: канонічний герой -> позиція зі canon_npc (LLM не знає, де він стоїть)
+        loc, curr_scene = _canon_pos
+        logger.info(f"[D&D] Канонічний герой '{char_name}' -> '{loc}' / '{curr_scene}'")
+    else:
+        loc, curr_scene = _validate_start_position(
+            llm_data.get("Поточне місцезнаходження", ""),
+            llm_data.get("Поточна сцена", ""),
+            origin_region,
+        )
+    llm_data["Поточне місцезнаходження"] = loc
+    llm_data["Поточна сцена"] = curr_scene
     llm_data["Регіон"] = get_region_for_location(loc) or origin_region
-    curr_scene = llm_data.get("Поточна сцена", "")
-    if not curr_scene or curr_scene.strip().lower() in ("невідомо", "global", "unknown", ""):
-        loc_scenes = LOCATION_SCENES.get(loc, {})
-        hub_scenes = loc_scenes.get("hub", [])
-        if hub_scenes:
-            llm_data["Поточна сцена"] = hub_scenes[0]
-            print(f"⚠️ [D&D SCENE FALLBACK] LLM did not provide scene for '{loc}'; using hub[0]='{hub_scenes[0]}'.")
-        else:
-            llm_data["Поточна сцена"] = loc
 
     # --- Resolve class and heritage ---
     suggested_class: str = str(llm_data.get("suggested_class", "Hedge Knight")).strip()
@@ -899,9 +1026,12 @@ async def background_canon_generation(user_id, excluded_name=None):
 
         try:
             rows_to_add = []
-            for npc in get_canon_npcs_copy():
+            _canon_list = get_canon_npcs_copy()
+            _twin_name = (_find_hero_twin(excluded_name, [n.get("Name", "") for n in _canon_list])
+                          if excluded_name else None)
+            for npc in _canon_list:
                 name = npc.get("Name", "Unknown")
-                if excluded_name and find_best_match(name, [excluded_name], threshold=0.8):
+                if _twin_name is not None and name == _twin_name:
                     continue
 
                 row = [
@@ -1046,8 +1176,11 @@ async def populate_contextual_npcs(user_id, location, situation_context="Normal 
         for npc in npc_list:
             ai_gen_name = npc.get("Name", "Unknown").strip()
 
-            if excluded_name and find_best_match(ai_gen_name, [excluded_name], threshold=0.8):
-                continue
+            # Виключаємо AI-NPC лише якщо він найкращий матч героя серед canon + нього (ai першим: при рівності ai).
+            if excluded_name and _is_same_hero(excluded_name, ai_gen_name):
+                _canon_pool = [n.get("Name", "") for n in get_canon_npcs_copy()]
+                if _find_hero_twin(excluded_name, [ai_gen_name] + _canon_pool) == ai_gen_name:
+                    continue
 
             # Fix 2: Блок мертвих NPC — fuzzy-пошук по excluded_dead_names
             if excluded_dead_names:

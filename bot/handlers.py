@@ -19,7 +19,7 @@ from bot.utils import send_safe_message, send_game_response
 from database.operations import (
     get_unique_regions, get_houses_by_region, get_house_stats_data,
     get_user_data, save_user_data, delete_user_data,
-    clear_npc_cache, delete_user_npc_sheet,
+    clear_npc_cache, delete_user_npc_sheet, refresh_npc_database,
 )
 from core.world import (
     get_canon_characters, generate_initial_stats, get_narrative_intro,
@@ -141,6 +141,30 @@ async def cmd_map(message: Message, bot: Bot):
     await send_safe_message(bot, chat_id, text)
 
 
+async def _ensure_npc_cache(chat_id: int, retries: int = 1, delay: float = 3.0) -> bool:
+    """Завантажує NPC-кеш сесії з Sheets (refresh_npc_database вже через to_thread).
+
+    Не кидає виняток. Якщо refresh впав або кеш порожній — до `retries` повторів
+    з asyncio.sleep(delay). Ставить session['_npc_cache_attempted']=True (сумісність).
+    """
+    ok = False
+    for attempt in range(retries + 1):
+        try:
+            ok = bool(await refresh_npc_database(chat_id))
+        except Exception as e:
+            logger.warning("[NPC CACHE] refresh failed for %s (attempt %d): %s", chat_id, attempt + 1, e)
+            ok = False
+        cache = user_sessions.get(chat_id, {}).get("npc_cache")
+        if ok and cache:
+            break
+        if attempt < retries:
+            logger.warning("[NPC CACHE] empty/failed for %s (attempt %d), retry in %.1fs", chat_id, attempt + 1, delay)
+            await asyncio.sleep(delay)
+    if chat_id in user_sessions:
+        user_sessions[chat_id]["_npc_cache_attempted"] = True
+    return ok
+
+
 @router.callback_query(F.data == "resume_game")
 async def resume_game_handler(call: CallbackQuery, bot: Bot):
     """Обробка кнопки 'Продовжити гру' після /start"""
@@ -155,6 +179,8 @@ async def resume_game_handler(call: CallbackQuery, bot: Bot):
             "npc_cache": {},
             "dead_npc_names": set(),
         }
+        # Після рестарту кеш порожній: підтягуємо NPC (інакше ростер сцени порожній назавжди)
+        await _ensure_npc_cache(chat_id, retries=0)
         await call.message.delete()
         await send_safe_message(bot, chat_id, "🔄 *Зв'язок зі світом відновлено. Що робите далі?*",
                                 reply_markup=get_main_menu())
@@ -362,6 +388,11 @@ async def _finalise_character_and_start(bot: Bot, chat_id: int, full_profile: di
         try:
             await background_canon_generation(user_id, excluded_name=p_name)
             await populate_contextual_npcs(user_id, loc, "Start of the game. Normal daily routine.", excluded_name=p_name)
+            # refresh усередині world.py міг впасти (429/квота) -> кеш {}; один retry
+            if not user_sessions.get(user_id, {}).get("npc_cache"):
+                await _ensure_npc_cache(user_id, retries=1)
+            elif chat_id in user_sessions:
+                user_sessions[chat_id]["_npc_cache_attempted"] = True
         finally:
             if chat_id in user_sessions:
                 user_sessions[chat_id]['state'] = "GAME_ACTIVE"

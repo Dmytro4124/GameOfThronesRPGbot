@@ -1,7 +1,8 @@
 """
 test_bg_intro_flow.py
 
-Тести для фонового intro-паттерну у bot/handlers.py:start_game_with_character.
+Тести для фонового intro-паттерну у bot/handlers.py:_finalise_character_and_start
+(потік інтро переїхав зі start_game_with_character; профіль подається вже готовим).
 
 Перевіряємо три сценарії:
   1. Cache HIT → LLM не викликається, гравець одразу отримує кешований текст.
@@ -160,8 +161,8 @@ def test_cache_hit_no_llm_call():
             for target, mock_obj in patches:
                 stack.enter_context(patch(target, mock_obj))
 
-            from bot.handlers import start_game_with_character
-            await start_game_with_character(bot, chat_id, "Тест Герой")
+            from bot.handlers import _finalise_character_and_start
+            await _finalise_character_and_start(bot, chat_id, dict(_PROFILE))
 
             # Даємо фоновим задачам можливість виконатись
             await asyncio.sleep(0.05)
@@ -203,8 +204,8 @@ def test_cache_miss_llm_success_fills_cache():
             for target, mock_obj in patches:
                 stack.enter_context(patch(target, mock_obj))
 
-            from bot.handlers import start_game_with_character
-            await start_game_with_character(bot, chat_id, "Тест Герой")
+            from bot.handlers import _finalise_character_and_start
+            await _finalise_character_and_start(bot, chat_id, dict(_PROFILE))
 
             # Даємо фоновій задачі _bg_intro_task час виконатись
             await asyncio.sleep(0.1)
@@ -241,7 +242,7 @@ def test_llm_failure_fallback_stays_no_exception():
     """
     Якщо get_narrative_intro кидає виняток,
     set_cached_intro НЕ викликається,
-    start_game_with_character завершується без raise.
+    _finalise_character_and_start завершується без raise.
     """
     from core.engine import user_sessions
 
@@ -260,9 +261,9 @@ def test_llm_failure_fallback_stays_no_exception():
             for target, mock_obj in patches:
                 stack.enter_context(patch(target, mock_obj))
 
-            from bot.handlers import start_game_with_character
+            from bot.handlers import _finalise_character_and_start
             # Не повинна кидати виняток
-            await start_game_with_character(bot, chat_id, "Тест Герой")
+            await _finalise_character_and_start(bot, chat_id, dict(_PROFILE))
 
             # Даємо _bg_intro_task час завершитись
             await asyncio.sleep(0.1)

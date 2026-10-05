@@ -9,6 +9,10 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Backoff lazy NPC-cache guard (A1): збій refresh / відсутній лист vs успішний refresh з порожнім ростером.
+_NPC_CACHE_RETRY_FAIL_S = 60
+_NPC_CACHE_RETRY_EMPTY_S = 600
+
 from core.ai_client import model_worker, model_gm_logic, model_narrator, model_narrator_alt, clean_and_parse_json, clear_thoughts, get_thoughts_log, record_thought, hedged_generate_content_async, build_strict_config
 from config import MODEL_NARRATOR_NAME, NARRATOR_AB_ENABLED
 from core.narrator_ab import (
@@ -1063,6 +1067,26 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             user_sessions[chat_id]["npc_cache"] = {}
         if "dead_npc_names" not in user_sessions[chat_id]:
             user_sessions[chat_id]["dead_npc_names"] = set()
+
+    # A1: lazy NPC-cache guard. Після рестарту/resume npc_cache порожній, а ростер будується лише з нього
+    # (GM не бачить NPC -> npc_updates=[] -> refresh не викликається = deadlock). Один refresh, прапор ставимо
+    # ДО await (захист від паралельних/повторних спроб). Throttle — за часом (_npc_cache_attempt_ts), НЕ за
+    # bool-прапором handlers (_npc_cache_attempted ставиться навіть після невдалої спроби). Backoff залежить
+    # від наслідку попередньої спроби (_npc_cache_retry_after_s): збій/відсутній лист -> 60 с; refresh ок, але
+    # активних NPC немає (легітимно порожній лист) -> 600 с. Заповнений кеш -> guard no-op.
+    _sess_guard = user_sessions[chat_id]
+    if not _sess_guard.get("npc_cache"):
+        _now_ts = time.time()
+        _retry_after = _sess_guard.get("_npc_cache_retry_after_s", _NPC_CACHE_RETRY_FAIL_S)
+        if _now_ts - _sess_guard.get("_npc_cache_attempt_ts", 0) >= _retry_after:
+            _sess_guard["_npc_cache_attempt_ts"] = _now_ts
+            _sess_guard["_npc_cache_retry_after_s"] = _NPC_CACHE_RETRY_FAIL_S
+            try:
+                _refreshed = await refresh_npc_database(chat_id)  # to_thread всередині (operations.py)
+                if _refreshed and not _sess_guard.get("npc_cache"):
+                    _sess_guard["_npc_cache_retry_after_s"] = _NPC_CACHE_RETRY_EMPTY_S
+            except Exception as _e:
+                logger.warning(f"[NPC CACHE GUARD] refresh failed for {chat_id}: {_e}")
     history = session.get('history', [])
 
     history_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in history[-40:]])
