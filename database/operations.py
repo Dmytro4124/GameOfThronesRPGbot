@@ -756,6 +756,10 @@ async def refresh_npc_database(user_id):
             print(f"[NPC DB ERROR] {e}")
             return None, set(), 0
 
+    # Дочекатись фонових записів move_npcs_with_player, інакше reload зі Sheets
+    # "відкотить" щойно переміщених компаньйонів у кеші.
+    await _await_pending_moves(user_id)
+
     result, dead_result, count = await asyncio.to_thread(_sync_refresh)
 
     # Оборонне програмування: якщо session не існує — ініціалізуємо
@@ -769,6 +773,133 @@ async def refresh_npc_database(user_id):
         return True
 
     return False
+
+
+def _norm_npc_name(name) -> str:
+    return str(name).strip().lower().replace("’", "'").replace("`", "'")
+
+
+# Фонові записи Location/Scene від move_npcs_with_player: user_id -> set[Task].
+# Тримаємо сильні посилання (інакше Task може бути зібраний GC).
+_pending_move_tasks: dict = {}
+
+
+async def _await_pending_moves(user_id):
+    tasks = list(_pending_move_tasks.get(user_id, ()))
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _write_npc_moves_to_sheet(user_id, names: list, location: str, scene: str):
+    """Фоновий запис Location/Scene для переміщених NPC. Не кидає виняток."""
+    tab_name = _npc_tab_name(user_id)
+    targets = {_norm_npc_name(n) for n in names}
+
+    def _sync_write():
+        worksheet = db.get_sheet(tab_name)
+        if not worksheet:
+            print(f"[NPC MOVE] Аркуш '{tab_name}' не знайдено.")
+            return 0
+        all_values = worksheet.get_all_values()
+        if not all_values:
+            return 0
+        headers = [h.strip().lower() for h in all_values[0]]
+        if "name" not in headers or "location" not in headers or "scene" not in headers:
+            print(f"[NPC MOVE] У '{tab_name}' немає колонок Name/Location/Scene.")
+            return 0
+        name_i, loc_i, scene_i = headers.index("name"), headers.index("location"), headers.index("scene")
+        cells = []
+        for r, row in enumerate(all_values[1:], start=2):
+            if len(row) > name_i and _norm_npc_name(row[name_i]) in targets:
+                cells.append(gspread.Cell(r, loc_i + 1, location))
+                cells.append(gspread.Cell(r, scene_i + 1, scene))
+        if cells:
+            worksheet.update_cells(cells)
+        return len(cells) // 2
+
+    try:
+        n = await asyncio.to_thread(_sync_write)
+        print(f"[NPC MOVE] user {user_id}: записано {n} NPC у Sheets → {location}/{scene}.", flush=True)
+    except Exception as e:
+        print(f"[NPC MOVE WARNING] user {user_id}: запис у Sheets не вдався: {e}", flush=True)
+
+
+async def move_npcs_with_player(chat_id, names: list, location: str, scene: str) -> list:
+    """Переносить компаньйонів гравця у нову локацію/сцену.
+
+    Кеш оновлюється одразу (без await між читанням і записом — атомарно для event loop),
+    запис у Sheets іде у фоновій задачі через asyncio.to_thread. Оминає TELEPORT/Scene Drag
+    guard-и update_npcs_in_db навмисно: імена валідовані проти ростеру + успішний кидок.
+    Повертає канонічні імена фактично переміщених NPC.
+    """
+    from core.engine import user_sessions
+
+    if not names:
+        return []
+    location = str(location or "").strip()
+    scene = str(scene or "").strip()
+    if not location or location == TRAVEL_LOCATION or not is_valid_location(location):
+        print(f"[NPC MOVE] Пропуск: непридатна локація '{location}'.")
+        return []
+    session = user_sessions.get(chat_id)
+    if not session:
+        return []
+    npc_cache = session.get("npc_cache") or {}
+    dead_norm = {_norm_npc_name(d) for d in session.get("dead_npc_names", set())}
+
+    # Індекс Active NPC: norm_name -> (канонічне ім'я)
+    index = {}
+    for npcs_list in npc_cache.values():
+        for npc in npcs_list:
+            nm = npc.get("name")
+            if nm:
+                index.setdefault(_norm_npc_name(nm), nm)
+
+    moved = []
+    for raw in names:
+        key = _norm_npc_name(raw)
+        if key in dead_norm:
+            print(f"[NPC MOVE] '{raw}' мертвий — пропуск.")
+            continue
+        canon = index.get(key)
+        if not canon:
+            print(f"[NPC MOVE] '{raw}' не в кеші Active NPC — пропуск.")
+            continue
+        if canon not in moved:
+            moved.append(canon)
+    if not moved:
+        return []
+
+    # --- Синхронне оновлення кешу (нижче немає await) ---
+    moving = set(moved)
+    entries = {}
+    for loc_key in list(npc_cache.keys()):
+        keep = []
+        for npc in npc_cache[loc_key]:
+            if npc.get("name") in moving and npc.get("name") not in entries:
+                entries[npc["name"]] = npc
+            else:
+                keep.append(npc)
+        npc_cache[loc_key] = keep
+    dest = npc_cache.setdefault(location, [])
+    for nm in moved:
+        entry = entries[nm]
+        entry["scene"] = scene or "невідомо"
+        dest.append(entry)
+    session["npc_cache"] = npc_cache
+
+    # --- Фоновий запис у Sheets ---
+    task = asyncio.create_task(_write_npc_moves_to_sheet(chat_id, moved, location, scene or "невідомо"))
+    bucket = _pending_move_tasks.setdefault(chat_id, set())
+    bucket.add(task)
+
+    def _done(t, _b=bucket, _cid=chat_id):
+        _b.discard(t)
+        if not _b:
+            _pending_move_tasks.pop(_cid, None)
+
+    task.add_done_callback(_done)
+    return moved
 
 
 def get_dead_npc_names(user_id) -> set:
@@ -985,13 +1116,19 @@ async def update_npcs_in_db(user_id, updates, legal_names_list_deprecated=None,
                             player_new_location: str = None, player_location_changed: bool = False,
                             player_new_scene: str = None, player_scene_changed: bool = False,
                             companion_npcs: list = None,
-                            frozen_fields_reason: str = ""):
+                            frozen_fields_reason: str = "",
+                            locked_names: list = None):
     """
     Асинхронно оновлює існуючих NPC в аркуші NPC_<user_id>.
     Вбудовано жорстку нормалізацію регістру та апострофів для difflib.
+    locked_names: імена, щойно переміщені move_npcs_with_player у цьому ході —
+    Location/Scene від GM для них ігноруються (інші поля оновлюються як зазвичай).
     """
     if not updates:
         return
+    _locked_norm = {_norm_npc_name(n) for n in (locked_names or [])}
+    # Не змагатися з фоновим записом переміщення
+    await _await_pending_moves(user_id)
 
     print(f"[NPC UPDATE] user {user_id}: обробка змін: {json.dumps(updates, ensure_ascii=False)}")
 
@@ -1072,6 +1209,11 @@ async def update_npcs_in_db(user_id, updates, legal_names_list_deprecated=None,
                         print(f"🚫 [RELATION_PLAYER GUARD] '{real_original_name}': "
                               f"Relation_Player ігнорується (system-managed derivative). "
                               f"Use reputation_delta from Worker → update_npc_reputation flow.")
+                        continue
+
+                    if field_key in ("location", "scene") and _norm_npc_name(real_original_name) in _locked_norm:
+                        print(f"🔒 [MOVE LOCK] '{real_original_name}': {field_key} від GM ігнорується "
+                              f"(NPC щойно переміщено разом з гравцем).")
                         continue
 
                     val_str = str(new_val).strip()

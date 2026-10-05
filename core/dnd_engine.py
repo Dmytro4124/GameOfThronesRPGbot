@@ -822,6 +822,14 @@ def _build_updates(
     updates.setdefault("condition_apply", raw_updates.get("condition_apply", []))
     updates.setdefault("condition_remove", raw_updates.get("condition_remove", []))
 
+    # OPTIONAL companions_moving: список імен NPC, яких гравець веде з собою (споживач — engine).
+    # Не-список / сміття → []; елементи приводяться до непорожніх рядків.
+    _cm = raw_updates.get("companions_moving")
+    updates["companions_moving"] = (
+        [str(n).strip() for n in _cm if isinstance(n, str) and n.strip()]
+        if isinstance(_cm, list) else []
+    )
+
     return updates
 
 

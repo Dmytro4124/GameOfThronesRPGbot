@@ -171,9 +171,9 @@ def test_worker_example_m_purchase(worker_prompt):
     assert "inventory_new" in seg
 
 
-def test_worker_few_shot_count_is_six(worker_prompt):
+def test_worker_few_shot_count_is_seven(worker_prompt):
     seg = worker_prompt.split("<few_shot_examples>")[1].split("</few_shot_examples>")[0]
-    assert re.findall(r"^EXAMPLE ([A-Z])", seg, flags=re.M) == ["A", "C", "F", "G", "H", "M"]
+    assert re.findall(r"^EXAMPLE ([A-Z])", seg, flags=re.M) == ["A", "C", "F", "G", "H", "P", "M"]
 
 
 @pytest.mark.parametrize("with_features", [True, False])
@@ -325,7 +325,13 @@ def test_gm_attitude_to_player_not_in_output_example(gm_prompt):
 def test_gm_companion_npcs_whitelist(gm_prompt):
     assert "companion_npcs" in gm_prompt
     assert '"companion_npcs": []' in gm_prompt
-    assert "заповни companion_npcs точними іменами" in gm_prompt
+    # Директива 4 і golden law 4: companion_npcs лишається у схемі; рух, ініційований гравцем,
+    # тепер обробляє система (<moved_with_player>), а whitelist -- лише для самостійних рішень NPC.
+    assert "4. companion_npcs: тільки якщо гравець явно назвав NPC для подорожі, інакше []" in gm_prompt
+    assert "moved_with_player" in gm_prompt
+    assert "companion_npcs — для самостійних рішень NPC піти за гравцем" in gm_prompt
+    # стара директива "заповни companion_npcs точними іменами" прибрана свідомо
+    assert "заповни companion_npcs точними іменами" not in gm_prompt
 
 
 def test_gm_suggested_actions_exactly_four(gm_prompt):

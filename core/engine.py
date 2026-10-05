@@ -99,7 +99,7 @@ from database.operations import (
     get_user_data, save_user_data, get_relevant_context,
     get_location_npcs, update_npcs_in_db,
     update_npc_reputation, append_memory_anchor, get_dead_npc_names,
-    refresh_npc_database,
+    refresh_npc_database, move_npcs_with_player,
 )
 
 user_sessions = {}
@@ -1149,6 +1149,9 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         chat_id, curr_loc, curr_scene, current_region=curr_region
     )
 
+    # Ростер НА ПОЧАТКУ ходу — саме його бачив Worker (валідація companions_moving + debug diag)
+    _start_legal_npc_names = list(legal_npc_names)
+
     # === B+C: відстежуємо зникнення NPC між ходами (розділяємо мертвих та просто відсутніх) ===
     _dead_names_cache = get_dead_npc_names(chat_id)
     prev_legal_npc_names = user_sessions.get(chat_id, {}).get("prev_legal_npc_names", [])
@@ -1620,18 +1623,64 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 f"(raw_target='{_raw_target}', legal={legal_npc_names}) — staying NORMAL for chat_id={chat_id}"
             )
 
+    # === COMPANIONS MOVE: Worker вирішує, хто йде з гравцем; застосовуємо ДО ROSTER REBUILD ===
+    # Умови: NORMAL-режим, місце гравця реально змінилось, не travel (ростер дороги регіональний —
+    # запис "В дорозі" у NPC зіпсував би їхню локацію; компаньйони доїдуть при прибутті), не FAILURE.
+    moved_companions: list = []
+    _companions_diag_line = "  companions_moving: [] → moved: []"
+    _post_loc   = profile.get("Поточне місцезнаходження", curr_loc)
+    _post_scene = profile.get("Поточна сцена", curr_scene)
+    _post_region = profile.get("Регіон", get_region_for_location(_post_loc) or curr_region)
+    _place_changed = (_post_scene != curr_scene or _post_loc != curr_loc)
+    _cm_raw = mechanical_updates.get("companions_moving") or []
+    _cm_req = [str(n).strip() for n in _cm_raw if str(n).strip()] if isinstance(_cm_raw, list) else []
+    if _cm_req:
+        _cm_skip_reason = ""
+        _cm_outcome = mechanical_updates.get("outcome", "")
+        if profile.get("mode") == "COMBAT" or _is_in_combat_for_engine(chat_id):
+            _cm_skip_reason = "combat"
+        elif not _place_changed:
+            _cm_skip_reason = "player place unchanged"
+        elif _post_loc == TRAVEL_LOCATION:
+            _cm_skip_reason = "travel mode"
+        elif _cm_outcome in ("FAILURE", "CRITICAL FAILURE"):
+            _cm_skip_reason = f"outcome {_cm_outcome}"
+        _cm_dead = get_dead_npc_names(chat_id)
+        _cm_legal = set(_start_legal_npc_names)
+        _cm_names = [n for n in dict.fromkeys(_cm_req) if n in _cm_legal and n not in _cm_dead]
+        _cm_rejected = [n for n in _cm_req if n not in _cm_names]
+        if _cm_rejected:
+            logger.info(f"[COMPANIONS] відкинуто (не в стартовому ростері/мертві): {_cm_rejected}")
+        if _cm_names and not _cm_skip_reason:
+            try:
+                moved_companions = list(await move_npcs_with_player(chat_id, _cm_names, _post_loc, _post_scene))
+            except Exception as _cm_exc:
+                logger.error(f"[COMPANIONS] move_npcs_with_player failed: {_cm_exc}", exc_info=True)
+                moved_companions = []
+            if not moved_companions:
+                _cm_skip_reason = "move returned nothing"
+        _cm_skipped = [n for n in _cm_req if n not in moved_companions]
+        _companions_diag_line = (
+            f"  companions_moving: {_cm_req} → moved: {moved_companions}"
+            + (f" (skipped: {_cm_skipped}, reason: {_cm_skip_reason or 'not in start roster/dead'})"
+               if _cm_skipped else "")
+        )
+        print(f"🚶 [COMPANIONS] {_companions_diag_line.strip()}")
+
     # === REFRESH: Перечитуємо loc/scene/region якщо apply_system_impacts їх змінила ===
     # Зберігаємо "ростер відправлення" ПЕРЕД rebuild (для dual roster промптів)
     departing_npc_context = npc_context_text
     departing_npc_names = list(legal_npc_names)
+    if moved_companions:
+        # Компаньйони вже виїхали з кешу старої сцени → departing-ростер без них
+        departing_npc_context, departing_npc_names, _ = get_location_npcs(
+            chat_id, curr_loc, curr_scene, current_region=curr_region
+        )
     arriving_npc_context = ""
     arriving_npc_names = []
     location_or_scene_changed = False
 
-    _post_loc   = profile.get("Поточне місцезнаходження", curr_loc)
-    _post_scene = profile.get("Поточна сцена", curr_scene)
-    _post_region = profile.get("Регіон", get_region_for_location(_post_loc) or curr_region)
-    if _post_scene != curr_scene or _post_loc != curr_loc:
+    if _place_changed:
         location_or_scene_changed = True
         curr_loc    = _post_loc
         curr_scene  = _post_scene
@@ -1783,6 +1832,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         arriving_roster_text=arriving_npc_context if location_or_scene_changed else "",
         mode=_gm_mode,
         npc_hp_snapshot=_npc_hp_snapshot,
+        moved_companions=moved_companions or None,
     )
 
 
@@ -1795,7 +1845,8 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             _tmarks["w1"] = _meta_mark()
             try:
                 _debug_trace["worker"]["roster"] = _roster_diag_lines(
-                    chat_id, legal_npc_names, {"user_input": user_input})
+                    chat_id, _start_legal_npc_names, {"user_input": user_input})
+                _debug_trace["worker"]["roster"].append(_companions_diag_line)
             except Exception as _rd_exc:
                 logger.warning(f"[DEBUG_MODE] worker roster diag failed: {type(_rd_exc).__name__}")
 
@@ -2408,7 +2459,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                                   new_location_arg=None, player_location_changed_arg=False,
                                   player_new_scene_arg=None, player_scene_changed_arg=False,
                                   companion_npcs_arg=None, frozen_fields_reason_arg="",
-                                  commit_history_arg=True):
+                                  commit_history_arg=True, locked_names_arg=None):
             try:
                 # Profile already persisted synchronously above; only secondary
                 # writes remain here (NPC DB, reputation, history summarization).
@@ -2421,6 +2472,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                         player_scene_changed=player_scene_changed_arg,
                         companion_npcs=companion_npcs_arg,
                         frozen_fields_reason=frozen_fields_reason_arg,
+                        locked_names=locked_names_arg,
                     )
 
                 # Оновлення репутації NPC після соціальних перевірок
@@ -2461,6 +2513,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 companion_npcs_arg=companion_npcs,
                 frozen_fields_reason_arg=ai_data.get("frozen_fields_change_reason", ""),
                 commit_history_arg=(_ab_mode != "pair"),
+                locked_names_arg=moved_companions or None,
             ))
 
         duration = time.time() - t_start

@@ -405,6 +405,10 @@ WORKER_NORMAL_SCHEMA = _s_obj(
                     {"name": _s_str(), "target": _s_str("'player' or NPC name.")},
                     required=["name", "target"],
                 )),
+                "companions_moving": _s_arr(
+                    _s_str("Exact NPC name from NPCs present who physically goes with the player."),
+                    description="Optional; [] unless scene_impact/location_impact moves the player.",
+                ),
             },
             required=["minutes_passed", "location_impact", "scene_impact", "hp_damage_dice",
                       "hp_heal_dice", "gold_impact", "inventory_new", "inventory_lost",
@@ -1049,6 +1053,11 @@ earn_small (10-30) / earn_medium (100-300) / earn_large (лише при реа�
 
 [GATE 5 — MOVEMENT]
 Явний перехід в інше місце → непорожні location_impact/scene_impact. Інакше обидва "none".
+updates.companions_moving (опційно): заповнюй лише коли scene_impact або location_impact змінює місце гравця; інакше [].
+Лише ТОЧНІ імена з "NPCs present", хто фізично йде разом з гравцем за змістом дії (гравець веде/кличе/бере з собою,
+або NPC явно супроводжує). Не включай тих, кого гравець залишає чи кому наказує лишитись, і тих, хто за логікою сцени не піде.
+Не вигадуй імен; безіменні ролі («слуга», «стражник») не включай. Заповнюй за наміром дії: engine застосує рух
+компаньйонів лише при успіху перевірки.
 
 [GATE 6 — COMBAT IMMINENT + TARGET]
 Фізична атака починається ЗАРАЗ → combat_imminent=true. Словесна погроза чи оголена зброя → false; слова бій не запускають.
@@ -1184,6 +1193,12 @@ EXAMPLE H — Trivial action (GATE 1 → DC 2):
   combat_imminent: false, hp_damage_dice: "none"
   verdict_text: "Гравець бере келих вина. Тривіально."
 
+EXAMPLE P — Рух з компаньйоном (NPCs present: ["Кейтлін Старк", "Санса Старк"]):
+  player_action: "Я беру Кейтлін за руку і веду в Покої Лорда"
+  updates.scene_impact: "Покої Лорда", updates.companions_moving: ["Кейтлін Старк"]   ← Сансу не згадано → не йде
+  player_action: "Я йду в кузню, а ти, Сансо, лишайся"
+  updates.scene_impact: "Кузня", updates.companions_moving: []   ← Санса наказано лишитись
+
 EXAMPLE M — Покупка (gold_impact + inventory_new):
   player_action: "Купую у торговця хліб і флягу вина"
   gold_reasoning: "GATE 4: YES — гравець добровільно платить за хліб і вино; дрібна покупка → spend_small. Куплене → inventory_new."
@@ -1229,6 +1244,7 @@ updates (object):
   clocks_impact   : object (напр. {{"Scene_Tension": "1"}} або {{"Scene_Tension": "clear"}}), {{}} якщо без змін
   condition_apply : array of {{"name": string, "duration": int (rounds), "target": "player"|npc_name}}
   condition_remove: array of {{"name": string, "target": "player"|npc_name}}
+  companions_moving (optional, default []): array of exact names from "NPCs present" who physically go with the player; [] unless scene_impact/location_impact moves the player
 Optional (defaults when absent):
 save_used : {_LEGAL_ABILITIES} (default "None") · save_dc : one integer from {{{_LEGAL_DCS_NORMAL}}} (default 5) · rest_type : "none"|"short"|"long" (default "none")
 </output_schema>
@@ -1267,7 +1283,8 @@ OUTPUT FORMAT (JSON):
         "inventory_lost": [],
         "clocks_impact": {{}},
         "condition_apply": [],
-        "condition_remove": []
+        "condition_remove": [],
+        "companions_moving": []
     }}
 }}
 """
@@ -1724,7 +1741,8 @@ def _build_gm_logic_system(mode: str) -> str:
 3. Кожен NPC з ростеру сцени (присутній у сцені), що говорив, діяв, постраждав або був змінений у цьому ході, має бути в npc_updates
    (мінімум Name, Memory_Anchor, Status). Порожній npc_updates=[] допустимий лише коли в сцені нікого немає
    або ніхто з присутніх не брав участі в події.
-4. companion_npcs: тільки якщо гравець явно назвав NPC для подорожі, інакше [].
+4. companion_npcs: тільки якщо гравець явно назвав NPC для подорожі, інакше []. Рух компаньйонів, ініційований діями гравця,
+   обробляє система (блок moved_with_player); companion_npcs використовуй для рішень NPC самостійно піти за гравцем або подорожей між локаціями.
 5. mode_transition: бій завершено→"TO_NORMAL"; виник бій→"TO_COMBAT"; інакше→null.
 6. hp_current — див. json_generation_rules п.2 (залежить від режиму).
 </thinking_directives>
@@ -1774,7 +1792,7 @@ Relation_Player та Attitude to Player — системні поля, у npc_up
 1. Не змінюй гравця — лише NPC та фізику світу.
 2. Гравець описує НАМІР, ти визначаєш РЕЗУЛЬТАТ.
 3. Scene/Location NPC змінюється лише якщо він ЯВНО названий або висловив намір іти.
-4. Гравець переміщується з NPC → заповни companion_npcs точними іменами.
+4. Гравець переміщується з NPC → рух ініційований гравцем обробляє система (блок moved_with_player); companion_npcs — для самостійних рішень NPC піти за гравцем.
 5. NPC в приватному просторі → Scene = поточна сцена гравця.
 {law6}</golden_laws_of_agency>
 
@@ -1869,8 +1887,12 @@ def build_gm_logic_parts(
     arriving_roster_text: str = "",
     mode: Literal["NORMAL", "COMBAT"] = "NORMAL",
     npc_hp_snapshot: dict[str, dict] | None = None,
+    moved_companions: list[str] | None = None,
 ) -> tuple[str, str]:
     """GM Logic Engine — mode-aware (NORMAL | COMBAT).
+
+    moved_companions: NPC names the system already moved with the player (rendered as
+    <moved_with_player> in the dynamic part; input context only, NOT an output key).
 
     Phase 4 change: adds `mode` parameter, COMBAT suggested_actions slots,
     and hp_current/conditions fields in npc_updates.
@@ -2021,8 +2043,13 @@ def build_gm_logic_parts(
 {f"""<absent_npcs>
 ПЕРСОНАЖІ ЩО ЗАЛИШИЛИ СЦЕНУ (живі, але фізично відсутні):
 {chr(10).join(f"    - {n}" for n in absent_npcs)}
-Заборонено: включати їх у npc_updates або описувати їхні дії як присутніх.
+Заборонено: включати їх у npc_updates або описувати їхні дії як присутніх (виняток — NPC з блоку <moved_with_player>, якщо він є).
 </absent_npcs>""" if absent_npcs else ''}
+
+{f"""<moved_with_player>
+Ці NPC перейшли разом із гравцем у нову сцену і вже присутні в ній (див. ростер): {", ".join(moved_companions)}.
+Опиши їх як присутніх; не включай у absent; Location/Scene для них уже оновлено системою — у npc_updates можна оновлювати інші їхні поля (Memory_Anchor тощо).
+</moved_with_player>""" if moved_companions else ''}
 
 {action_slots_block}Поверни JSON у форматі з правил системи для ДІЇ ГРАВЦЯ вище. suggested_actions — рівно 4. Лише JSON."""
     return (GM_LOGIC_SYSTEM_COMBAT if mode == "COMBAT" else GM_LOGIC_SYSTEM), dynamic
