@@ -9,6 +9,7 @@ from core.ai_client import model, model_gm_logic, ask_gemini, clean_and_parse_js
 from core.prompts import (
     GAME_ERA_CONTEXT, build_famous_characters_prompt,
     build_initial_stats_prompt, build_game_intro_prompt, build_populate_npcs_prompt,
+    INITIAL_STATS_SCHEMA,
 )
 from core.world_constants import get_region_for_location, get_locations_for_region, is_valid_location, VALID_LOCATIONS_ORDERED, format_scenes_for_prompt, LOCATION_SCENES
 from database.canon_npc import get_canon_npcs_copy
@@ -470,15 +471,9 @@ async def generate_initial_stats(char_name, house_name, house_data, apply_herita
 
     # MODEL_MAIN_NAME (Flash-Lite за замовчуванням) — одноразова генерація, якість важливіша за швидкість
     try:
-        _stats_cfg = build_strict_config(model_gm_logic)
+        _stats_cfg = build_strict_config(model_gm_logic, schema=INITIAL_STATS_SCHEMA)
         def _sync_gen_profile():
-            try:
-                return model_gm_logic.generate_content(prompt, config=_stats_cfg)
-            except Exception as _schema_err:
-                if "INVALID_ARGUMENT" in str(_schema_err) or "schema" in str(_schema_err).lower():
-                    print(f"⚠️ [D&D] Schema rejected for initial_stats, falling back: {_schema_err}")
-                    return model_gm_logic.generate_content(prompt)
-                raise
+            return model_gm_logic.generate_content(prompt, config=_stats_cfg)
 
         response = await asyncio.to_thread(_sync_gen_profile)
         llm_data = clean_and_parse_json(response.text)

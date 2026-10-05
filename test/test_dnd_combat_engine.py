@@ -1184,9 +1184,11 @@ def test_process_game_turn_combat_mode_shows_dice_summary():
 # ===========================================================================
 
 def test_parse_player_combat_intent_passes_schema_config():
-    """parse_player_combat_intent must call model_worker.generate_content
-    with a non-None config that has response_mime_type='application/json'."""
+    """parse_player_combat_intent passes config with response_mime_type='application/json'
+    and response_schema == WORKER_COMBAT_SCHEMA."""
     from core.dnd_combat_engine import parse_player_combat_intent
+    from core.prompts import WORKER_COMBAT_SCHEMA
+    from core.ai_client import build_strict_config, model_worker
 
     captured_configs = []
     llm_data = {
@@ -1209,56 +1211,43 @@ def test_parse_player_combat_intent_passes_schema_config():
                 result = _run(parse_player_combat_intent("Атакую", profile, state))
 
     assert result["intent"] == "attack"
-    assert len(captured_configs) >= 1, "generate_content must be called"
+    assert len(captured_configs) == 1
     cfg = captured_configs[0]
     assert cfg is not None, "config must not be None"
-    assert cfg.response_mime_type == "application/json", (
-        f"Expected 'application/json', got {cfg.response_mime_type!r}"
-    )
-    assert not hasattr(cfg, "response_schema") or cfg.response_schema is None, (
-        "response_schema must be None: strict schema causes 14-min hangs"
-    )
+    assert cfg.response_mime_type == "application/json"
+    expected = build_strict_config(model_worker, schema=WORKER_COMBAT_SCHEMA).response_schema
+    assert cfg.response_schema == expected
 
 
-def test_parse_player_combat_intent_schema_fallback_on_invalid_argument():
-    """When schema raises INVALID_ARGUMENT, parse_player_combat_intent falls back
-    to a free-JSON call and returns a valid intent dict."""
+def test_parse_player_combat_intent_llm_failure_single_call_dodge_fallback():
+    """Local 'Schema rejected -> free JSON' retry was removed (Stage 2: centralised in
+    AIWrapper). If generate_content raises (wrapper already exhausted its fallback),
+    parse_player_combat_intent makes exactly ONE call and returns the dodge fallback."""
     from core.dnd_combat_engine import parse_player_combat_intent
 
-    llm_data = {
-        "intent": "dodge", "target_npc": "",
-        "weapon": "", "spell_or_ability": "",
-        "tactic": "cautious", "move_to": "",
-        "verdict_text": "Dodge.", "reasoning": "Safe.",
-    }
-    call_count = []
+    calls = []
 
-    def _mock_gen_fallback(prompt, max_retries=6, config=None):
-        call_count.append(config)
-        if config is not None:
-            raise Exception("400 INVALID_ARGUMENT: schema not supported")
-        return _mock_llm_response(llm_data)
+    def _mock_gen(prompt, max_retries=6, config=None):
+        calls.append(config)
+        raise Exception("400 INVALID_ARGUMENT: schema not supported")
 
     state = _make_combat_state()
     profile = _minimal_player_profile()
 
-    with patch("core.dnd_combat_engine.model_worker.generate_content", side_effect=_mock_gen_fallback):
-        with patch("core.dnd_combat_engine.clean_and_parse_json", return_value=llm_data):
-            with patch("core.dnd_combat_engine.build_combat_round_prompt", return_value="MOCK"):
-                result = _run(parse_player_combat_intent("Захищаюсь", profile, state))
+    with patch("core.dnd_combat_engine.model_worker.generate_content", side_effect=_mock_gen):
+        with patch("core.dnd_combat_engine.build_combat_round_prompt", return_value="MOCK"):
+            result = _run(parse_player_combat_intent("Захищаюсь", profile, state))
 
     assert result["intent"] == "dodge"
-    assert len(call_count) == 2, (
-        f"Must call twice (schema attempt + fallback). Got {len(call_count)}"
-    )
-    assert call_count[0] is not None, "First call must have config (schema)"
-    assert call_count[1] is None, "Second call must have config=None (fallback)"
+    assert len(calls) == 1, f"no local retry expected, got {len(calls)} calls"
+    assert calls[0] is not None and calls[0].response_schema is not None
 
 
 def test_execute_npc_actions_passes_schema_config():
-    """execute_npc_actions must call model_worker.generate_content
-    with a non-None config containing response_schema."""
+    """execute_npc_actions passes config with response_schema == NPC_COMBAT_ACTION_SCHEMA."""
     from core.dnd_combat_engine import execute_npc_actions
+    from core.prompts import NPC_COMBAT_ACTION_SCHEMA
+    from core.ai_client import build_strict_config, model_worker
 
     captured_configs = []
     llm_response = {
@@ -1280,13 +1269,11 @@ def test_execute_npc_actions_passes_schema_config():
                 results = _run(execute_npc_actions(state, ["Goblin"]))
 
     assert len(results) == 1
-    assert len(captured_configs) >= 1, "generate_content must be called"
+    assert len(captured_configs) == 1
     cfg = captured_configs[0]
-    assert cfg is not None, "config must not be None"
-    assert cfg.response_mime_type == "application/json"
-    assert not hasattr(cfg, "response_schema") or cfg.response_schema is None, (
-        "response_schema must be None: strict schema causes 14-min hangs"
-    )
+    assert cfg is not None and cfg.response_mime_type == "application/json"
+    expected = build_strict_config(model_worker, schema=NPC_COMBAT_ACTION_SCHEMA).response_schema
+    assert cfg.response_schema == expected
 
 
 # ===========================================================================

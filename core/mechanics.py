@@ -7,7 +7,8 @@ import asyncio
 # Імпортуємо нашого ШІ-клієнта для функцій, які потребують суддівства
 from core.ai_client import model_worker, clean_and_parse_json, build_strict_config
 from core.prompts import (
-    build_validate_action_prompt, build_training_request_prompt,
+    build_validate_action_parts, build_training_request_prompt,
+    CENSOR_SCHEMA, TRAINING_REQUEST_SCHEMA,
 )
 import difflib
 from core.world_constants import (
@@ -299,7 +300,7 @@ def apply_system_impacts(profile, ai_impacts):
                     current_clocks[clock_name] = "2/4"
                     logs.append(f"⏱️ Втеча з бою: '{clock_name}' знижено 4→2 (погоня можлива).")
             else:
-                new_val = min(max_val, current_val + safe_int(change, 0))
+                new_val = max(0, min(max_val, current_val + safe_int(change, 0)))
                 # Burst: годинник щойно досяг максимуму цього ходу
                 if current_val < max_val and new_val == max_val:
                     profile["_burst_this_turn"] = clock_name
@@ -377,19 +378,17 @@ async def validate_action(user_input, profile, debug_trace: dict | None = None):
     inventory_list = format_inventory(_inv_items) if _inv_items else "порожній"
 
     gold = safe_int(profile.get("Особисте Золото", profile.get("gold", 0)), 0)
-    prompt = build_validate_action_prompt(char_name, user_input, inventory_list, gold)
+    static_prompt, prompt = build_validate_action_parts(char_name, user_input, inventory_list, gold)
     if debug_trace is not None:
-        debug_trace["censor"]["prompt"] = prompt
+        import hashlib as _hl
+        debug_trace["censor"]["prompt"] = (
+            f"[SYSTEM_INSTRUCTION static len={len(static_prompt)} "
+            f"md5={_hl.md5(static_prompt.encode('utf-8')).hexdigest()[:8]}]\n\n" + prompt
+        )
     try:
-        _schema_cfg = build_strict_config(model_worker)
+        _schema_cfg = build_strict_config(model_worker, schema=CENSOR_SCHEMA, system_instruction=static_prompt)
         def _sync_gen_val():
-            try:
-                return model_worker.generate_content(prompt, config=_schema_cfg)
-            except Exception as _schema_err:
-                if "INVALID_ARGUMENT" in str(_schema_err) or "schema" in str(_schema_err).lower():
-                    print(f"⚠️ [Censor] Schema rejected, falling back to free JSON: {_schema_err}")
-                    return model_worker.generate_content(prompt)
-                raise
+            return model_worker.generate_content(prompt, config=_schema_cfg)
         response = await asyncio.to_thread(_sync_gen_val)
         if debug_trace is not None:
             debug_trace["censor"]["raw"] = response.text if response else None
@@ -478,15 +477,9 @@ async def process_training_request(
 
     resp = None
     try:
-        _train_cfg = build_strict_config(model_worker)
+        _train_cfg = build_strict_config(model_worker, schema=TRAINING_REQUEST_SCHEMA)
         def _sync_gen_train():
-            try:
-                return model_worker.generate_content(prompt, config=_train_cfg)
-            except Exception as _schema_err:
-                if "INVALID_ARGUMENT" in str(_schema_err) or "schema" in str(_schema_err).lower():
-                    print(f"⚠️ [Training] Schema rejected, falling back to free JSON: {_schema_err}")
-                    return model_worker.generate_content(prompt)
-                raise
+            return model_worker.generate_content(prompt, config=_train_cfg)
         resp = await asyncio.to_thread(_sync_gen_train)
         data = clean_and_parse_json(resp.text)
     except Exception as e:

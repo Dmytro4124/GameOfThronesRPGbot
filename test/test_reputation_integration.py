@@ -369,7 +369,7 @@ def _patches_for_resolve_rep(worker_data: dict):
         patch("core.dnd_engine.model_worker.generate_content",
               return_value=MagicMock(text=__import__("json").dumps(worker_data))),
         patch("core.dnd_engine.clean_and_parse_json", return_value=worker_data),
-        patch("core.dnd_engine.build_normal_resolve_prompt", return_value="MOCK_PROMPT"),
+        patch("core.dnd_engine.build_normal_resolve_parts", return_value=("MOCK_STATIC", "MOCK_PROMPT")),
     ]
 
 

@@ -51,6 +51,12 @@ if _AB_FLAG and not NARRATOR_AB_ENABLED:
         "Set MODEL_NARRATOR_NAME=gemma-4-31b-it to re-run the A/B.",
         MODEL_NARRATOR_NAME,
     )
+# Explicit context cache (caches.create) для system_instruction. За замовчуванням ВИМКНЕНО:
+# Gemini 2.5+/3.x і так робить implicit caching однакового префікса (system_instruction = префікс)
+# без плати за зберігання, а explicit cache коштує storage/год і на free tier зазвичай недоступний
+# (марні 400/429 на create). Вмикати (GEMINI_EXPLICIT_CACHE=1) лише на платному тарифі, коли
+# потрібна гарантована знижка на статичний префікс.
+GEMINI_EXPLICIT_CACHE_ENABLED = os.getenv("GEMINI_EXPLICIT_CACHE", "0").strip() == "1"
 NARRATOR_AB_CHOICE_TTL = 3600  # сек; після цього pending-вибір вважається простроченим
 NARRATOR_AB_LOG_PATH = os.getenv("NARRATOR_AB_LOG_PATH", "logs/narrator_ab.jsonl")
 NARRATOR_AB_SINK = os.getenv("NARRATOR_AB_SINK", "both").strip().lower()  # file|sheets|both

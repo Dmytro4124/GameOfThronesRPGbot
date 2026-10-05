@@ -19,6 +19,7 @@ Telegram-бот текстової RPG у світі Гри Престолів. 
   - Main, Worker (+Censor), GM_Logic: Gemini Flash-Lite (`FLASH_LITE_MODEL_ID` у `config.py`; ENV-override `MODEL_MAIN_NAME` / `MODEL_WORKER_NAME` / `MODEL_GM_LOGIC_NAME`, rollback = `gemma-4-31b-it`)
   - Narrator: Gemini Flash-Lite (ENV-override `MODEL_NARRATOR_NAME`, rollback = `gemma-4-31b-it`). A/B Gemma vs Flash-Lite завершено (2026-10); `NARRATOR_AB_ENABLED=1` діє лише коли `MODEL_NARRATOR_NAME != MODEL_NARRATOR_ALT_NAME` (повтор тесту: `MODEL_NARRATOR_NAME=gemma-4-31b-it`)
   - Embeddings: `gemini-embedding-2-preview`
+  - Промпти Worker NORMAL / GM_Logic / Censor / Narrator розділені на статику (`*_SYSTEM` константи → `system_instruction`, однакова для всіх гравців) і динаміку (contents). Implicit caching Gemini працює автоматично; explicit context cache — opt-in `GEMINI_EXPLICIT_CACHE=1` (кеш за `(model, sha256(text))`, TTL 1 год, inline-fallback)
 - **БД:** Google Sheets через gspread + Service Account
   - `Users_DB` — профіль користувача як JSON-string у 3-й колонці
   - `NPC_DB` — заповнюється з `database/canon_npc.py` на старті
@@ -155,7 +156,9 @@ TelegramGameOfThronesBot/
 ├── config.py                # ENV, моделі, режими (godmode/puppet/erotic)
 ├── scripts/
 │   ├── dnd_migrate.py       # CLI tool для Phase 9 migration (НЕ runtime)
-│   └── ab_report.py         # звіт по Narrator A/B лог-файлу (НЕ runtime)
+│   ├── ab_report.py         # звіт по Narrator A/B лог-файлу (НЕ runtime)
+│   ├── prompt_metrics_runner.py # E2E-метрики промптів по ролях (латентність, токени, кеш, fallback-и); запускає лише людина (НЕ runtime)
+│   └── narrator_style_report.py # офлайн-метрики стилю Narrator (кліше, довжина, шаблонні відкриття/фінали) з A/B JSONL або prompt_metrics_*.json (НЕ runtime)
 ├── bot/
 │   ├── handlers.py          # aiogram-роутер (всі апдейти, монолітом)
 │   ├── menus.py             # reply-клавіатури
@@ -164,7 +167,7 @@ TelegramGameOfThronesBot/
 │   ├── ai_client.py         # Gemini wrapper, JSON-парсер
 │   ├── engine.py            # головний цикл process_game_turn
 │   ├── mechanics.py         # apply_system_impacts (час/золото/локації/clocks), validate_action (Censor), process_training_request (D&D XP)
-│   ├── prompts.py           # ВСІ системні промпти 4 ролей
+│   ├── prompts.py           # ВСІ системні промпти 4 ролей + нативні схеми відповідей (RESPONSE_SCHEMAS)
 │   ├── world.py             # генерація стартового світу
 │   ├── world_constants.py   # 21 регіон / 80 локацій / сцени
 │   ├── cheats.py            # адмін-команди
@@ -240,7 +243,7 @@ Pipeline складається з 4 ролей. Перші три поверт�
 - `difficulty` — STRICT enum `{2, 5, 10, 12, 15, 17, 20, 22}` (div. 5.2; DC 2 = ultra-trivial auto-success)
 - `advantage_reason`, `disadvantage_reason` (рядки; порожні = no modifier)
 - `combat_imminent` (bool) — якщо true, engine ініціює COMBAT_MODE наступним ходом. **Friend/foe правило:** у бій входить ЛИШЕ NPC з `reputation_target_npc` (якщо він у `legal_npc_names`) АБО найворожіший NPC сцени (score < 0); інші NPC сцени — глядачі. Якщо ціль не резолвиться → engine залишається в NORMAL (бій не стартує).
-- `verdict_text`, `xp_award` ∈ {0|25|50|100|200}, `reputation_target_npc` — **REQUIRED non-empty при `combat_imminent=true`** (engine читає це для friend/foe-фільтра; без цього бій не стартує).
+- `verdict_text`, `xp_award` ∈ {0|25|50|100|200}, `reputation_target_npc` — **лише точне ім'я з legal names сцени, інакше `""`** (вигадані імена заборонені — вони створювали фантомних NPC у репутації). При `combat_imminent=true` і цілі зі списку — непорожнє (engine читає це для friend/foe-фільтра); при `""` engine бере найворожішого NPC сцени (score < 0) або лишається в NORMAL (бій не стартує).
 - `reputation_delta_success` / `reputation_delta_failure` (обидва -7..+7, 15-крокова шкала значущості дії, дзеркалить 15 relation-рівнів; тривіальні/повсякденні дії = 0) — RAW значущість, окремо для success/failure outcome. Worker не знає результату кидка наперед, тож оцінює обидва сценарії; engine ПІСЛЯ roll вибирає правильний → `_clamp_reputation_delta` (`REPUTATION_DELTA_MIN/MAX` = ±7) → `updates["reputation_delta"]` (RAW). Споживач `update_npc_reputation` (operations.py) викликає `apply_reputation_step(current_score, delta)` з `core/reputation.py` — **асиметрична magnitude-gated прогресія**: позитив важко набрати (diminishing climb до `POSITIVE_CAP[mag]` + epic jump при `|raw|>=6`), негатив magnitude-gated (`NEGATIVE_DROP={1:1,2:2,3:5,4:10,5:25,6:50,7:100}` — дрібні образи майже непомітні, тяжкі зради нищівні), фінальний clamp -100..100. Запобігає reputation farming (100 привітань ≠ +100). Backward compat: старий single `reputation_delta` → success-case, failure → 0.
 - `updates` — вкладений об'єкт: `minutes_passed`, `location_impact`, `scene_impact`, `hp_damage_dice` (напр. `"1d6"`), `hp_heal_dice`, `gold_impact`, `inventory_new`, `inventory_lost`, `clocks_impact`, `condition_apply[]`, `condition_remove[]`
 
@@ -268,16 +271,22 @@ Pipeline складається з 4 ролей. Перші три поверт�
 
 **Narrator** (`build_narrator_prompt(combat_log=...)`) — повертає **чистий художній текст**, без JSON, без маркдауну.
 - Якщо `combat_log` передано → COMBAT style: 4–6 коротких речень з action verbs.
-- Інакше → NORMAL style: 150–250 слів атмосферного тексту.
+- Інакше → NORMAL style: 150–250 слів атмосферного тексту (орієнтир 180–230).
+- Кінцівка сцени — відкритий момент, що штовхає до дії, **без прямого питання до героя** (питання допустиме лише як репліка NPC). Репліки — лише NPC з `<active_roster>` і лише з фактів `director_notes`; безіменні групи — тільки фон (звук/гул), без дій і реплік.
 
 **Заморожені поля NPC** (за замовчуванням НЕ включати в `npc_updates`): `Description`, `Character`, `Goal`, `Secrets`. Виняток — епічна незворотна подія (каліцтво, публічно розкрита таємниця). Поле `Attitude to Player` — **read-only**; ніколи не включати в `npc_updates`.
 
 **Шкала Relation_Player:** 15-тирна шкала зберігається як lore-текст на NPC без системного механічного впливу (faction reputation system замінює механіку). Значення: `Смертельна ненависть` ... `Абсолютна довіра`.
 
-**Правило мутації pipeline:** будь-яка зміна ключа вимагає **синхронного оновлення трьох місць**:
+**Правило мутації pipeline:** будь-яка зміна ключа вимагає **синхронного оновлення чотирьох місць**:
 1. Відповідного промпту в `core/prompts.py`
-2. Парсера в `core/ai_client.py:clean_and_parse_json` і його споживача в `core/engine.py`
-3. `qa_auto_test.py` — якщо тест чекає на цей ключ
+2. Нативної схеми відповіді в `core/prompts.py` (`*_SCHEMA` / `RESPONSE_SCHEMAS`) — модель зі схемою видає **лише** ключі з `properties`; ключ, відсутній у схемі, тихо зникає
+3. Парсера в `core/ai_client.py:clean_and_parse_json` і його споживача в `core/engine.py`
+4. `qa_auto_test.py` — якщо тест чекає на цей ключ
+
+**Нативні схеми:** JSON-ролі викликаються через `build_strict_config(wrapper, schema=...)` → `response_schema` (OpenAPI-subset dict; integer enum не використовуються — DC/XP захищають `clamp_dc`/`_clamp_*`). Якщо API відхиляє схему (400), `AIWrapper.generate_content` один раз повторює запит без схеми; після успішного повтору схема запам'ятовується в `_REJECTED_SCHEMAS` до рестарту (лог `response_schema rejected`). `clean_and_parse_json` лишається другою лінією захисту.
+
+**Статика / динаміка промптів:** прод-шлях — `build_*_parts(...) -> (static, dynamic)` (Worker NORMAL, GM_Logic, Censor, Narrator); статика (`SYSTEM_PROMPTS`) передається як `system_instruction`, динаміка — як contents. `build_*_prompt` лишились обгортками `static + "\n\n" + dynamic`. Статика мусить бути байт-у-байт однаковою для всіх гравців і ходів (жодних даних профілю/режиму) — інакше ламається кешування. Адмін-блоки (puppet/erotic/godmode) — у динаміці; статики містять правило їхнього пріоритету.
 
 **Допоміжні JSON-промпти** (поза основним ходом):
 - Training intent (`build_training_request_prompt`): `is_training`, `is_possible`, `skill`, `method`, `reason_if_failed`
@@ -297,6 +306,7 @@ In-memory структури без локів — навмисний компр
 - `combat_state._combat_states: dict[chat_id, CombatState]` (`core/combat_state.py`) — стан активного бою
 - `combat_state._state_locks: dict[chat_id, asyncio.Lock]` (`core/combat_state.py`) — атомарність COMBAT pipeline
 - `narrator_ab._pending: dict[chat_id, PendingChoice]` / `_last_turn_id` (`core/narrator_ab.py`) — in-memory, губляться при рестарті. `pop_pending` — єдина точка звільнення (vote-callback, TTL-expiry, рестарт гри); історія пишеться через `commit_narration_to_history` лише після pop, у `try/finally` з `append_log`.
+- `core/ai_client.py` кеш-реєстри (доступ з потоків `asyncio.to_thread`): `_CACHE_REGISTRY`, `_CACHE_DENY` (під `threading.Lock` `_CACHE_LOCK`), `_CACHE_KEY_LOCKS` (per-key lock на `caches.create`; мережевий виклик НЕ під `_CACHE_LOCK`), `_REJECTED_SCHEMAS` (set без лока — лише `add`/`in`, атомарно під GIL). Усі — process-local, губляться при рестарті (це ок: кеш — лише оптимізація).
 
 **COMBAT lock pattern** (обов'язково при integration з `combat_state`):
 ```python
@@ -342,7 +352,7 @@ python qa_auto_test.py
 
 Адмін-ID для cheat-команд хардкоднуто у `config.py:ADMIN_TELEGRAM_IDS`.
 
-ENV-змінні: `TELEGRAM_TOKEN`, `GEMINI_API_KEY` (+ `GEMINI_API_KEY_TEST_*` для ротації квот), `SPREADSHEET_ID`, `GOOGLE_CREDENTIALS_JSON`, `WEBHOOK_URL`, `PORT`.
+ENV-змінні: `TELEGRAM_TOKEN`, `GEMINI_API_KEY` (+ `GEMINI_API_KEY_TEST_*` для ротації квот), `SPREADSHEET_ID`, `GOOGLE_CREDENTIALS_JSON`, `WEBHOOK_URL`, `PORT`. Опційні: `MODEL_*_NAME` (rollback моделей), `GEMINI_EXPLICIT_CACHE` (default 0), `NARRATOR_AB_ENABLED`, `NARRATOR_AB_SINK`.
 
 ---
 

@@ -280,12 +280,11 @@ def test_narrator_third_attempt_recovers():
     )
     assert len(third_attempt_text) >= 50, "Test setup: third attempt text must be ≥50 chars"
 
-    # Шар 1 hedging може робити більше ніж 2 calls (race з cancelled tasks).
-    # Шар 2 = 1 call. Шар 3 = 1-2 calls. Запас на 10 calls безпечно.
+    # Stage 1: attempt 1 hedge_count=1 -> exactly 1 call; attempt 2 = 1 call; attempt 3 = 1 call.
     narrator_mock = MagicMock(
         side_effect=(
-            [_make_empty_narrator_response()] * 3
-            + [_make_narrator_response(third_attempt_text)] * 7
+            [_make_empty_narrator_response()] * 2
+            + [_make_narrator_response(third_attempt_text)] * 8
         )
     )
 
@@ -516,12 +515,10 @@ def test_narrator_retry_success_returns_story():
     )
     retry_resp = _make_narrator_response(retry_text)
 
-    # Hedging може зробити до 3 calls у Шар 1 (race з cancelled tasks).
-    # Шар 2 (retry) — 1 call. Запас на 10 calls.
-    # Ключова семантика: ВСІ empty відповіді → retry text. Тест перевіряє що retry_text у результаті.
+    # Stage 1: attempt 1 hedge_count=1 -> exactly 1 call (empty); attempt 2 (retry) -> retry_resp.
     narrator_mock = MagicMock(
         side_effect=(
-            [_make_empty_narrator_response()] * 3 + [retry_resp] * 7
+            [_make_empty_narrator_response()] * 1 + [retry_resp] * 9
         )
     )
 

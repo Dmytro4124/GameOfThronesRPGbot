@@ -95,14 +95,50 @@ def test_chain_success_attempt_2():
     assert len(r.attempt_ms) == 2 and wrapper.generate_content.call_count == 1
 
 
-def test_chain_success_attempt_3_uses_low_temperature_config():
-    wrapper = MagicMock()
-    wrapper.generate_content.side_effect = [_resp(""), _resp(_LONG_OK)]
-    r = _chain(wrapper, AsyncMock(return_value=_resp("")))
+def _real_wrapper(name):
+    from core.ai_client import AIWrapper, _NARRATOR_SYSTEM_INSTRUCTION
+    w = AIWrapper(name, temperature=0.9, thinking_level="high", include_thoughts=True,
+                  block_none=True, system_instruction=_NARRATOR_SYSTEM_INSTRUCTION)
+    w._cache_attempted = True  # caching unavailable -> inline system_instruction, no network
+    return w
+
+
+@pytest.mark.parametrize("name", ["gemma-4-31b-it", "gemini-flash-lite-alt"])
+def test_chain_success_attempt_3_uses_low_temperature_config(name):
+    """Attempt 3 config is built via wrapper.config_with(temperature=0.5): temperature 0.5 AND
+    the narrator's safety_settings / system_instruction / thinking_config are preserved."""
+    wrapper = _real_wrapper(name)
+    with patch.object(wrapper, "generate_content",
+                      side_effect=[_resp(""), _resp(_LONG_OK)]) as gen:
+        r = _chain(wrapper, AsyncMock(return_value=_resp("")))
     assert r.ok and r.final_attempt == 3 and len(r.attempt_ms) == 3
-    assert wrapper.generate_content.call_count == 2
-    third_kwargs = wrapper.generate_content.call_args_list[1].kwargs
-    assert "config" in third_kwargs and third_kwargs["config"].temperature == 0.5
+    assert gen.call_count == 2
+    cfg = gen.call_args_list[1].kwargs["config"]
+    assert cfg.temperature == 0.5
+    assert cfg.safety_settings and len(cfg.safety_settings) == 4
+    assert cfg.system_instruction == wrapper.system_instruction
+    assert cfg.thinking_config is not None
+    assert wrapper.temperature == 0.9  # wrapper not mutated
+
+
+@pytest.mark.usefixtures("explicit_cache_on")
+def test_chain_attempt_3_uses_cached_content_when_cache_available():
+    wrapper = _real_wrapper("gemma-4-31b-it")
+    wrapper._cached_content_name = "cachedContents/xyz"
+    with patch.object(wrapper, "generate_content",
+                      side_effect=[_resp(""), _resp(_LONG_OK)]) as gen:
+        _chain(wrapper, AsyncMock(return_value=_resp("")))
+    cfg = gen.call_args_list[1].kwargs["config"]
+    assert cfg.cached_content == "cachedContents/xyz"
+    assert cfg.system_instruction is None
+    assert cfg.temperature == 0.5
+
+
+def test_chain_attempt_1_uses_hedge_count_1():
+    wrapper = MagicMock()
+    hedged = AsyncMock(return_value=_resp(_LONG_OK))
+    _chain(wrapper, hedged)
+    assert hedged.call_args.kwargs["hedge_count"] == 1
 
 
 def test_chain_attempt_3_text_under_50_chars_is_failure():
@@ -262,7 +298,7 @@ def _run_turn(chat_id, ps, chain, bg=None, ab=True):
         coro.close()
         return MagicMock()
 
-    async def fake_chain(wrapper, prompt, key):
+    async def fake_chain(wrapper, prompt, key, static=None):
         return chain[key]
 
     with ExitStack() as st:
@@ -392,7 +428,7 @@ def test_ab_chain_exception_becomes_failed_result():
     from core import engine
     from core.engine import process_game_turn
 
-    async def fake_chain(wrapper, prompt, key):
+    async def fake_chain(wrapper, prompt, key, static=None):
         if key == "flash_lite":
             raise RuntimeError("chain exploded")
         return _ok("gemma", "SURVIVOR " + _LONG_OK)
@@ -417,7 +453,7 @@ def test_ab_flag_off_uses_single_gemma_chain_no_pending():
     calls = []
     from core.engine import process_game_turn
 
-    async def fake_chain(wrapper, prompt, key):
+    async def fake_chain(wrapper, prompt, key, static=None):
         calls.append(key)
         return _ok(key, "NORMAL " + _LONG_OK)
 

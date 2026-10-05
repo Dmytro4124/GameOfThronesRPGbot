@@ -1,7 +1,9 @@
+import hashlib
 import json
 import logging
 import re
 import time
+import threading
 import random
 import asyncio
 import unicodedata
@@ -12,7 +14,7 @@ from core.prompts import JSON_ONLY_INSTRUCTION
 from google.genai import types
 from config import (GEMINI_API_KEY, MODEL_MAIN_NAME, MODEL_WORKER_NAME, MODEL_MAIN_TEMP, MODEL_WORKER_TEMP,
                      MODEL_GM_LOGIC_NAME, MODEL_GM_LOGIC_TEMP, MODEL_NARRATOR_NAME, MODEL_NARRATOR_TEMP,
-                     MODEL_NARRATOR_ALT_NAME)
+                     MODEL_NARRATOR_ALT_NAME, GEMINI_EXPLICIT_CACHE_ENABLED)
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +24,8 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 # ─── Unicode normalization ───────────────────────────────────────────────────
 
 def _normalize_prompt(prompt) -> str:
-    """NFC-normalize prompt to avoid edge cases with exotic Unicode that
-    sometimes trigger MALFORMED_RESPONSE in Gemma 4 preview model.
+    """NFC-normalize prompt to avoid edge cases with exotic Unicode
+    (can occasionally trigger malformed model responses).
 
     NFC composes characters (e.g. e + combining accent → single codepoint).
     Handles emoji ZWJ sequences, RTL/LTR markers, unusual diacritics.
@@ -47,6 +49,161 @@ CIRCUIT_BREAKER_THRESHOLD = 5   # consecutive failures → open
 CIRCUIT_BREAKER_COOLDOWN = 60   # seconds
 
 
+# ─── Schema rejection memo ───────────────────────────────────────────────────
+# {(model_name, schema_fingerprint)}: схеми, які API відхилив з 400. Лише add/contains
+# (атомарно під GIL) — локи не потрібні. Живе до рестарту процесу.
+_REJECTED_SCHEMAS: set = set()
+
+
+def _schema_fingerprint(schema) -> str:
+    """Стабільний ідентифікатор схеми (dict або types.Schema) для _REJECTED_SCHEMAS."""
+    try:
+        if hasattr(schema, "model_dump"):
+            schema = schema.model_dump(exclude_none=True, mode="json")
+        raw = json.dumps(schema, sort_keys=True, default=str)
+    except Exception:
+        raw = repr(schema)
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def _is_bad_request(e: Exception) -> bool:
+    """True для 400 INVALID_ARGUMENT (ClientError.code==400 або текст помилки)."""
+    if getattr(e, "code", None) == 400:
+        return True
+    err_str = str(e)
+    return "400" in err_str and "INVALID_ARGUMENT" in err_str
+
+
+# ─── Explicit context cache за ТЕКСТОМ system_instruction ────────────────────
+# Реєстр (model_name, sha256(text)) -> (cache_name, expire_at). Виклики йдуть з
+# asyncio.to_thread (різні потоки), тому: _CACHE_LOCK захищає словники (короткі
+# секції), per-key lock серіалізує caches.create (мережа), щоб паралельні ходи не
+# створили кілька кешів одного тексту. Мережевий виклик НЕ тримає _CACHE_LOCK.
+_CACHE_TTL_SECONDS = 3600          # TTL кешу на боці API
+_CACHE_RENEW_MARGIN = 300          # перестворюємо за 5 хв до закінчення (запас на довгі ходи/hedge)
+_CACHE_MIN_TOKENS = 1024           # мін. розмір кешу для Flash-Lite
+_CACHE_CHARS_PER_TOKEN = 3.5       # грубо; кирилиця токенізується гірше -> оцінка консервативна
+_CACHE_DENY_TRANSIENT_SECONDS = 300  # тимчасові збої (429/5xx/мережа): повторна спроба через 5 хв
+_CACHE_REGISTRY: dict = {}   # key -> (cache_name, expire_at)
+_CACHE_DENY: dict = {}       # key -> deny_until (float("inf") = до рестарту процесу)
+_CACHE_KEY_LOCKS: dict = {}  # key -> threading.Lock
+_CACHE_LOCK = threading.Lock()
+_CACHE_ERROR_RE = re.compile(r"cached[\s_]?content", re.IGNORECASE)
+
+
+def _cache_key(model_name: str, text: str) -> tuple:
+    return (model_name, hashlib.sha256(text.encode("utf-8")).hexdigest())
+
+
+_TRANSIENT_CODES_ALT = "|".join(str(c) for c in TRANSIENT_HTTP_CODES + RATE_LIMIT_CODES)
+# Число вважається кодом лише в контексті: на початку рядка, після code/http/status, або перед
+# статус-словом (INTERNAL/UNAVAILABLE/...). "500 tokens", "cachedContents/5001", "v2.503" -- не коди.
+_TRANSIENT_CODE_RE = re.compile(
+    r"(?:(?:^|\bcode|\bhttp|\bstatus)[\s:=\"']*(?:%s)(?![\w/.-]))"
+    r"|(?:(?<![\w/.-])(?:%s)\s*[.:]?\s*(?:INTERNAL|UNAVAILABLE|RESOURCE_EXHAUSTED|BAD_GATEWAY|DEADLINE_EXCEEDED)\b)"
+    % (_TRANSIENT_CODES_ALT, _TRANSIENT_CODES_ALT), re.IGNORECASE)
+
+
+def _error_code(e: Exception) -> Optional[int]:
+    """HTTP-код з google.genai.errors (ClientError/ServerError .code) або None."""
+    code = getattr(e, "code", None)
+    return code if isinstance(code, int) and not isinstance(code, bool) else None
+
+
+def _is_transient_error(e: Exception) -> bool:
+    """429/5xx/408/мережа. Спершу код/тип помилки; підрядки (з межами слова) -- лише fallback без коду."""
+    code = _error_code(e)
+    if code is not None:
+        return code == 429 or code == 408 or code >= 500
+    if isinstance(e, (TimeoutError, ConnectionError)):
+        return True
+    err_str = str(e)
+    return bool(_TRANSIENT_CODE_RE.search(err_str) or "RESOURCE_EXHAUSTED" in err_str or "UNAVAILABLE" in err_str)
+
+
+def _is_cache_error(e: Exception) -> bool:
+    """True, якщо помилка generate вказує на відсутній/протухлий/недоступний cached_content."""
+    if _is_transient_error(e):
+        return False
+    return bool(_CACHE_ERROR_RE.search(str(e)))
+
+
+def _cache_lookup_locked(key: tuple, now: float):
+    """Під _CACHE_LOCK. Повертає ("hit", name) | ("deny", None) | ("miss", None)."""
+    entry = _CACHE_REGISTRY.get(key)
+    if entry is not None:
+        if now < entry[1]:
+            return "hit", entry[0]
+        _CACHE_REGISTRY.pop(key, None)
+    until = _CACHE_DENY.get(key)
+    if until is not None:
+        if now < until:
+            return "deny", None
+        _CACHE_DENY.pop(key, None)
+    return "miss", None
+
+
+def get_or_create_text_cache(model_name: str, text: str) -> Optional[str]:
+    """Повертає name explicit-кешу для (model, text) або None (-> inline system_instruction).
+
+    Ніколи не кидає. None якщо: текст явно < порога токенів (без запиту в API),
+    текст у deny-списку, або caches.create впав. Deny: постійний (до рестарту) для
+    too small / not supported / free tier (limit 0) / 400 / 403 / 404; 5 хв для 429/5xx/мережевих збоїв.
+    Потокобезпечно; кеш перестворюється за _CACHE_RENEW_MARGIN до закінчення TTL.
+    """
+    if not GEMINI_EXPLICIT_CACHE_ENABLED:
+        return None
+    if not text or len(text) / _CACHE_CHARS_PER_TOKEN < _CACHE_MIN_TOKENS:
+        return None
+    key = _cache_key(model_name, text)
+    with _CACHE_LOCK:
+        state, name = _cache_lookup_locked(key, time.time())
+        if state != "miss":
+            return name
+        key_lock = _CACHE_KEY_LOCKS.setdefault(key, threading.Lock())
+    with key_lock:
+        with _CACHE_LOCK:  # інший потік міг створити, поки ми чекали
+            state, name = _cache_lookup_locked(key, time.time())
+            if state != "miss":
+                return name
+        try:
+            cache = client.caches.create(
+                model=model_name,
+                config=types.CreateCachedContentConfig(
+                    system_instruction=text,
+                    ttl=f"{_CACHE_TTL_SECONDS}s",
+                ),
+            )
+            cache_name = cache.name
+            with _CACHE_LOCK:
+                _CACHE_REGISTRY[key] = (cache_name, time.time() + _CACHE_TTL_SECONDS - _CACHE_RENEW_MARGIN)
+            print(f"[CACHE] {model_name}: created {cache_name} "
+                  f"(~{int(len(text) / _CACHE_CHARS_PER_TOKEN)} tok, ttl {_CACHE_TTL_SECONDS}s)")
+            return cache_name
+        except Exception as e:
+            err_str = str(e)
+            # Спершу код/тип (ClientError/ServerError.code); "too small" (400) -> постійний deny.
+            transient = _is_transient_error(e) and "limit: 0" not in err_str
+            until = time.time() + _CACHE_DENY_TRANSIENT_SECONDS if transient else float("inf")
+            with _CACHE_LOCK:
+                _CACHE_DENY[key] = until
+            print(f"[CACHE] {model_name}: inline fallback ({'retry in 5m' if transient else 'until restart'}): "
+                  f"{type(e).__name__}: {err_str[:100]}")
+            return None
+
+
+def invalidate_text_cache(model_name: str, text: str, deny_seconds: float = 0) -> None:
+    """Прибирає запис реєстру (кеш протух/видалений). Без deny_seconds наступний виклик одразу
+    створить новий; з deny_seconds > 0 ключ ще й блокується на цей час (анти-churn)."""
+    key = _cache_key(model_name, text)
+    with _CACHE_LOCK:
+        _CACHE_REGISTRY.pop(key, None)
+        if deny_seconds > 0:
+            until = time.time() + deny_seconds
+            if _CACHE_DENY.get(key, 0) < until:
+                _CACHE_DENY[key] = until
+
+
 def get_circuit_breaker_status(model_name: str) -> dict:
     """Повертає поточний стан circuit breaker для вказаної моделі. Для адмін-діагностики."""
     cb = _CIRCUIT_STATE.get(model_name, {})
@@ -60,7 +217,10 @@ def get_circuit_breaker_status(model_name: str) -> dict:
 
 
 class AIWrapper:
-    """Обгортка для моделі без використання нативного JSON Mode, щоб уникнути помилки 400."""
+    """Обгортка над google-genai моделлю: retry/backoff, circuit breaker, thinking, prompt caching.
+
+    JSON-режим вмикається через response_mime_type (параметр конструктора або build_strict_config).
+    """
 
     def __init__(self, model_name, temperature=0.7, max_output_tokens=None, thinking_budget=None, thinking_level=None, include_thoughts=False, response_mime_type=None, block_none=False, system_instruction=None):
         self.model_name = model_name
@@ -75,6 +235,7 @@ class AIWrapper:
         # ── Prompt caching (Gemini cached_content) ──────────────────────────
         self._cached_content_name: Optional[str] = None
         self._cache_attempted: bool = False
+        self._cache_deny_until: float = 0.0  # після cache-fallback не пробуємо create до цього часу
 
     def _ensure_cache(self) -> Optional[str]:
         """Creates a cached_content for system_instruction (one-time per process).
@@ -96,8 +257,12 @@ class AIWrapper:
         model_gm_logic in the future, wrap _ensure_cache invocations with a lock or
         ensure they happen only from the event loop (not from asyncio.to_thread threads).
         """
+        if not GEMINI_EXPLICIT_CACHE_ENABLED:
+            return None
         if self._cache_attempted:
             return self._cached_content_name
+        if time.time() < self._cache_deny_until:
+            return None
         self._cache_attempted = True
         if not self.system_instruction or len(self.system_instruction) < 200:
             return None
@@ -118,7 +283,7 @@ class AIWrapper:
             self._cached_content_name = None
             return None
 
-    def _build_config(self):
+    def _build_config(self, system_instruction=None):
         config_args = {"temperature": self.temperature}
         if self.max_output_tokens:
             config_args["max_output_tokens"] = self.max_output_tokens
@@ -140,6 +305,14 @@ class AIWrapper:
                 types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH",        threshold="BLOCK_NONE"),
                 types.SafetySetting(category="HARM_CATEGORY_HARASSMENT",         threshold="BLOCK_NONE"),
             ]
+        if system_instruction:
+            # Per-call system_instruction: ЗАВЖДИ inline у конфізі (мережі тут немає: config_with
+            # викликається з event loop). Явний кеш підставляє generate_content/_upgrade_config у thread.
+            # Wrapper-level преамбула (narrator: safety/NSFW) лишається першою частиною тексту.
+            if self.system_instruction:
+                system_instruction = f"{self.system_instruction}\n\n{system_instruction}"
+            config_args["system_instruction"] = system_instruction
+            return types.GenerateContentConfig(**config_args)
         # Use cached_content when available, otherwise fall back to inline system_instruction
         cache_name = self._ensure_cache()
         if cache_name:
@@ -148,7 +321,79 @@ class AIWrapper:
             config_args["system_instruction"] = self.system_instruction
         return types.GenerateContentConfig(**config_args)
 
+    def config_with(self, **overrides) -> "types.GenerateContentConfig":
+        """Повертає КОПІЮ повного ефективного конфіга обгортки з перевизначеними полями.
+
+        Базою є `_build_config()` (той самий конфіг, що й у звичайному generate-шляху):
+        temperature, max_output_tokens, thinking_config, safety_settings,
+        response_mime_type і cached_content АБО system_instruction (взаємовиключно).
+        `_build_config` щоразу створює новий об'єкт, а `model_copy` ще раз копіюється,
+        тож стан обгортки не мутується.
+
+        Приклад: wrapper.config_with(temperature=0.5)
+
+        `system_instruction=TEXT` (per-call, статична частина промпта ролі): конфіг отримує
+        inline system_instruction = [wrapper.system_instruction + "\n\n"] + TEXT (преамбула
+        wrapper-а, напр. narrator NSFW-контекст, зберігається) і БЕЗ cached_content.
+        Перетворення на cached_content (якщо текст >= порога і кеш вдалося створити) робить
+        generate_content / generate_content_stream у worker-thread (_upgrade_config), тому
+        config_with не робить мережевих викликів. Обидва поля одночасно не потрапляють у конфіг.
+        Без TEXT: поведінка як раніше (wrapper-level system_instruction / кеш).
+        """
+        overrides = dict(overrides)
+        si = overrides.pop("system_instruction", None)
+        return self._build_config(system_instruction=si).model_copy(update=overrides)
+
+    def _upgrade_config(self, cfg):
+        """Inline system_instruction (str) -> cached_content, якщо кеш існує/створюється.
+
+        Повертає (cfg, inline_text): inline_text != None лише коли підставлено кеш
+        (потрібен для inline-fallback при протуханні). Викликати ТІЛЬКИ з worker-thread
+        (може робити caches.create). Не кидає.
+        """
+        if not GEMINI_EXPLICIT_CACHE_ENABLED:
+            return cfg, None
+        try:
+            si = getattr(cfg, "system_instruction", None)
+            if getattr(cfg, "cached_content", None) or not isinstance(si, str) or not si:
+                return cfg, None
+            name = get_or_create_text_cache(self.model_name, si)
+            if not name:
+                return cfg, None
+            return cfg.model_copy(update={"system_instruction": None, "cached_content": name}), si
+        except Exception as e:
+            logger.warning(f"[CACHE] {self.model_name}: upgrade failed, inline: {type(e).__name__}: {str(e)[:100]}")
+            return cfg, None
+
+    def _cache_inline_text(self, cfg, cache_text):
+        """Текст для inline-fallback, коли cached_content у cfg не спрацював (або None)."""
+        if cache_text:
+            return cache_text
+        if getattr(cfg, "cached_content", None) and cfg.cached_content == self._cached_content_name:
+            return self.system_instruction
+        return None
+
+    def _drop_cache(self, cfg, text):
+        """Інвалідує реєстр/wrapper-кеш після помилки cached_content."""
+        # deny на ключ: без churn create->fail->inline на кожному ході при стійкій помилці
+        invalidate_text_cache(self.model_name, text, deny_seconds=_CACHE_DENY_TRANSIENT_SECONDS)
+        if getattr(cfg, "cached_content", None) == self._cached_content_name:
+            self._cached_content_name = None
+            self._cache_attempted = False  # після deny-вікна спробує створити заново
+            self._cache_deny_until = time.time() + _CACHE_DENY_TRANSIENT_SECONDS
+        # один канал (logger), щоб раннер не рахував подію двічі
+        logger.warning(f"[CACHE] {self.model_name}: cached content invalid/expired -> inline retry")
+
     def generate_content(self, prompt, max_retries=DEFAULT_MAX_RETRIES, config=None):
+        """Синхронний виклик Gemini з retry/backoff і circuit breaker.
+
+        Schema fallback: якщо з активним response_schema API повертає 400, робиться
+        рівно один повтор без схеми. Цей повтор НЕ споживає retry-бюджет (attempt),
+        без sleep і не рахується в circuit breaker. Схема потрапляє в _REJECTED_SCHEMAS
+        (тобто наступні виклики одразу йдуть без неї) ЛИШЕ якщо повтор без схеми
+        завершився успіхом; якщо й він падає — схема не запам'ятовується, помилка
+        йде звичайним шляхом (permanent -> raise).
+        """
         prompt = _normalize_prompt(prompt)
         # ── 1. Circuit breaker check ──────────────────────────────────────────
         cb = _CIRCUIT_STATE.setdefault(
@@ -166,7 +411,24 @@ class AIWrapper:
         effective_config = config if config is not None else self._build_config()
         last_error = None
 
-        for attempt in range(1, max_retries + 1):
+        # ── Schema fallback state ─────────────────────────────────────────────
+        # Якщо config має response_schema, яку API вже відхиляв для цієї моделі —
+        # одразу йдемо без неї (не палимо квоту на гарантований 400).
+        schema_key = None
+        pending_reject_key = None  # схема, відхилена 400; фіксується лише після успішного повтору без неї
+        if getattr(effective_config, "response_schema", None) is not None:
+            schema_key = (self.model_name, _schema_fingerprint(effective_config.response_schema))
+            if schema_key in _REJECTED_SCHEMAS:
+                effective_config = effective_config.model_copy(update={"response_schema": None})
+                schema_key = None
+
+        # ── Explicit cache: inline system_instruction -> cached_content (у thread) ──
+        effective_config, cache_text = self._upgrade_config(effective_config)
+        cache_fallback_used = False
+
+        attempt = 0
+        while attempt < max_retries:
+            attempt += 1
             try:
                 raw = client.models.generate_content(
                     model=self.model_name,
@@ -176,6 +438,13 @@ class AIWrapper:
                 # SUCCESS — reset circuit breaker
                 cb["consecutive_failures"] = 0
                 cb["cooldown_until"] = 0.0
+                if pending_reject_key is not None:
+                    _REJECTED_SCHEMAS.add(pending_reject_key)
+                    logger.warning(
+                        f"[AIWrapper {self.model_name}] schema remembered as rejected "
+                        f"(retry without schema succeeded)"
+                    )
+                    pending_reject_key = None
                 if self.include_thoughts:
                     try:
                         thoughts, content = split_thoughts(raw)
@@ -209,6 +478,34 @@ class AIWrapper:
                     or "INVALID_ARGUMENT" in err_str
                     or "PERMISSION_DENIED" in err_str
                 )
+
+                # Cached content missing/expired: one retry with inline system_instruction.
+                # Not a breaker failure, attempt not consumed (як і schema fallback).
+                if (not cache_fallback_used and getattr(effective_config, "cached_content", None)
+                        and _is_cache_error(e)):
+                    inline_text = self._cache_inline_text(effective_config, cache_text)
+                    if inline_text:
+                        self._drop_cache(effective_config, inline_text)
+                        effective_config = effective_config.model_copy(
+                            update={"cached_content": None, "system_instruction": inline_text})
+                        cache_fallback_used = True
+                        attempt -= 1
+                        continue
+
+                # Schema rejected (400) — one retry of the same request without
+                # response_schema. Not a breaker failure, not a transient retry
+                # (attempt counter is not consumed).
+                if schema_key is not None and _is_bad_request(e):
+                    logger.warning(
+                        f"[AIWrapper {self.model_name}] response_schema rejected (400), "
+                        f"schema rejected, retrying without schema: {err_str[:200]}"
+                    )
+                    effective_config = effective_config.model_copy(update={"response_schema": None})
+                    # Запам'ятовуємо лише якщо повтор без схеми успішний (див. SUCCESS).
+                    pending_reject_key = schema_key
+                    schema_key = None
+                    attempt -= 1
+                    continue
 
                 # Permanent errors — fail immediately, no retry
                 if is_permanent:
@@ -254,15 +551,39 @@ class AIWrapper:
 
         raise last_error
 
-    def generate_content_stream(self, prompt):
-        """Повертає синхронний ітератор чанків для streaming."""
+    def generate_content_stream(self, prompt, config=None):
+        """Повертає синхронний ітератор чанків для streaming.
+
+        `config` (опційно, напр. wrapper.config_with(system_instruction=...)). Якщо inline
+        system_instruction замінено на cached_content і кеш невалідний ДО першого чанка --
+        один повтор з inline (як у generate_content). Викликати з worker-thread.
+        """
         prompt = _normalize_prompt(prompt)
-        config = self._build_config()
-        return client.models.generate_content_stream(
-            model=self.model_name,
-            contents=prompt,
-            config=config
-        )
+        cfg = config if config is not None else self._build_config()
+        cfg, cache_text = self._upgrade_config(cfg)
+        if cache_text is None:
+            return client.models.generate_content_stream(
+                model=self.model_name,
+                contents=prompt,
+                config=cfg
+            )
+
+        def _gen():
+            started = False
+            try:
+                for chunk in client.models.generate_content_stream(
+                        model=self.model_name, contents=prompt, config=cfg):
+                    started = True
+                    yield chunk
+            except Exception as e:
+                if started or not _is_cache_error(e):
+                    raise
+                self._drop_cache(cfg, cache_text)
+                inline_cfg = cfg.model_copy(update={"cached_content": None, "system_instruction": cache_text})
+                yield from client.models.generate_content_stream(
+                    model=self.model_name, contents=prompt, config=inline_cfg)
+
+        return _gen()
 
 
 # Створюємо екземпляри моделей
@@ -300,47 +621,40 @@ def build_strict_config(
     model_wrapper: "AIWrapper",
     schema=None,
     temperature: float = None,
+    system_instruction: Optional[str] = None,
 ) -> "types.GenerateContentConfig":
-    """Build a GenerateContentConfig with JSON mode (response_mime_type only).
+    """Build a strict-JSON GenerateContentConfig from a wrapper's full effective config.
 
-    schema param removed — response_schema caused hangs on gemma preview;
-    kept optional for call-site compat during cleanup. The model still
-    returns correct JSON keys because prompts instruct it to do so (see CLAUDE.md
-    §5.3). schema is a no-op and call-sites should omit it.
+    Inherits EVERYTHING from `model_wrapper` (via AIWrapper.config_with):
+    thinking_config, max_output_tokens, safety_settings, cached_content /
+    system_instruction. Overrides only response_mime_type="application/json"
+    and (optionally) temperature.
 
-    Inherits safety_settings and cached_content/system_instruction from the
-    wrapper so callers don't have to repeat boilerplate.
+    If `schema` is not None it is passed as `response_schema` (OpenAPI-subset
+    dict / types.Schema). If the API rejects it with 400, AIWrapper.generate_content
+    transparently retries without it and remembers the rejection (see
+    _REJECTED_SCHEMAS). JSON keys are still enforced by prompts and
+    clean_and_parse_json (CLAUDE.md §5.3) as the second line of defence.
 
     Args:
-        model_wrapper: The AIWrapper whose safety / cache settings to inherit.
-        schema: Optional, ignored. Kept for backward compat during cleanup phase.
+        model_wrapper: AIWrapper (e.g. model_worker / model_gm_logic) to inherit from.
+        schema: Optional response_schema (dict or types.Schema). None = prompt-only JSON.
         temperature: Override temperature. If None, uses model_wrapper.temperature.
+        system_instruction: Per-call static system text (див. AIWrapper.config_with). Конфіг
+            містить його inline; generate_content у thread підміняє на cached_content, якщо
+            кеш доступний. None = wrapper-level поведінка.
 
     Returns:
-        types.GenerateContentConfig ready to pass to model_wrapper.generate_content(..., config=cfg).
+        types.GenerateContentConfig to pass as model_wrapper.generate_content(..., config=cfg).
     """
-    config_args: dict = {
-        "temperature": temperature if temperature is not None else model_wrapper.temperature,
-        "response_mime_type": "application/json",
-    }
-    if model_wrapper.block_none:
-        config_args["safety_settings"] = [
-            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT",  threshold="BLOCK_NONE"),
-            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH",        threshold="BLOCK_NONE"),
-            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT",         threshold="BLOCK_NONE"),
-        ]
-    # Inherit cached_content or inline system_instruction (same logic as _build_config).
-    # Defensive: _ensure_cache may return MagicMock in tests — only use real strings.
-    try:
-        cache_name = model_wrapper._ensure_cache()
-    except Exception:
-        cache_name = None
-    if isinstance(cache_name, str) and cache_name:
-        config_args["cached_content"] = cache_name
-    elif isinstance(model_wrapper.system_instruction, str) and model_wrapper.system_instruction:
-        config_args["system_instruction"] = model_wrapper.system_instruction
-    return types.GenerateContentConfig(**config_args)
+    overrides: dict = {"response_mime_type": "application/json"}
+    if temperature is not None:
+        overrides["temperature"] = temperature
+    if schema is not None:
+        overrides["response_schema"] = schema
+    if system_instruction:
+        overrides["system_instruction"] = system_instruction
+    return model_wrapper.config_with(**overrides)
 
 
 class _AIResponse:

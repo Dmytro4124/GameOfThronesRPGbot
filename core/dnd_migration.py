@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Optional, Callable
 
 from core.ai_client import model_worker, clean_and_parse_json, build_strict_config
-from core.prompts import build_npc_regen_prompt
+from core.prompts import build_npc_regen_prompt, NPC_REGEN_SCHEMA
 
 # ── Constants ───────────────────────────────────────────────────────────────
 
@@ -204,15 +204,9 @@ async def regenerate_one_npc(
     prompt = build_npc_regen_prompt(npc)
 
     try:
-        _regen_cfg = build_strict_config(active_model)
+        _regen_cfg = build_strict_config(active_model, schema=NPC_REGEN_SCHEMA)
         def _sync_call():
-            try:
-                return active_model.generate_content(prompt, config=_regen_cfg)
-            except Exception as _schema_err:
-                if "INVALID_ARGUMENT" in str(_schema_err) or "schema" in str(_schema_err).lower():
-                    print(f"[REGEN] Schema rejected for '{npc.get('Name', '?')}', falling back: {_schema_err}")
-                    return active_model.generate_content(prompt)
-                raise
+            return active_model.generate_content(prompt, config=_regen_cfg)
 
         response = await asyncio.to_thread(_sync_call)
         raw_text = response.text if hasattr(response, "text") else str(response)

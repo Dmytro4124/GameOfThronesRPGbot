@@ -34,6 +34,7 @@ if GUARD_ACTIVE:
     os.environ["GEMINI_API_KEY_TEST"] = "dummy-gemini-test-key"
     os.environ["GEMINI_API_KEY_TEST_1"] = "dummy-gemini-test-key-1"
     os.environ["NARRATOR_AB_ENABLED"] = "0"
+    os.environ["GEMINI_EXPLICIT_CACHE"] = "0"
     os.environ["NARRATOR_AB_LOG_PATH"] = os.path.join(
         tempfile.mkdtemp(prefix="got_tests_"), "narrator_ab.jsonl")
     for _k in ("MODEL_MAIN_NAME", "MODEL_WORKER_NAME", "MODEL_GM_LOGIC_NAME",
@@ -77,3 +78,14 @@ if GUARD_ACTIVE:
     socket.socket.connect = _connect
     socket.socket.connect_ex = _connect_ex
     socket.getaddrinfo = _gai
+
+
+import pytest as _pytest_cache  # noqa: E402
+
+
+@_pytest_cache.fixture
+def explicit_cache_on(monkeypatch):
+    """Enable the Gemini explicit context cache (default OFF) for tests that exercise it."""
+    import core.ai_client as _ai
+    monkeypatch.setattr(_ai, "GEMINI_EXPLICIT_CACHE_ENABLED", True)
+    yield

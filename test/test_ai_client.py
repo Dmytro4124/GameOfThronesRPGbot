@@ -458,6 +458,7 @@ def test_hedged_cancels_pending():
 
 # ─── Item 4: Prompt caching ───────────────────────────────────────────────────
 
+@pytest.mark.usefixtures("explicit_cache_on")
 def test_cache_skipped_when_not_supported():
     """When client.caches.create raises, _ensure_cache returns None and system_instruction is used inline."""
     long_instruction = "x" * 1001  # > 1000 chars threshold
@@ -490,6 +491,7 @@ def test_cache_skipped_for_short_instruction():
     assert cache_name is None
 
 
+@pytest.mark.usefixtures("explicit_cache_on")
 def test_cache_idempotent():
     """_ensure_cache is idempotent: caches.create called only once even if invoked multiple times."""
     long_instruction = "y" * 1001
@@ -592,29 +594,25 @@ def test_model_without_block_none_has_no_safety_settings():
 
 # ─── Тест 1 (нові): build_strict_config ignores schema ──────────────────────
 
-def test_build_strict_config_ignores_schema():
-    """build_strict_config приймає schema-аргумент, але НЕ встановлює response_schema.
+def test_build_strict_config_sets_schema():
+    """build_strict_config(schema=...) ставить response_schema (Етап 2).
 
-    Строгий constrained decoding (response_schema) спричиняв 14-хвилинні зависання
-    на gemma-4-31b-it preview. Параметр schema — no-op для сумісності сигнатури.
+    Якщо API відхилить схему (400), AIWrapper.generate_content сам повторить без неї.
     Перевіряємо:
-    - response_schema is None (або відсутній)
+    - response_schema встановлено
     - response_mime_type == "application/json"
     - safety_settings присутні (model_worker має block_none=True)
     - temperature встановлено
     """
     from core.ai_client import build_strict_config, model_worker
 
-    # Передаємо довільну схему — вона має ігноруватись
     dummy_schema = {"type": "object", "properties": {"key": {"type": "string"}}}
 
     cfg = build_strict_config(model_worker, schema=dummy_schema, temperature=0.7)
 
-    # response_schema must NOT be set
-    assert not hasattr(cfg, "response_schema") or cfg.response_schema is None, (
-        "build_strict_config must NOT set response_schema: "
-        "strict constrained decoding causes 14-min hangs on gemma-4-31b-it preview"
-    )
+    assert cfg.response_schema is not None, "build_strict_config must set response_schema"
+    assert cfg.response_schema == dummy_schema  # passed through (dict or Schema)
+    assert cfg.temperature == 0.7
     # JSON mode via MIME type must still be active
     assert cfg.response_mime_type == "application/json", (
         f"response_mime_type must be 'application/json', got {cfg.response_mime_type!r}"

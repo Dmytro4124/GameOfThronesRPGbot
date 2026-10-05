@@ -26,10 +26,10 @@ from core.dnd_progression import award_xp, level_up, apply_asi, get_level_for_xp
 from core.dnd_conditions import (
     apply_condition, remove_condition, has_condition, condition_modifies,
 )
-from core.prompts import build_normal_resolve_prompt
+from core.prompts import build_normal_resolve_parts, WORKER_NORMAL_SCHEMA
 from core.world_constants import (
     get_region_for_location, get_locations_for_region,
-    LOCATION_TO_REGION, VALID_REGIONS_ORDERED,
+    LOCATION_TO_REGION, VALID_REGIONS_ORDERED, format_scene_names_for_prompt,
 )
 
 # ---------------------------------------------------------------------------
@@ -172,7 +172,16 @@ async def resolve_normal_action(
 
     clocks_info = profile.get("Годинники", {})
 
-    prompt = build_normal_resolve_prompt(
+    # Канонічні сцени поточної локації (те саме джерело, що й GM_Logic у engine.py
+    # та autocorrect у mechanics.py: LOCATION_SCENES). Pure function, без I/O.
+    # Будь-який збій → "" (поведінка як раніше), хід не падає.
+    try:
+        _scenes_block_str = format_scene_names_for_prompt(current_location) if current_location else ""
+    except Exception as _sc_e:
+        logger.warning(f"[DND_ENGINE] format_scene_names_for_prompt failed: {_sc_e}")
+        _scenes_block_str = ""
+
+    static_prompt, prompt = build_normal_resolve_parts(
         user_input=user_input,
         profile=profile,
         current_scene=current_scene or "Unknown",
@@ -183,25 +192,22 @@ async def resolve_normal_action(
         clocks_info=clocks_info,
         nearby_canonical_locs=nearby_locs,
         all_canonical_locs_grouped=all_locs_grouped,
+        scenes_block_str=_scenes_block_str,
     )
     if debug_trace is not None:
-        debug_trace["worker"]["prompt"] = prompt
+        import hashlib as _hl
+        debug_trace["worker"]["prompt"] = (
+            f"[SYSTEM_INSTRUCTION static len={len(static_prompt)} "
+            f"md5={_hl.md5(static_prompt.encode('utf-8')).hexdigest()[:8]}]\n\n" + prompt
+        )
 
-    # --- 2. Call LLM with 1 retry (gemma sometimes returns MALFORMED/None text;
+    # --- 2. Call LLM with 1 retry (model may return MALFORMED/None text;
     #        retry before degrading to AUTO_SUCCESS which removes the dice roll).
     #        §5.1 async invariant: all LLM calls via asyncio.to_thread. ---
-    _worker_cfg = build_strict_config(model_worker)
+    _worker_cfg = build_strict_config(model_worker, schema=WORKER_NORMAL_SCHEMA, system_instruction=static_prompt)
 
     def _sync_gen():
-        try:
-            return model_worker.generate_content(prompt, config=_worker_cfg)
-        except Exception as _schema_err:
-            if "INVALID_ARGUMENT" in str(_schema_err) or "schema" in str(_schema_err).lower():
-                print(f"⚠️ [DND_ENGINE] Schema rejected, falling back to free JSON: {_schema_err}")
-                return model_worker.generate_content(
-                    prompt + "\n\nIMPORTANT: Reply ONLY with valid JSON."
-                )
-            raise
+        return model_worker.generate_content(prompt, config=_worker_cfg)
 
     data = None
     for _w_attempt in range(2):  # 1 initial + 1 retry

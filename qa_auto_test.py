@@ -12,7 +12,7 @@ from core.ai_client import clean_and_parse_json, get_thoughts_log
 from database.operations import get_house_stats_data, save_user_data, get_user_data, clear_npc_cache, refresh_npc_database, get_location_npcs
 from database.sheets import db
 from core.world import generate_initial_stats, background_canon_generation, populate_contextual_npcs
-from config import GEMINI_API_KEYS_TEST, TAB_USERS
+from config import GEMINI_API_KEYS_TEST, TAB_USERS, FLASH_LITE_MODEL_ID
 
 # === КОНСТАНТИ ===
 SLEEP_INIT_SEC = 3           # Коротка пауза перед першим ходом
@@ -20,7 +20,16 @@ SLEEP_AFTER_ENGINE_SEC = 0   # Без пауз — ігровий рушій в�
 SLEEP_AFTER_EVALUATOR_SEC = 0  # Без пауз — евалюатор використовує тестовий ключ
 
 # Модель для Player AI та Evaluator (окрема від ігрового рушія)
-QA_MODEL_NAME = 'gemma-4-31b-it'
+QA_MODEL_NAME = os.getenv("QA_MODEL_NAME") or FLASH_LITE_MODEL_ID
+# Евалюатор (LLM-суддя). Для метрик-прогонів можна вимкнути: QA_EVAL_ENABLED=0 або --no-eval у runner.
+QA_EVAL_ENABLED = os.getenv("QA_EVAL_ENABLED", "1") != "0"
+# Thinking для симулятора/евалюатора: 0 = вимкнено (лише gemini-моделі; gemma не підтримує thinking_config).
+QA_THINKING_BUDGET = os.getenv("QA_THINKING_LEVEL", "minimal")  # thinking_level (gemini-3.5 не приймає thinking_budget=0); "" = дефолт моделі
+SHORT_MODEL_LABELS = {
+    "gemma-4-31b-it": "G4",
+    "gemma-3-27b-it": "G3",
+    FLASH_LITE_MODEL_ID: "FL",
+}
 PLAYER_HISTORY_MAX_MESSAGES = 10  # Rolling window за замовчуванням (може бути перевизначено профілем)
 
 # === ЛОГУВАННЯ ===
@@ -329,6 +338,8 @@ async def _generate_with_retry(
         client = _get_test_client(0)
 
     config_kwargs = {"temperature": temperature}
+    if QA_MODEL_NAME.startswith("gemini") and QA_THINKING_BUDGET:
+        config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=QA_THINKING_BUDGET)
 
     delay = 2
     last_error = None
@@ -347,6 +358,8 @@ async def _generate_with_retry(
             if attempt == max_retries:
                 break
             err_str = str(e)
+            if "400" in err_str and "INVALID_ARGUMENT" in err_str:
+                break  # не-ретраїбельна помилка: fail fast
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
                 delay = min(delay * 3, 120)
                 log.warning(f"⚠️ 429 TPM hit. Retry {attempt}/{max_retries}, пауза {delay}с...")
@@ -470,7 +483,9 @@ class RPGTesterAdapter:
         if thoughts_entries:
             thoughts_lines = []
             for e in thoughts_entries:
-                short_model = e["model"].replace("gemma-4-31b-it", "G4").replace("gemma-3-27b-it", "G3")
+                short_model = e["model"]
+                for _full, _short in SHORT_MODEL_LABELS.items():
+                    short_model = short_model.replace(_full, _short)
                 thoughts_lines.append(f"  [{short_model}] {e['thought'][:400].strip()}")
             self._last_thoughts = "\n".join(thoughts_lines)
         else:
@@ -740,7 +755,7 @@ async def run_test(max_turns: int = 5, profile: dict = None, profile_key: str = 
                     log.info(f"💀 [QA] '{npc_name}' додано до списку мертвих — евалюатор перевірятиме воскресіння.")
 
             # Чіт-команди не потребують евалюатора — пропускаємо хід
-            if player_action.startswith("/"):
+            if player_action.startswith("/") or not QA_EVAL_ENABLED:
                 ui_text = new_ui_text
                 continue
 

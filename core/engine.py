@@ -32,7 +32,8 @@ from core.combat_state import (
 )
 from core.prompts import (
     GAME_ERA_CONTEXT, build_summarize_turn_prompt, build_summarize_full_turn_prompt,
-    build_narrator_prompt, build_gm_logic_prompt, build_history_summary_prompt,
+    build_narrator_parts, build_gm_logic_parts, build_history_summary_prompt,
+    GM_LOGIC_SCHEMA,
 )
 from core.world_constants import (
     VALID_LOCATIONS_ORDERED, VALID_REGIONS_ORDERED, TRAVEL_LOCATION,
@@ -341,7 +342,8 @@ def _build_narrator_prompt(user_input, director_notes, npc_context_text,
                            departing_roster_text="", arriving_roster_text="",
                            scene_continuity_block: str = "",
                            combat_log=None):
-    return build_narrator_prompt(
+    """Returns (static, dynamic): static -> system_instruction (cached), dynamic -> contents."""
+    return build_narrator_parts(
         user_input=user_input,
         director_notes=director_notes,
         npc_context_text=npc_context_text,
@@ -362,6 +364,13 @@ def _build_narrator_prompt(user_input, director_notes, npc_context_text,
     )
 
 
+def _static_tag(static: str) -> str:
+    """Compact identifier of a static system_instruction for debug/thoughts (no big text dup)."""
+    import hashlib
+    _h = hashlib.md5((static or "").encode("utf-8")).hexdigest()[:8]
+    return f"[SYSTEM_INSTRUCTION static len={len(static or '')} md5={_h}]"
+
+
 def _is_debug_active(chat_id: int, profile: dict, debug_users: set) -> bool:
     """Return True if debug mode is active for this user.
 
@@ -373,7 +382,7 @@ def _is_debug_active(chat_id: int, profile: dict, debug_users: set) -> bool:
     return (chat_id in debug_users) or bool(profile.get("_debug_mode", False))
 
 
-async def _run_narrator_chain(model_wrapper, narrator_prompt, model_key) -> NarrationResult:
+async def _run_narrator_chain(model_wrapper, narrator_prompt, model_key, narrator_static=None) -> NarrationResult:
     """BLOCKING narrator chain: attempt 1 (hedged) -> quality checks -> attempt 2 -> attempt 3 (temp 0.5, 90s).
 
     Returns NarrationResult. If all attempts fail -> used_fallback=True, text=None
@@ -382,6 +391,9 @@ async def _run_narrator_chain(model_wrapper, narrator_prompt, model_key) -> Narr
     """
     t_chain = time.time()
     attempt_ms: list = []
+    # Static part -> system_instruction (IDENTICAL for all attempts/models => same cache key).
+    # config_with is pure (no network); cache upgrade happens in generate_content's worker thread.
+    _cfg_base = model_wrapper.config_with(system_instruction=narrator_static) if narrator_static else None
     _mname = getattr(model_wrapper, "model_name", None) or model_key
 
     def _res(text, final, fallback=False):
@@ -392,11 +404,12 @@ async def _run_narrator_chain(model_wrapper, narrator_prompt, model_key) -> Narr
             used_fallback=fallback, error=None,
         )
 
-    # --- Attempt 1: hedged (2 parallel requests, first success wins) ---
+    # --- Attempt 1: single request via hedged helper (hedge_count=1: no duplicate
+    #     request -> no doubled token cost/quota; 60s timeout still applies) ---
     _t = time.time()
     try:
         narrator_response = await hedged_generate_content_async(
-            model_wrapper, narrator_prompt, hedge_count=2, max_retries=2
+            model_wrapper, narrator_prompt, config=_cfg_base, hedge_count=1, max_retries=2
         )
         story = narrator_response.text.strip() if narrator_response and narrator_response.text else ""
     except Exception as _hedge_exc:
@@ -440,7 +453,7 @@ async def _run_narrator_chain(model_wrapper, narrator_prompt, model_key) -> Narr
     # --- Attempt 2: blocking retry ---
     def _sync_gen_narrator_retry():
         _t0 = time.time()
-        resp = model_wrapper.generate_content(narrator_prompt)
+        resp = model_wrapper.generate_content(narrator_prompt, config=_cfg_base)
         _elapsed = time.time() - _t0
         try:
             fr = resp.candidates[0].finish_reason if resp and resp.candidates else None
@@ -483,11 +496,10 @@ async def _run_narrator_chain(model_wrapper, narrator_prompt, model_key) -> Narr
     def _sync_gen_narrator_third_blocking():
         _t0 = time.time()
         try:
-            from google.genai import types as _gtypes
-            _cfg = _gtypes.GenerateContentConfig(temperature=0.5)
+            _cfg = model_wrapper.config_with(system_instruction=narrator_static, temperature=0.5)
             resp = model_wrapper.generate_content(narrator_prompt, config=_cfg)
         except Exception:
-            resp = model_wrapper.generate_content(narrator_prompt)
+            resp = model_wrapper.generate_content(narrator_prompt, config=_cfg_base)
         _elapsed = time.time() - _t0
         _text = (resp.text or "") if resp else ""
         logger.info(
@@ -1275,7 +1287,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 f"{list(_npc_hp_snapshot.keys())} (chat_id={chat_id})"
             )
 
-    gm_logic_prompt = build_gm_logic_prompt(
+    gm_logic_static, gm_logic_prompt = build_gm_logic_parts(
         hero_name=profile.get("Ім'я", "Невідомий"),
         hero_house=profile.get("Дім", "Невідомий"),
         profile_json=profile_json,
@@ -1315,23 +1327,17 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             await progress_callback("🌍 Оновлюємо стан світу...")
         t_gm_logic = time.time()
 
-        _gm_logic_cfg = build_strict_config(model_gm_logic)
+        _gm_logic_cfg = build_strict_config(model_gm_logic, schema=GM_LOGIC_SCHEMA, system_instruction=gm_logic_static)
 
         if _debug_active:
             clear_thoughts()  # isolate GM_Logic thoughts from previous stages
             if _debug_trace is not None:
-                _debug_trace["gm_logic"]["prompt"] = gm_logic_prompt
+                _debug_trace["gm_logic"]["prompt"] = _static_tag(gm_logic_static) + "\n\n" + gm_logic_prompt
 
         def _sync_gen_gm_logic():
-            try:
-                return model_gm_logic.generate_content(gm_logic_prompt, config=_gm_logic_cfg)
-            except Exception as _schema_err:
-                if "INVALID_ARGUMENT" in str(_schema_err) or "schema" in str(_schema_err).lower():
-                    print(f"⚠️ [GM_Logic] Schema rejected, falling back to free JSON: {_schema_err}")
-                    return model_gm_logic.generate_content(gm_logic_prompt)
-                raise
+            return model_gm_logic.generate_content(gm_logic_prompt, config=_gm_logic_cfg)
 
-        # GM_Logic call with None-text guard + one retry (gemma sometimes returns
+        # GM_Logic call with None-text guard + one retry (the model may return
         # MALFORMED/empty .text=None, which is not an exception — guard against crash).
         gm_logic_raw = ""
         for _gm_attempt in range(2):  # 1 initial + 1 retry
@@ -1458,7 +1464,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             SCENE_CONTINUITY_NEW if location_or_scene_changed else SCENE_CONTINUITY_CONTINUING
         )
 
-        narrator_prompt = _build_narrator_prompt(
+        narrator_static, narrator_prompt = _build_narrator_prompt(
             user_input=user_input,
             director_notes=director_notes,
             npc_context_text=npc_context_text,
@@ -1481,7 +1487,11 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         if _debug_active:
             clear_thoughts()  # isolate Narrator thoughts from GM_Logic
             if _debug_trace is not None:
-                _debug_trace["narrator"]["prompt"] = narrator_prompt
+                _debug_trace["narrator"]["prompt"] = _static_tag(narrator_static) + "\n\n" + narrator_prompt
+
+        # Один і той самий cfg (system_instruction=static) для ВСІХ narrator-шляхів (stream/retry/attempt 3).
+        _narrator_cfg = model_narrator.config_with(system_instruction=narrator_static)
+        _narrator_cfg_t05 = model_narrator.config_with(system_instruction=narrator_static, temperature=0.5)
 
         _narrator_failed = False  # прапор: всі три спроби провалились
         _ab_results = []   # Narrator A/B: results of both chains (blocking mode only)
@@ -1495,7 +1505,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 thought_parts = []
                 print("🔵 [STREAM] Narrator streaming started...")
                 try:
-                    for chunk in model_narrator.generate_content_stream(narrator_prompt):
+                    for chunk in model_narrator.generate_content_stream(narrator_prompt, config=_narrator_cfg):
                         try:
                             for part in chunk.candidates[0].content.parts:
                                 if getattr(part, "thought", False):
@@ -1535,8 +1545,8 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             if NARRATOR_AB_ENABLED:
                 _t_ab = time.time()
                 _ab_raw = await asyncio.gather(
-                    _run_narrator_chain(model_narrator, narrator_prompt, "gemma"),
-                    _run_narrator_chain(model_narrator_alt, narrator_prompt, "flash_lite"),
+                    _run_narrator_chain(model_narrator, narrator_prompt, "gemma", narrator_static),
+                    _run_narrator_chain(model_narrator_alt, narrator_prompt, "flash_lite", narrator_static),
                     return_exceptions=True,
                 )
                 _ab_results = []
@@ -1568,7 +1578,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 else:
                     story = ""  # texts are held in _ab_results until the vote
             else:
-                _chain_res = await _run_narrator_chain(model_narrator, narrator_prompt, "gemma")
+                _chain_res = await _run_narrator_chain(model_narrator, narrator_prompt, "gemma", narrator_static)
                 if _chain_res.used_fallback:
                     logger.warning(
                         f"[NARRATOR_LAST_RESORT] All 3 attempts failed (blocking path). "
@@ -1625,7 +1635,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                     thought_parts = []
                     _t0 = time.time()
                     try:
-                        for chunk in model_narrator.generate_content_stream(narrator_prompt):
+                        for chunk in model_narrator.generate_content_stream(narrator_prompt, config=_narrator_cfg):
                             try:
                                 for part in chunk.candidates[0].content.parts:
                                     if getattr(part, "thought", False):
@@ -1676,11 +1686,9 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                         # Fail fast in degraded path: max_retries=2 instead of default 6
                         # (avoid 140s+ user-wait when whole pipeline is degraded).
                         try:
-                            from google.genai import types as _gtypes
-                            _cfg = _gtypes.GenerateContentConfig(temperature=0.5)
-                            resp = model_narrator.generate_content(narrator_prompt, max_retries=2, config=_cfg)
+                            resp = model_narrator.generate_content(narrator_prompt, max_retries=2, config=_narrator_cfg_t05)
                         except Exception:
-                            resp = model_narrator.generate_content(narrator_prompt, max_retries=2)
+                            resp = model_narrator.generate_content(narrator_prompt, max_retries=2, config=_narrator_cfg)
                         _elapsed = time.time() - _t0
                         _text = (resp.text or "") if resp else ""
                         logger.info(
@@ -1973,6 +1981,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 _rec = build_log_record(
                     turn_id=_ab_turn_id, user_id=user_id, chat_id=chat_id,
                     mode=profile.get("mode"), narrator_prompt=narrator_prompt,
+                    narrator_static_tag=_static_tag(narrator_static),
                     mechanics=_mech_log, results=_ab_results,
                     shown_order=[_r.model_key for _r in _order], reason=None,
                 )
@@ -1990,6 +1999,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 _rec = build_log_record(
                     turn_id=_ab_turn_id, user_id=user_id, chat_id=chat_id,
                     mode=profile.get("mode"), narrator_prompt=narrator_prompt,
+                    narrator_static_tag=_static_tag(narrator_static),
                     mechanics=_mech_log, results=_ab_results, shown_order=None,
                     reason="single_variant" if _ab_mode == "single" else "both_failed",
                 )

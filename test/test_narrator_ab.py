@@ -178,7 +178,8 @@ def test_narration_result_ok(kw, expected):
 # ---------------- log record schema ----------------
 
 _PLAN_FIELDS = {"type", "turn_id", "ts", "user_id", "chat_id", "mode", "narrator_prompt",
-                "mechanics", "shown_order", "results", "vote", "vote_raw", "vote_ms", "reason"}
+                "mechanics", "shown_order", "results", "vote", "vote_raw", "vote_ms", "reason",
+                "narrator_static_tag"}
 _RESULT_FIELDS = {"text", "len", "total_ms", "attempt_ms", "final_attempt", "used_fallback", "error"}
 
 
@@ -193,6 +194,15 @@ def _record(reason=None):
 
 def test_build_log_record_has_all_plan_fields():
     assert set(_record()) == _PLAN_FIELDS
+
+
+def test_build_log_record_static_tag_default_none_and_value():
+    assert _record()["narrator_static_tag"] is None
+    r = na.build_log_record(
+        turn_id="t1", user_id=5, chat_id=5, mode="NORMAL", narrator_prompt="PROMPT",
+        mechanics={}, results=[_res("gemma", "abc", attempt_ms=[10], final_attempt=1)],
+        shown_order=["gemma"], narrator_static_tag="[SYSTEM_INSTRUCTION static len=5 md5=abcd1234]")
+    assert r["narrator_static_tag"] == "[SYSTEM_INSTRUCTION static len=5 md5=abcd1234]"
 
 
 def test_build_log_record_values():

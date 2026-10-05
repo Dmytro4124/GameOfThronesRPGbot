@@ -39,6 +39,7 @@ from core.dnd_conditions import has_condition
 from core.prompts import (
     build_combat_round_prompt,
     build_npc_combat_action_prompt,
+    WORKER_COMBAT_SCHEMA, NPC_COMBAT_ACTION_SCHEMA,
 )
 
 # ---------------------------------------------------------------------------
@@ -89,17 +90,9 @@ async def parse_player_combat_intent(
 
     result: Optional[dict] = None
     try:
-        _combat_round_cfg = build_strict_config(model_worker)
+        _combat_round_cfg = build_strict_config(model_worker, schema=WORKER_COMBAT_SCHEMA)
         def _call():
-            try:
-                return model_worker.generate_content(prompt, config=_combat_round_cfg)
-            except Exception as _schema_err:
-                if "INVALID_ARGUMENT" in str(_schema_err) or "schema" in str(_schema_err).lower():
-                    logger.warning(f"[COMBAT_ENGINE] Schema rejected for combat intent, falling back: {_schema_err}")
-                    return model_worker.generate_content(
-                        prompt + "\n\nIMPORTANT: Reply ONLY with valid JSON."
-                    )
-                raise
+            return model_worker.generate_content(prompt, config=_combat_round_cfg)
 
         resp = await asyncio.to_thread(_call)
         result = clean_and_parse_json(resp.text)
@@ -201,17 +194,9 @@ async def execute_npc_actions(
 
     llm_actions: list[dict] = []
     try:
-        _npc_action_cfg = build_strict_config(model_worker)
+        _npc_action_cfg = build_strict_config(model_worker, schema=NPC_COMBAT_ACTION_SCHEMA)
         def _call():
-            try:
-                return model_worker.generate_content(prompt, config=_npc_action_cfg)
-            except Exception as _schema_err:
-                if "INVALID_ARGUMENT" in str(_schema_err) or "schema" in str(_schema_err).lower():
-                    logger.warning(f"[COMBAT_ENGINE] Schema rejected for NPC actions, falling back: {_schema_err}")
-                    return model_worker.generate_content(
-                        prompt + "\n\nIMPORTANT: Reply ONLY with valid JSON."
-                    )
-                raise
+            return model_worker.generate_content(prompt, config=_npc_action_cfg)
 
         resp = await asyncio.to_thread(_call)
         parsed = clean_and_parse_json(resp.text)
@@ -332,7 +317,7 @@ async def execute_combat_round(
     advantage = (tactic == "reckless")
     disadvantage = (tactic == "cautious")
 
-    # --- Sanitize target_npc: LLM schema forces a string (not null), so it may return
+    # --- Sanitize target_npc: LLM schema is nullable, but the model may still return
     # "player", the player's own name, or an empty string — none of which are valid NPC targets.
     # Normalize to None so auto-select kicks in below.
     _player_name_lower = player_name.lower()

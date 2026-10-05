@@ -126,7 +126,8 @@ def _result_dict(r: NarrationResult) -> dict:
 
 def build_log_record(*, turn_id, user_id, chat_id, mode, narrator_prompt, mechanics: dict,
                      results: list[NarrationResult], shown_order: list[str] | None,
-                     reason: str | None = None) -> dict:
+                     reason: str | None = None,
+                     narrator_static_tag: str | None = None) -> dict:
     return {
         "type": "turn",
         "turn_id": turn_id,
@@ -135,6 +136,7 @@ def build_log_record(*, turn_id, user_id, chat_id, mode, narrator_prompt, mechan
         "chat_id": chat_id,
         "mode": mode,
         "narrator_prompt": narrator_prompt,
+        "narrator_static_tag": narrator_static_tag,
         "mechanics": mechanics,
         "shown_order": shown_order,
         "results": {r.model_key: _result_dict(r) for r in results},

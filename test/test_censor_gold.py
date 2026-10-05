@@ -12,7 +12,7 @@ import json
 import pytest
 from unittest.mock import patch, MagicMock
 
-from core.prompts import build_validate_action_prompt
+from core.prompts import build_validate_action_prompt, build_validate_action_parts
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +145,7 @@ class TestValidateActionGoldExtraction:
 
         captured_args = []
         captured_kwargs = []
-        original_build = build_validate_action_prompt
+        original_build = build_validate_action_parts
 
         def _fake_build(*args, **kwargs):
             captured_args.append(args)
@@ -158,7 +158,7 @@ class TestValidateActionGoldExtraction:
             from core.mechanics import validate_action
             return await validate_action("Я плачу 50", profile)
 
-        with patch("core.mechanics.build_validate_action_prompt", side_effect=_fake_build):
+        with patch("core.mechanics.build_validate_action_parts", side_effect=_fake_build):
             with patch("core.mechanics.model_worker.generate_content",
                        return_value=_make_censor_response()):
                 with patch("core.mechanics.clean_and_parse_json", return_value=censor_result):
@@ -180,7 +180,7 @@ class TestValidateActionGoldExtraction:
 
         captured_args = []
         captured_kwargs = []
-        original_build = build_validate_action_prompt
+        original_build = build_validate_action_parts
 
         def _fake_build(*args, **kwargs):
             captured_args.append(args)
@@ -193,7 +193,7 @@ class TestValidateActionGoldExtraction:
             from core.mechanics import validate_action
             return await validate_action("Я куплю меч", profile)
 
-        with patch("core.mechanics.build_validate_action_prompt", side_effect=_fake_build):
+        with patch("core.mechanics.build_validate_action_parts", side_effect=_fake_build):
             with patch("core.mechanics.model_worker.generate_content",
                        return_value=_make_censor_response()):
                 with patch("core.mechanics.clean_and_parse_json", return_value=censor_result):
@@ -214,7 +214,7 @@ class TestValidateActionGoldExtraction:
 
         captured_args = []
         captured_kwargs = []
-        original_build = build_validate_action_prompt
+        original_build = build_validate_action_parts
 
         def _fake_build(*args, **kwargs):
             captured_args.append(args)
@@ -227,7 +227,7 @@ class TestValidateActionGoldExtraction:
             from core.mechanics import validate_action
             return await validate_action("Щось зробити", profile)
 
-        with patch("core.mechanics.build_validate_action_prompt", side_effect=_fake_build):
+        with patch("core.mechanics.build_validate_action_parts", side_effect=_fake_build):
             with patch("core.mechanics.model_worker.generate_content",
                        return_value=_make_censor_response()):
                 with patch("core.mechanics.clean_and_parse_json", return_value=censor_result):
@@ -249,7 +249,7 @@ class TestValidateActionGoldExtraction:
 
         captured_args = []
         captured_kwargs = []
-        original_build = build_validate_action_prompt
+        original_build = build_validate_action_parts
 
         def _fake_build(*args, **kwargs):
             captured_args.append(args)
@@ -262,7 +262,7 @@ class TestValidateActionGoldExtraction:
             from core.mechanics import validate_action
             return await validate_action("Щось зробити", profile)
 
-        with patch("core.mechanics.build_validate_action_prompt", side_effect=_fake_build):
+        with patch("core.mechanics.build_validate_action_parts", side_effect=_fake_build):
             with patch("core.mechanics.model_worker.generate_content",
                        return_value=_make_censor_response()):
                 with patch("core.mechanics.clean_and_parse_json", return_value=censor_result):

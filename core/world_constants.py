@@ -1211,6 +1211,25 @@ def format_scenes_for_prompt(location: str) -> str:
     return "\n".join(lines)
 
 
+def format_scene_names_for_prompt(location: str) -> str:
+    """Лише канонічні назви сцен локації (рядки "- Назва") для Worker. Без NPC-пулів/hints.
+
+    Те саме джерело, що валідація/autocorrect у mechanics.py (LOCATION_SCENES).
+    TRAVEL_LOCATION / порожня / невідома локація -> "" (Worker бере fallback-правило).
+    """
+    if not location or location == TRAVEL_LOCATION:
+        return ""
+    loc_data = LOCATION_SCENES.get(location)
+    if not loc_data:
+        return ""
+    names: list[str] = []
+    for scene_names in loc_data.values():
+        for s in scene_names:
+            if s not in names:
+                names.append(s)
+    return "\n".join(f"- {s}" for s in names)
+
+
 # Категорія → (emoji, укр label) у стабільному порядку від публічних до прихованих.
 PLAYER_MAP_CATEGORIES: dict[str, tuple[str, str]] = {
     "hub":         ("🏛️", "Публічні місця"),

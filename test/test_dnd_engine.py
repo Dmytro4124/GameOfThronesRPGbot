@@ -150,8 +150,8 @@ def _patches_for_resolve(worker_data: dict = None, fail_llm: bool = False):
     )
 
     prompt_patch = patch(
-        "core.dnd_engine.build_normal_resolve_prompt",
-        return_value="MOCK_PROMPT",
+        "core.dnd_engine.build_normal_resolve_parts",
+        return_value=("MOCK_STATIC", "MOCK_PROMPT"),
     )
 
     return [gen_patch, parse_patch, prompt_patch]
@@ -496,8 +496,8 @@ class TestResolveNormalAction:
             )
 
         prompt_patch = patch(
-            "core.dnd_engine.build_normal_resolve_prompt",
-            return_value="MOCK_PROMPT",
+            "core.dnd_engine.build_normal_resolve_parts",
+            return_value=("MOCK_STATIC", "MOCK_PROMPT"),
         )
         with prompt_patch:
             with patch(
@@ -1255,14 +1255,14 @@ class TestResolveNormalActionPassesSchema:
         return _mock_gen, captured
 
     def test_schema_config_is_passed_not_none(self):
-        """resolve_normal_action must pass a non-None config with response_mime_type='application/json'.
-        response_schema must NOT be set: strict constrained decoding caused
-        14-min hangs on gemma-4-31b-it preview (schema parameter is now a no-op).
-        """
+        """resolve_normal_action passes config with response_mime_type='application/json'
+        and response_schema == WORKER_NORMAL_SCHEMA (Stage 2)."""
+        from core.prompts import WORKER_NORMAL_SCHEMA
+        from core.ai_client import build_strict_config, model_worker
         data = _minimal_worker_data()
         mock_gen, captured = self._capture_config_and_return(data)
 
-        prompt_patch = patch("core.dnd_engine.build_normal_resolve_prompt", return_value="MOCK")
+        prompt_patch = patch("core.dnd_engine.build_normal_resolve_parts", return_value=("MOCK_STATIC", "MOCK"))
         parse_patch = patch("core.dnd_engine.clean_and_parse_json", return_value=data)
 
         async def _run():
@@ -1276,46 +1276,33 @@ class TestResolveNormalActionPassesSchema:
         assert len(captured) >= 1, "generate_content must be called at least once"
         cfg = captured[0]
         assert cfg is not None, "config must not be None"
-        assert cfg.response_mime_type == "application/json", (
-            f"response_mime_type must be 'application/json', got {cfg.response_mime_type!r}"
-        )
-        assert not hasattr(cfg, "response_schema") or cfg.response_schema is None, (
-            "response_schema must be None: strict schema causes 14-min hangs"
-        )
+        assert cfg.response_mime_type == "application/json"
+        expected = build_strict_config(model_worker, schema=WORKER_NORMAL_SCHEMA).response_schema
+        assert cfg.response_schema == expected
 
-    def test_schema_config_fallback_on_invalid_argument(self):
-        """If generate_content raises INVALID_ARGUMENT (schema rejected),
-        resolve_normal_action must fall back to a free-JSON call and succeed."""
-        data = _minimal_worker_data()
-        call_count = []
+    def test_invalid_argument_no_longer_triggers_no_config_fallback(self):
+        """Stage 1: the "Schema rejected -> free JSON without config" fallback was removed.
+        INVALID_ARGUMENT goes through the generic 1-retry error handling; every call
+        keeps config (never config=None) and, if both fail, AUTO_SUCCESS fallback is used."""
+        configs = []
 
-        def _mock_gen_fallback(prompt, max_retries=6, config=None):
-            call_count.append(config)
-            if config is not None:
-                raise Exception("400 INVALID_ARGUMENT: schema not supported")
-            m = MagicMock()
-            import json as _json
-            m.text = _json.dumps(data, ensure_ascii=False)
-            return m
+        def _mock_gen(prompt, max_retries=6, config=None):
+            configs.append(config)
+            raise Exception("400 INVALID_ARGUMENT: schema not supported")
 
-        prompt_patch = patch("core.dnd_engine.build_normal_resolve_prompt", return_value="MOCK")
-        parse_patch = patch("core.dnd_engine.clean_and_parse_json", return_value=data)
+        prompt_patch = patch("core.dnd_engine.build_normal_resolve_parts", return_value=("MOCK_STATIC", "MOCK"))
 
         async def _run():
             from core.dnd_engine import resolve_normal_action
             return await resolve_normal_action("Do something", _dnd_profile())
 
-        with prompt_patch, parse_patch:
-            with patch("core.dnd_engine.model_worker.generate_content", side_effect=_mock_gen_fallback):
+        with prompt_patch:
+            with patch("core.dnd_engine.model_worker.generate_content", side_effect=_mock_gen):
                 verdict, updates = _run_async(_run())
 
-        # First call with schema (raises), second call without schema (succeeds)
-        assert len(call_count) == 2, (
-            f"Must call generate_content twice (schema then fallback). Got {len(call_count)}"
-        )
-        assert call_count[0] is not None, "First call must have config (schema attempt)"
-        assert call_count[1] is None, "Second call (fallback) must have config=None"
-        assert updates["outcome"] in {"SUCCESS", "FAILURE", "CRITICAL SUCCESS", "CRITICAL FAILURE"}
+        assert len(configs) == 2, f"1 initial + 1 retry expected, got {len(configs)}"
+        assert all(c is not None for c in configs), "no call may drop config (no free-JSON fallback)"
+        assert updates["outcome"] == "SUCCESS" and updates["difficulty"] == 2  # AUTO_SUCCESS degrade
 
     def test_build_strict_config_inherits_temperature(self):
         """build_strict_config must use model_wrapper.temperature if no override given."""
@@ -1342,7 +1329,7 @@ class TestResolveNormalActionPassesSchema:
         from core.ai_client import build_strict_config, model_worker
         cfg = build_strict_config(model_worker)
         assert cfg.response_mime_type == "application/json"
-        assert not hasattr(cfg, "response_schema") or cfg.response_schema is None
+        assert cfg.response_schema is None  # no schema argument -> prompt-only JSON
 
 
 class TestValidateActionPassesSchema:
@@ -1375,34 +1362,48 @@ class TestValidateActionPassesSchema:
         assert captured[0] is not None, "validate_action config must not be None"
         assert captured[0].response_mime_type == "application/json"
 
-    def test_validate_action_schema_fallback(self):
-        """When schema raises INVALID_ARGUMENT, validate_action falls back gracefully."""
+    def test_validate_action_passes_censor_schema(self):
+        """validate_action passes response_schema == CENSOR_SCHEMA."""
+        from core.prompts import CENSOR_SCHEMA
+        from core.ai_client import build_strict_config, model_worker
+        captured = []
         censor_result = {"is_valid": True, "refusal_reason": ""}
-        call_count = []
 
-        def _mock_gen_fallback(prompt, max_retries=6, config=None):
-            call_count.append(config)
-            if config is not None:
-                raise Exception("INVALID_ARGUMENT: unsupported schema")
+        def _mock_gen(prompt, max_retries=6, config=None):
+            captured.append(config)
             m = MagicMock()
-            import json as _json
-            m.text = _json.dumps(censor_result)
+            m.text = "{}"
             return m
-
-        parse_patch = patch("core.mechanics.clean_and_parse_json", return_value=censor_result)
 
         async def _run():
             from core.mechanics import validate_action
             return await validate_action("Attack the guard", _dnd_profile())
 
-        with parse_patch:
-            with patch("core.mechanics.model_worker.generate_content", side_effect=_mock_gen_fallback):
-                valid, reason = _run_async(_run())
+        with patch("core.mechanics.clean_and_parse_json", return_value=censor_result):
+            with patch("core.mechanics.model_worker.generate_content", side_effect=_mock_gen):
+                _run_async(_run())
 
-        assert valid is True
-        assert len(call_count) == 2, (
-            f"Must call twice (schema attempt + fallback). Got {len(call_count)}"
-        )
+        expected = build_strict_config(model_worker, schema=CENSOR_SCHEMA).response_schema
+        assert captured[0].response_schema == expected
+
+    def test_validate_action_llm_error_single_call_fail_open(self):
+        """Local schema-rejected fallback removed (centralised in AIWrapper):
+        on exception validate_action makes ONE call and fails open (True, '')."""
+        call_count = []
+
+        def _mock_gen(prompt, max_retries=6, config=None):
+            call_count.append(config)
+            raise Exception("INVALID_ARGUMENT: unsupported schema")
+
+        async def _run():
+            from core.mechanics import validate_action
+            return await validate_action("Attack the guard", _dnd_profile())
+
+        with patch("core.mechanics.model_worker.generate_content", side_effect=_mock_gen):
+            valid, reason = _run_async(_run())
+
+        assert valid is True and reason == ""
+        assert len(call_count) == 1, f"no local retry expected, got {len(call_count)}"
 
 
 # ===========================================================================
@@ -2413,8 +2414,8 @@ class TestWorkerRetry:
             return m
 
         prompt_patch = patch(
-            "core.dnd_engine.build_normal_resolve_prompt",
-            return_value="MOCK_PROMPT",
+            "core.dnd_engine.build_normal_resolve_parts",
+            return_value=("MOCK_STATIC", "MOCK_PROMPT"),
         )
         # clean_and_parse_json: return None for None text (guarded in loop), valid dict for valid text
         original_parse = None
@@ -2467,8 +2468,8 @@ class TestWorkerRetry:
             return m
 
         prompt_patch = patch(
-            "core.dnd_engine.build_normal_resolve_prompt",
-            return_value="MOCK_PROMPT",
+            "core.dnd_engine.build_normal_resolve_parts",
+            return_value=("MOCK_STATIC", "MOCK_PROMPT"),
         )
         # clean_and_parse_json is never called (guarded by `if _raw_text else None`)
         # but patch it for safety to ensure no unexpected calls
@@ -2525,7 +2526,7 @@ class TestNpcsInSceneRelation:
 
         def _mock_prompt(**kwargs):
             captured_npcs.extend(kwargs.get("npcs_in_scene", []))
-            return "MOCK_PROMPT"
+            return ("MOCK_STATIC", "MOCK_PROMPT")
 
         async def _run():
             from core.dnd_engine import resolve_normal_action
@@ -2542,7 +2543,7 @@ class TestNpcsInSceneRelation:
         )
         parse_patch = patch("core.dnd_engine.clean_and_parse_json", return_value=data)
         prompt_patch = patch(
-            "core.dnd_engine.build_normal_resolve_prompt",
+            "core.dnd_engine.build_normal_resolve_parts",
             side_effect=_mock_prompt,
         )
 
@@ -2567,7 +2568,7 @@ class TestNpcsInSceneRelation:
 
         def _mock_prompt(**kwargs):
             captured_npcs.extend(kwargs.get("npcs_in_scene", []))
-            return "MOCK_PROMPT"
+            return ("MOCK_STATIC", "MOCK_PROMPT")
 
         async def _run():
             from core.dnd_engine import resolve_normal_action
@@ -2582,7 +2583,7 @@ class TestNpcsInSceneRelation:
             patch("core.dnd_engine.model_worker.generate_content",
                   return_value=_make_llm_response(data)),
             patch("core.dnd_engine.clean_and_parse_json", return_value=data),
-            patch("core.dnd_engine.build_normal_resolve_prompt", side_effect=_mock_prompt),
+            patch("core.dnd_engine.build_normal_resolve_parts", side_effect=_mock_prompt),
         ):
             _run_async(_run())
 
@@ -2599,7 +2600,7 @@ class TestNpcsInSceneRelation:
 
         def _mock_prompt(**kwargs):
             captured_npcs.extend(kwargs.get("npcs_in_scene", []))
-            return "MOCK_PROMPT"
+            return ("MOCK_STATIC", "MOCK_PROMPT")
 
         async def _run():
             from core.dnd_engine import resolve_normal_action
@@ -2614,7 +2615,7 @@ class TestNpcsInSceneRelation:
             patch("core.dnd_engine.model_worker.generate_content",
                   return_value=_make_llm_response(data)),
             patch("core.dnd_engine.clean_and_parse_json", return_value=data),
-            patch("core.dnd_engine.build_normal_resolve_prompt", side_effect=_mock_prompt),
+            patch("core.dnd_engine.build_normal_resolve_parts", side_effect=_mock_prompt),
         ):
             _run_async(_run())
 
@@ -2632,7 +2633,7 @@ class TestNpcsInSceneRelation:
 
         def _mock_prompt(**kwargs):
             captured_npcs.extend(kwargs.get("npcs_in_scene", []))
-            return "MOCK_PROMPT"
+            return ("MOCK_STATIC", "MOCK_PROMPT")
 
         async def _run():
             from core.dnd_engine import resolve_normal_action
@@ -2647,7 +2648,7 @@ class TestNpcsInSceneRelation:
             patch("core.dnd_engine.model_worker.generate_content",
                   return_value=_make_llm_response(data)),
             patch("core.dnd_engine.clean_and_parse_json", return_value=data),
-            patch("core.dnd_engine.build_normal_resolve_prompt", side_effect=_mock_prompt),
+            patch("core.dnd_engine.build_normal_resolve_parts", side_effect=_mock_prompt),
         ):
             _run_async(_run())
 
@@ -2665,7 +2666,7 @@ class TestNpcsInSceneRelation:
 
         def _mock_prompt(**kwargs):
             captured_npcs.extend(kwargs.get("npcs_in_scene", []))
-            return "MOCK_PROMPT"
+            return ("MOCK_STATIC", "MOCK_PROMPT")
 
         async def _run():
             from core.dnd_engine import resolve_normal_action
@@ -2680,7 +2681,7 @@ class TestNpcsInSceneRelation:
             patch("core.dnd_engine.model_worker.generate_content",
                   return_value=_make_llm_response(data)),
             patch("core.dnd_engine.clean_and_parse_json", return_value=data),
-            patch("core.dnd_engine.build_normal_resolve_prompt", side_effect=_mock_prompt),
+            patch("core.dnd_engine.build_normal_resolve_parts", side_effect=_mock_prompt),
         ):
             _run_async(_run())
 
@@ -2698,7 +2699,7 @@ class TestNpcsInSceneRelation:
 
         def _mock_prompt(**kwargs):
             captured_npcs.extend(kwargs.get("npcs_in_scene", []))
-            return "MOCK_PROMPT"
+            return ("MOCK_STATIC", "MOCK_PROMPT")
 
         npc_reputation = {
             "Джон Сноу": 85,   # "Абсолютна довіра"
@@ -2719,7 +2720,7 @@ class TestNpcsInSceneRelation:
             patch("core.dnd_engine.model_worker.generate_content",
                   return_value=_make_llm_response(data)),
             patch("core.dnd_engine.clean_and_parse_json", return_value=data),
-            patch("core.dnd_engine.build_normal_resolve_prompt", side_effect=_mock_prompt),
+            patch("core.dnd_engine.build_normal_resolve_parts", side_effect=_mock_prompt),
         ):
             _run_async(_run())
 
@@ -2749,7 +2750,7 @@ class TestNpcsInSceneRelation:
 
         def _mock_prompt(**kwargs):
             captured_npcs.extend(kwargs.get("npcs_in_scene", []))
-            return "MOCK_PROMPT"
+            return ("MOCK_STATIC", "MOCK_PROMPT")
 
         async def _run():
             from core.dnd_engine import resolve_normal_action
@@ -2764,7 +2765,7 @@ class TestNpcsInSceneRelation:
             patch("core.dnd_engine.model_worker.generate_content",
                   return_value=_make_llm_response(data)),
             patch("core.dnd_engine.clean_and_parse_json", return_value=data),
-            patch("core.dnd_engine.build_normal_resolve_prompt", side_effect=_mock_prompt),
+            patch("core.dnd_engine.build_normal_resolve_parts", side_effect=_mock_prompt),
         ):
             _run_async(_run())
 

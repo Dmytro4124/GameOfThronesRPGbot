@@ -428,7 +428,7 @@ def _patches_for_resolve(worker_data: dict):
         patch("core.dnd_engine.model_worker.generate_content",
               return_value=MagicMock(text=json.dumps(worker_data))),
         patch("core.dnd_engine.clean_and_parse_json", return_value=worker_data),
-        patch("core.dnd_engine.build_normal_resolve_prompt", return_value="MOCK_PROMPT"),
+        patch("core.dnd_engine.build_normal_resolve_parts", return_value=("MOCK_STATIC", "MOCK_PROMPT")),
         # GODMODE: patch at the source module so the local `from config import` picks it up
         patch("config.GODMODE_USERS", new=set()),
     ]
@@ -668,8 +668,8 @@ def test_integration_llm_failure_no_exception_auto_success():
             return_value=None,
         ))
         stack.enter_context(patch(
-            "core.dnd_engine.build_normal_resolve_prompt",
-            return_value="MOCK_PROMPT",
+            "core.dnd_engine.build_normal_resolve_parts",
+            return_value=("MOCK_STATIC", "MOCK_PROMPT"),
         ))
 
         verdict, updates = asyncio.run(_coro())
