@@ -307,6 +307,7 @@ In-memory структури без локів — навмисний компр
 - `combat_state._state_locks: dict[chat_id, asyncio.Lock]` (`core/combat_state.py`) — атомарність COMBAT pipeline
 - `narrator_ab._pending: dict[chat_id, PendingChoice]` / `_last_turn_id` (`core/narrator_ab.py`) — in-memory, губляться при рестарті. `pop_pending` — єдина точка звільнення (vote-callback, TTL-expiry, рестарт гри); історія пишеться через `commit_narration_to_history` лише після pop, у `try/finally` з `append_log`.
 - `core/ai_client.py` кеш-реєстри (доступ з потоків `asyncio.to_thread`): `_CACHE_REGISTRY`, `_CACHE_DENY` (під `threading.Lock` `_CACHE_LOCK`), `_CACHE_KEY_LOCKS` (per-key lock на `caches.create`; мережевий виклик НЕ під `_CACHE_LOCK`), `_REJECTED_SCHEMAS` (set без лока — лише `add`/`in`, атомарно під GIL). Усі — process-local, губляться при рестарті (це ок: кеш — лише оптимізація).
+- Per-turn ContextVar-и (ізоляція між гравцями — кожен Telegram update = окремий Task): `_call_meta_var` / `_call_ctx_var` (`core/ai_client.py`, збір метаданих LLM-викликів для debug trace; вмикається ЛИШЕ в debug-режимі; list ділиться з потоками `to_thread` — лише `append`), `_debug_meta_var` і `_narr_diag_var` (`core/engine.py`; `_debug_meta_cleanup` скидає збір у `finally` на будь-якому виході з `process_game_turn`). Тексти помилок у trace — лише через `mask_secrets`.
 
 **COMBAT lock pattern** (обов'язково при integration з `combat_state`):
 ```python
@@ -352,7 +353,7 @@ python qa_auto_test.py
 
 Адмін-ID для cheat-команд хардкоднуто у `config.py:ADMIN_TELEGRAM_IDS`.
 
-ENV-змінні: `TELEGRAM_TOKEN`, `GEMINI_API_KEY` (+ `GEMINI_API_KEY_TEST_*` для ротації квот), `SPREADSHEET_ID`, `GOOGLE_CREDENTIALS_JSON`, `WEBHOOK_URL`, `PORT`. Опційні: `MODEL_*_NAME` (rollback моделей), `GEMINI_EXPLICIT_CACHE` (default 0), `NARRATOR_AB_ENABLED`, `NARRATOR_AB_SINK`.
+ENV-змінні: `TELEGRAM_TOKEN`, `GEMINI_API_KEY` (+ `GEMINI_API_KEY_TEST_*` для ротації квот), `SPREADSHEET_ID`, `GOOGLE_CREDENTIALS_JSON`, `WEBHOOK_URL`, `PORT`. Опційні: `MODEL_*_NAME` (rollback моделей), `GEMINI_EXPLICIT_CACHE` (default 0), `NARRATOR_AB_ENABLED`, `NARRATOR_AB_SINK`, `NARRATOR_THINKING_LEVEL` (high|medium|low|minimal, default high), `NARRATOR_PREAMBLE` (explicit|neutral, default explicit — експеримент із блоками `PROHIBITED_CONTENT`; читаються при старті процесу, на Render достатньо рестарту).
 
 ---
 

@@ -5,7 +5,7 @@ test_narrator_fallback.py
 - Шар 1: трункований але змістовний текст (≥100 символів) → приймається з "…", retry НЕ запускається.
 - Шар 2: retry (другий виклик generate_content).
 - Шар 3: третя спроба blocking з temperature=0.5.
-- Last-resort: _build_deterministic_narrative → художній абзац ≥100 символів без "⚠️"/"помилка"/"Майстер".
+- Last-resort: _build_deterministic_narrative → notes/факти + примітка (не ≥100 символів) без "⚠️"/"помилка"/"Майстер".
 - 📊 блок показується ЗАВЖДИ (навіть при last-resort).
 
 Async-тести запускаються через asyncio.run() (без pytest-asyncio — відповідно до
@@ -115,8 +115,12 @@ def _make_narrator_response(text: str):
 
 
 def _make_empty_narrator_response():
+    # prompt_feedback/candidates задані явно: голий MagicMock має truthy
+    # prompt_feedback.block_reason і _is_content_block вважав би його блоком контент-фільтра.
     r = MagicMock()
     r.text = ""
+    r.candidates = []
+    r.prompt_feedback = None
     return r
 
 
@@ -204,10 +208,12 @@ def test_narrator_double_fail_returns_deterministic_narrative_with_summary():
     # change_log може бути порожнім. Але _narrator_failed=True не впливає на це —
     # перевіряємо що story має ≥ 100 символів.
     story_part = result_text.split("📊")[0] if "📊" in result_text else result_text
-    assert len(story_part.strip()) >= 100, (
-        f"Narrative part before '📊' must be ≥ 100 chars. Got {len(story_part.strip())} chars. "
-        f"Full text: {result_text!r}"
+    # Нова поведінка: notes з GM_Logic ("Hero stands in the hall.") + примітка курсивом.
+    assert "Hero stands in the hall." in story_part, (
+        f"Last-resort must contain director_notes facts. Got: {result_text!r}"
     )
+    assert "Детальний опис сцени тимчасово недоступний" in story_part
+    assert "неможливо описати" not in story_part  # не content-block гілка
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -316,7 +322,7 @@ def test_narrator_third_attempt_recovers():
 # ТЕСТ 4 (НОВИЙ): Unit-тест _build_deterministic_narrative — 3 сценарії
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_build_deterministic_narrative_outputs_min_100_chars():
+def test_build_deterministic_narrative_old_branch_content():
     """
     Прямий unit-тест на _build_deterministic_narrative.
     Перевіряє 3 сценарії:
@@ -344,9 +350,9 @@ def test_build_deterministic_narrative_outputs_min_100_chars():
     result_a = _build_deterministic_narrative(
         updates_a, profile_a, old_location="Вінтерфелл", old_scene="Зала"
     )
-    assert len(result_a) >= 100, (
-        f"Scenario A: result must be ≥100 chars, got {len(result_a)}: {result_a!r}"
-    )
+    assert "Ви залишили *Вінтерфелл* і вирушили до *Штормовий берег*" in result_a
+    assert "Вестерос продовжував" not in result_a
+    assert result_a.endswith("_Детальний опис сцени тимчасово недоступний._")
     assert "Штормовий берег" in result_a, (
         f"Scenario A: new location must appear in result. Got: {result_a!r}"
     )
@@ -370,9 +376,9 @@ def test_build_deterministic_narrative_outputs_min_100_chars():
     result_b = _build_deterministic_narrative(
         updates_b, profile_b, old_location="Вінтерфелл", old_scene="Зала"
     )
-    assert len(result_b) >= 100, (
-        f"Scenario B: result must be ≥100 chars, got {len(result_b)}: {result_b!r}"
-    )
+    assert "Ви перебуваєте у *Вінтерфелл*." in result_b
+    assert "Минуло кілька хвилин." in result_b
+    assert result_b.endswith("_Детальний опис сцени тимчасово недоступний._")
     assert "⚠️" not in result_b
     assert "помилка" not in result_b.lower()
     assert "майстер" not in result_b.lower()
@@ -394,9 +400,8 @@ def test_build_deterministic_narrative_outputs_min_100_chars():
     result_c = _build_deterministic_narrative(
         updates_c, profile_c, old_location="Вінтерфелл", old_scene="Зала"
     )
-    assert len(result_c) >= 100, (
-        f"Scenario C: result must be ≥100 chars, got {len(result_c)}: {result_c!r}"
-    )
+    assert result_c.strip() and "Обстановка навколо вас змінилась." in result_c
+    assert result_c.endswith("_Детальний опис сцени тимчасово недоступний._")
     assert "⚠️" not in result_c
     assert "помилка" not in result_c.lower()
     assert "майстер" not in result_c.lower()

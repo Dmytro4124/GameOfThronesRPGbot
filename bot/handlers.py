@@ -1398,7 +1398,7 @@ async def back_to_houses_handler(call: CallbackQuery):
                                  parse_mode='Markdown')
 
 
-def _section_header(num: int, title: str) -> str:
+def _section_header(num, title: str) -> str:
     """Box-style section header for debug trace file."""
     bar = "═" * 68
     return f"\n{bar}\n║ STAGE {num}: {title}\n{bar}"
@@ -1408,6 +1408,20 @@ def _subsection(label: str) -> str:
     """Sub-section divider for INPUT / THOUGHTS / OUTPUT blocks."""
     dashes = "─" * max(0, 64 - len(label))
     return f"\n┌─ {label} {dashes}"
+
+
+def _trace_rows(items) -> list:
+    """Готові рядки trace -> list[str] з defense-in-depth mask_secrets (без обрізання)."""
+    from core.ai_client import mask_secrets
+    return [mask_secrets(x, limit=None) for x in (items or []) if x not in (None, "")]
+
+
+def _trace_block(label: str, items) -> list:
+    """Підблок з рамкою. Порожньо -> [] (без порожніх рамок)."""
+    rows = _trace_rows(items)
+    if not rows:
+        return []
+    return [_subsection(label), "\n".join(rows)]
 
 
 async def _send_debug_trace_file(bot: Bot, chat_id: int, trace: dict) -> None:
@@ -1421,6 +1435,9 @@ async def _send_debug_trace_file(bot: Bot, chat_id: int, trace: dict) -> None:
     inner_meta = "║" + f"  Chat ID: {trace.get('chat_id')}  |  {ts_iso}".ljust(68) + "║"
     bottom = "╚" + "═" * 68 + "╝"
     lines.extend([outer, inner_title, inner_meta, bottom])
+    header_rows = _trace_rows(trace.get("header"))
+    if header_rows:
+        lines.append("\n".join(header_rows))
 
     # ── Stage 1: Player action ────────────────────────────────────────────────
     lines.append(_section_header(1, "PLAYER ACTION (input)"))
@@ -1443,6 +1460,7 @@ async def _send_debug_trace_file(bot: Bot, chat_id: int, trace: dict) -> None:
 
     lines.append(_subsection("OUTPUT (parsed JSON)"))
     lines.append(json.dumps(censor.get("parsed") or {}, ensure_ascii=False, indent=2))
+    lines.extend(_trace_block("METRICS", censor.get("metrics")))
 
     # ── Stage 3: Worker ───────────────────────────────────────────────────────
     worker = trace.get("worker") or {}
@@ -1462,9 +1480,11 @@ async def _send_debug_trace_file(bot: Bot, chat_id: int, trace: dict) -> None:
     lines.append(_subsection("OUTPUT (parsed JSON)"))
     parsed_w = worker.get("parsed")
     lines.append(json.dumps(parsed_w, ensure_ascii=False, indent=2) if parsed_w else "<None — Worker skipped or failed>")
+    lines.extend(_trace_block("ROSTER", worker.get("roster")))
 
     lines.append(_subsection("RAW LLM RESPONSE"))
     lines.append(worker.get("raw") or "<not captured>")
+    lines.extend(_trace_block("METRICS", worker.get("metrics")))
 
     # ── Stage 4: GM_Logic ─────────────────────────────────────────────────────
     gm = trace.get("gm_logic") or {}
@@ -1484,9 +1504,11 @@ async def _send_debug_trace_file(bot: Bot, chat_id: int, trace: dict) -> None:
     lines.append(_subsection("OUTPUT (parsed JSON)"))
     parsed_gm = gm.get("parsed")
     lines.append(json.dumps(parsed_gm, ensure_ascii=False, indent=2) if parsed_gm else "<None — GM_Logic skipped or failed>")
+    lines.extend(_trace_block("ROSTER", gm.get("roster")))
 
     lines.append(_subsection("RAW LLM RESPONSE"))
     lines.append(gm.get("raw") or "<not captured>")
+    lines.extend(_trace_block("METRICS", gm.get("metrics")))
 
     # ── Stage 5: Narrator ─────────────────────────────────────────────────────
     nar = trace.get("narrator") or {}
@@ -1505,11 +1527,23 @@ async def _send_debug_trace_file(bot: Bot, chat_id: int, trace: dict) -> None:
 
     lines.append(_subsection("FINAL TEXT"))
     lines.append(nar.get("final_text") or "<empty>")
+    lines.extend(_trace_block("METRICS", nar.get("metrics")))
+
+    diag_rows = _trace_rows(trace.get("narrator_diag"))
+    if diag_rows:
+        lines.append(_section_header("5b", "NARRATOR — DIAGNOSTICS"))
+        lines.append("\n".join(diag_rows))
 
     # ── Stage 6: Mechanical impacts ───────────────────────────────────────────
     lines.append(_section_header(6, "MECHANICAL IMPACTS"))
     for log in trace.get("logs") or []:
         lines.append(f"  - {log}")
+
+    # Turn total: header вже містить "Turn total time" -> не дублюємо.
+    total_s = trace.get("total_s")
+    if isinstance(total_s, (int, float)) and not any(
+            "turn total time" in str(h).lower() for h in (trace.get("header") or [])):
+        lines.append(f"\nTurn total time: {total_s:.2f}s")
 
     # ── Footer ────────────────────────────────────────────────────────────────
     bar = "═" * 68

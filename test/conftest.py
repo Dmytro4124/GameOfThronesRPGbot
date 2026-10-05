@@ -38,7 +38,8 @@ if GUARD_ACTIVE:
     os.environ["NARRATOR_AB_LOG_PATH"] = os.path.join(
         tempfile.mkdtemp(prefix="got_tests_"), "narrator_ab.jsonl")
     for _k in ("MODEL_MAIN_NAME", "MODEL_WORKER_NAME", "MODEL_GM_LOGIC_NAME",
-               "MODEL_NARRATOR_NAME", "MODEL_NARRATOR_ALT_NAME", "WEBHOOK_URL"):
+               "MODEL_NARRATOR_NAME", "MODEL_NARRATOR_ALT_NAME", "WEBHOOK_URL",
+               "NARRATOR_THINKING_LEVEL", "NARRATOR_PREAMBLE"):
         os.environ.pop(_k, None)
 
     import gspread

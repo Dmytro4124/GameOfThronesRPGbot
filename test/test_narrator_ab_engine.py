@@ -189,11 +189,35 @@ def test_chain_truncated_short_text_triggers_retry():
     assert r.final_attempt == 2
 
 
-def test_chain_attempt_2_exception_propagates():
-    """Documented behaviour: exceptions from attempt 2 propagate (pre-refactor parity)."""
+def test_chain_attempt_2_exception_not_propagated_attempt_3_runs():
+    wrapper = MagicMock()
+    wrapper.generate_content.side_effect = [RuntimeError("a2 boom"), _resp(_LONG_OK)]
+    r = _chain(wrapper, AsyncMock(return_value=_resp("")))
+    assert r.used_fallback is False and r.text == _LONG_OK and r.final_attempt == 3
+    assert wrapper.generate_content.call_count == 2  # attempt 2 (raised) + attempt 3
+
+
+def test_chain_attempt_2_exception_and_all_fail_gives_fallback():
+    wrapper = MagicMock()
+    wrapper.generate_content.side_effect = RuntimeError("boom")
+    r = _chain(wrapper, AsyncMock(return_value=_resp("")))
+    assert r.used_fallback is True and r.text is None and r.final_attempt == "fallback"
+    assert len(r.attempt_ms) == 3
+
+
+def test_chain_attempt_2_exception_is_logged(caplog):
+    import logging
     wrapper = MagicMock()
     wrapper.generate_content.side_effect = RuntimeError("a2 boom")
-    with pytest.raises(RuntimeError, match="a2 boom"):
+    with caplog.at_level(logging.WARNING):
+        _chain(wrapper, AsyncMock(return_value=_resp("")))
+    assert any("Attempt 2 raised" in r.getMessage() for r in caplog.records)
+
+
+def test_chain_attempt_2_cancelled_error_propagates():
+    wrapper = MagicMock()
+    wrapper.generate_content.side_effect = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
         _chain(wrapper, AsyncMock(return_value=_resp("")))
 
 
@@ -414,7 +438,9 @@ def test_ab_both_failed_deterministic_and_log_reason():
     try:
         (text, actions), flags, log_mock = _run_turn(930, _patches(), chain)
         story = text.split("📊")[0]
-        assert len(story.strip()) >= 100
+        # director_notes з _GM_JSON ("Hero stands.") + примітка про недоступність опису
+        assert "Hero stands." in story
+        assert "Детальний опис сцени тимчасово недоступний" in story
         assert "⚠️" not in text and "помилка" not in text.lower() and "майстер" not in text.lower()
         assert na.get_pending(930) is None and flags == [True]
         rec = log_mock.await_args.args[0]

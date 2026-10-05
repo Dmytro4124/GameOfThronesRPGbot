@@ -63,6 +63,29 @@ NARRATOR_AB_SINK = os.getenv("NARRATOR_AB_SINK", "both").strip().lower()  # file
 if NARRATOR_AB_SINK not in ("file", "sheets", "both"):
     NARRATOR_AB_SINK = "both"
 
+# ЕКСПЕРИМЕНТ: блоки PROHIBITED_CONTENT у Narrator (flash-lite). Два перемикачі для матриці на Render без деплою.
+# NARRATOR_THINKING_LEVEL: high|medium|low|minimal (default high = поточна поведінка).
+# NARRATOR_PREAMBLE: explicit|neutral (default explicit = поточна "uncensored" преамбула).
+# Повернення до попередньої поведінки: прибрати обидві ENV (або high / explicit). Невалідне -> default + warning.
+_NARRATOR_THINKING_LEVELS = ("high", "medium", "low", "minimal")
+_NARRATOR_PREAMBLES = ("explicit", "neutral")
+
+
+def _env_choice(name: str, allowed: tuple, default: str) -> str:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    val = raw.strip().lower()
+    if val not in allowed:
+        logging.getLogger(__name__).warning(
+            "Invalid %s=%r (allowed: %s); falling back to %r", name, raw, "|".join(allowed), default)
+        return default
+    return val
+
+
+NARRATOR_THINKING_LEVEL = _env_choice("NARRATOR_THINKING_LEVEL", _NARRATOR_THINKING_LEVELS, "high")
+NARRATOR_PREAMBLE = _env_choice("NARRATOR_PREAMBLE", _NARRATOR_PREAMBLES, "explicit")
+
 # Налаштування температури моделей
 MODEL_MAIN_TEMP = 0.7   # Для генерації сюжету та креативних описів
 MODEL_WORKER_TEMP = 0.1 # Для точного суддівства та парсингу JSON

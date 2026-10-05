@@ -115,8 +115,11 @@ def _make_narrator_response(text: str):
 
 
 def _make_empty_narrator_response():
+    # prompt_feedback/candidates явні: голий MagicMock має truthy block_reason (= "блок").
     r = MagicMock()
     r.text = ""
+    r.candidates = []
+    r.prompt_feedback = None
     return r
 
 
@@ -308,10 +311,10 @@ def test_streaming_last_resort_pushes_to_queue():
     )
 
     last_resort_text = non_none[0]
-    assert len(last_resort_text) >= 100, (
-        f"Last-resort text must be ≥ 100 chars. Got {len(last_resort_text)} chars: "
-        f"{last_resort_text!r}"
+    assert "Hero stands in the hall." in last_resort_text, (
+        f"Last-resort text must contain director_notes facts. Got: {last_resort_text!r}"
     )
+    assert "Детальний опис сцени тимчасово недоступний" in last_resort_text
     assert "⚠️" not in last_resort_text, (
         f"Last-resort text must NOT contain '⚠️'. Got: {last_resort_text!r}"
     )

@@ -4,6 +4,7 @@ import json
 import re
 import asyncio
 import contextvars
+import functools
 import logging
 
 logger = logging.getLogger(__name__)
@@ -205,7 +206,17 @@ def _build_impact_hints(impact_logs: list) -> str:
 _narr_diag_var: contextvars.ContextVar = contextvars.ContextVar("narr_diag", default=None)
 _FALLBACK_UNAVAILABLE_NOTE = "_Детальний опис сцени тимчасово недоступний._"
 _FALLBACK_BLOCKED_NOTE = "_Цю сцену неможливо описати детально. Спробуйте іншу дію._"
+_FALLBACK_SHORTENED_NOTE = "_Сцену описано скорочено._"
 _BLOCK_FINISH_MARKERS = ("PROHIBITED_CONTENT", "SAFETY", "BLOCKLIST", "SPII")
+# Для ТЕКСТУ винятків (не finish_reason): голе "SAFETY" дає хибнопозитив на конфіг-помилки
+# 400/INVALID_ARGUMENT, що згадують safety_settings. SAFETY -- лише окреме слово і НЕ
+# SAFETY_SETTINGS / "SAFETY SETTING(S)". Вхід уже uppercase.
+_BLOCK_EXC_RE = re.compile(r"PROHIBITED_CONTENT|BLOCKLIST|SPII|\bSAFETY\b(?![ _]?SETTING)")
+# Fallback-абзац із director_notes: макс. довжина (символів) і макс. кількість фактів.
+_FALLBACK_STORY_MAX_CHARS = 700
+_FALLBACK_STORY_MAX_FACTS = 4
+# Debug-діагностика roster: макс. кількість показаних попереджень.
+_ROSTER_WARN_LIMIT = 8
 _NOTE_PREFIX_RE = re.compile(
     r"^\s*(?:[-*•–—]+|\d+[.)])?\s*(?:(?:факт|fact|note|нотатка|director|gm)\s*\d*\s*[:\-–—]\s*)?",
     re.IGNORECASE,
@@ -229,11 +240,46 @@ def _is_content_block(obj) -> bool:
         pass
     try:
         pf = getattr(obj, "prompt_feedback", None)
-        if pf is not None and getattr(pf, "block_reason", None):
-            return True
+        if pf is not None:
+            br = getattr(pf, "block_reason", None)
+            # BLOCKED_REASON_UNSPECIFIED = "не заблоковано" (дефолт enum), НЕ блок.
+            if br and "UNSPECIFIED" not in str(br).upper():
+                return True
     except Exception:
         pass
     return False
+
+
+def _is_block_exception(exc) -> bool:
+    """True якщо текст/тип винятку містить ознаки блоку контент-фільтра Google
+    (SAFETY/PROHIBITED/BLOCKLIST/SPII)."""
+    try:
+        tname = type(exc).__name__.upper()
+        s = f"{tname} {exc}".upper()
+    except Exception:
+        return False
+    # Ім'я типу (напр. SafetyError/BlockedPromptException) -- довіряємо підрядку SAFETY;
+    # звуження стосується лише вільного тексту повідомлення.
+    if any(m in tname for m in _BLOCK_FINISH_MARKERS):
+        return True
+    return bool(_BLOCK_EXC_RE.search(s))
+
+
+def _is_abort_finish(fr) -> bool:
+    """Streaming fail-fast: finish_reason, після якого далі чекати чанки марно."""
+    s = str(fr).upper()
+    return "MALFORMED" in s or "OTHER" in s or any(m in s for m in _BLOCK_FINISH_MARKERS)
+
+
+def _narr_diag_note_exc(diag, exc, where: str) -> None:
+    """Виняток Narrator-виклику: ознаки блоку -> diag["content_blocked"]=True; у debug-режимі
+    ще й замаскований текст помилки -> diag["errors"] (для STAGE 5b)."""
+    if diag is None:
+        return
+    if _is_block_exception(exc):
+        diag["content_blocked"] = True
+    if _debug_meta_var.get():
+        diag.setdefault("errors", []).append(f"{where}: {type(exc).__name__}: {_mask(exc)}")
 
 
 def _fallback_story_from_notes(director_notes) -> str:
@@ -256,11 +302,11 @@ def _fallback_story_from_notes(director_notes) -> str:
         if t[-1] not in ".!?…":
             t += "."
         sentences.append(t[0].upper() + t[1:])
-        if len(sentences) >= 4:
+        if len(sentences) >= _FALLBACK_STORY_MAX_FACTS:
             break
     text = " ".join(sentences)
-    if len(text) > 700:
-        text = text[:700].rsplit(" ", 1)[0].rstrip(",;:") + "…"
+    if len(text) > _FALLBACK_STORY_MAX_CHARS:
+        text = text[:_FALLBACK_STORY_MAX_CHARS].rsplit(" ", 1)[0].rstrip(",;:") + "…"
     return text
 
 
@@ -270,14 +316,17 @@ def _build_deterministic_narrative(updates: dict, profile: dict,
     """
     Шар 3 (last-resort): детерміністично будує fallback-текст. Викликається лише
     якщо всі LLM-спроби Narrator'а провалились.
-    - content_blocked=True: director_notes НЕ показуємо (описують заблоковану сцену),
-      лише нейтральне повідомлення.
+    - content_blocked=True: теж будуємо абзац із director_notes (вони згенеровані GM_Logic і
+      вже пройшли фільтр Google) + примітка "Сцену описано скорочено."; якщо придатних notes
+      немає — нейтральне повідомлення.
     - інакше, якщо є придатні director_notes: абзац із фактів + примітка курсивом.
     - інакше: локація/час/ефекти + примітка курсивом.
     """
-    if content_blocked:
-        return _FALLBACK_BLOCKED_NOTE
     _notes_text = _fallback_story_from_notes(director_notes)
+    if content_blocked:
+        if _notes_text:
+            return f"{_notes_text}\n\n{_FALLBACK_SHORTENED_NOTE}"
+        return _FALLBACK_BLOCKED_NOTE
     if _notes_text:
         return f"{_notes_text}\n\n{_FALLBACK_UNAVAILABLE_NOTE}"
 
@@ -432,6 +481,273 @@ def _static_tag(static: str) -> str:
     return f"[SYSTEM_INSTRUCTION static len={len(static or '')} md5={_h}]"
 
 
+# ══════════════ DEBUG TRACE: збір метаданих LLM-викликів (лише debug-режим) ══════════════
+# Контракт з core.ai_client: start_call_meta_capture / get_call_meta / call_meta_mark /
+# stop_call_meta_capture / mask_secrets + kwarg meta_label. Усе через getattr-guard: якщо API
+# відсутнє — трейс просто без метрик. Поза debug-режимом жоден з цих хелперів нічого не робить
+# (_debug_meta_var=False -> _ml() повертає {}, mark() повертає 0).
+import inspect as _inspect
+from core import ai_client as _aic
+
+_debug_meta_var: contextvars.ContextVar = contextvars.ContextVar("debug_meta_active", default=False)
+_SECRET_RE = re.compile(
+    r"AIza[0-9A-Za-z_\-]{20,}|\b\d{6,}:[A-Za-z0-9_\-]{25,}|https?://\S+|"
+    r"(?i:(?:api[_-]?key|token|secret|authorization)\s*[=:]\s*\S+)"
+)
+
+
+def _mask(text, limit: int = 200) -> str:
+    """Маскує секрети та обрізає текст (через ai_client.mask_secrets, з локальним fallback)."""
+    s = "" if text is None else str(text)
+    fn = getattr(_aic, "mask_secrets", None)
+    try:
+        if fn is not None:
+            s = fn(s, limit)
+    except Exception:
+        pass
+    s = _SECRET_RE.sub("[REDACTED]", s)  # belt-and-braces (idempotent)
+    s = s.replace("\n", " ")
+    return s if len(s) <= limit else s[:limit] + "…"
+
+
+def _meta_start() -> None:
+    fn = getattr(_aic, "start_call_meta_capture", None)
+    if fn is None:
+        return
+    try:
+        fn()
+        _debug_meta_var.set(True)
+    except Exception as exc:
+        logger.warning(f"[DEBUG_MODE] start_call_meta_capture failed: {type(exc).__name__}")
+
+
+def _meta_stop() -> None:
+    """Idempotent: no-op якщо збір не вмикався у цьому task-контексті."""
+    if not _debug_meta_var.get():
+        return
+    _debug_meta_var.set(False)
+    fn = getattr(_aic, "stop_call_meta_capture", None)
+    try:
+        if fn is not None:
+            fn()
+    except Exception as exc:
+        logger.warning(f"[DEBUG_MODE] stop_call_meta_capture failed: {type(exc).__name__}")
+
+
+def _meta_mark() -> int:
+    if not _debug_meta_var.get():
+        return 0
+    try:
+        fn = getattr(_aic, "call_meta_mark", None)
+        if fn is not None:
+            return int(fn())
+        return len(_aic.get_call_meta())
+    except Exception:
+        return 0
+
+
+def _meta_records(a=None, b=None) -> list:
+    if not _debug_meta_var.get():
+        return []
+    try:
+        return list(_aic.get_call_meta())[a:b]
+    except Exception:
+        return []
+
+
+def _ml(label: str, fn=None) -> dict:
+    """kwargs {"meta_label": label} лише в debug-режимі і лише якщо callee його приймає."""
+    if not _debug_meta_var.get():
+        return {}
+    if fn is not None:
+        try:
+            params = _inspect.signature(fn).parameters
+            if "meta_label" not in params and not any(
+                p.kind is _inspect.Parameter.VAR_KEYWORD for p in params.values()
+            ):
+                return {}
+        except (TypeError, ValueError):
+            return {}
+    return {"meta_label": label}
+
+
+def _fmt_call(rec: dict, detail: bool = False) -> list:
+    """Компактне форматування одного запису call-meta (1-3 рядки)."""
+    if not isinstance(rec, dict):
+        return [f"  ? {_mask(rec)}"]
+    u = rec.get("usage") or {}
+    atts = [a for a in (rec.get("attempts") or []) if isinstance(a, dict)]
+    errs = [a for a in atts if a.get("error_code") or a.get("error")]
+    head = f"  ⏱ {rec.get('label') or rec.get('path') or '?'} [{rec.get('path')}] {rec.get('model')} " \
+           f"{rec.get('elapsed_s')}s"
+    if rec.get("hedge_idx") is not None:
+        head += f" hedge#{rec.get('hedge_idx')}"
+    out = [head]
+    out.append(
+        f"    finish={rec.get('finish_reason')} block={rec.get('block_reason')} text_len={rec.get('text_len')} "
+        f"tokens in/out/think/cached/total="
+        f"{u.get('prompt')}/{u.get('candidates')}/{u.get('thoughts')}/{u.get('cached')}/{u.get('total')}"
+    )
+    out.append(
+        f"    schema sent={rec.get('schema_sent')} retry={rec.get('schema_retry')} | "
+        f"cache={rec.get('cache_mode')} fallback={rec.get('cache_fallback')} | "
+        f"breaker_open={rec.get('breaker_open')} | attempts={len(atts)} retries={len(errs)} "
+        f"codes={[a.get('error_code') for a in errs]}"
+    )
+    if detail:
+        sf = rec.get("safety")
+        if sf:
+            out.append(f"    safety={_mask(sf, 240)}")
+        for a in errs:
+            out.append(
+                f"    retry #{a.get('n')}: code={a.get('error_code')} sleep={a.get('sleep_s')}s "
+                f"err={_mask(a.get('error'), 160)}"
+            )
+    exc = rec.get("exception")
+    if exc:
+        out.append(f"    exception={_mask(exc.get('type') if isinstance(exc, dict) else exc, 80)}: "
+                   f"{_mask(exc.get('msg') if isinstance(exc, dict) else '', 200)}")
+    return out
+
+
+def _fmt_calls(records: list, detail: bool = False) -> list:
+    if not records:
+        return ["  ⏱ (no LLM calls captured in this stage)"]
+    lines = []
+    for r in records:
+        lines.extend(_fmt_call(r, detail=detail))
+    return lines
+
+
+def _npc_index_from_session(chat_id) -> dict:
+    """{name: (location, scene)} з уже завантаженого user_sessions[chat_id]['npc_cache'] (без Sheets)."""
+    idx = {}
+    try:
+        cache = user_sessions.get(chat_id, {}).get("npc_cache", {}) or {}
+        dead = user_sessions.get(chat_id, {}).get("dead_npc_names", set()) or set()
+        for loc, npcs in cache.items():
+            for n in npcs or []:
+                name = n.get("name") if isinstance(n, dict) else None
+                if name and name not in dead:
+                    idx[name] = (loc, n.get("scene") or "—")
+    except Exception:
+        return {}
+    return idx
+
+
+def _roster_diag_lines(chat_id, legal_npc_names, texts: dict) -> list:
+    """Діагностика ростеру: legal_npc_names + попередження про NPC, згаданих у texts
+    ({source_label: text}), яких немає в ростері. Лише in-memory дані (жодних запитів до Sheets)."""
+    lines = [f"  roster (legal_npc_names, {len(legal_npc_names or [])}): {list(legal_npc_names or [])}"]
+    idx = _npc_index_from_session(chat_id)
+    if not idx:
+        lines.append("  (NPC_DB cache not loaded in session — mention check skipped)")
+        return lines
+    legal = set(legal_npc_names or [])
+    first_tokens: dict = {}
+    for nm in idx:
+        tok = nm.split()[0].lower() if nm.split() else ""
+        first_tokens.setdefault(tok, []).append(nm)
+    warned = 0
+    for src, text in texts.items():
+        low = (text or "").lower()
+        if not low:
+            continue
+        seen = set()
+        for nm, (loc, scene) in idx.items():
+            if nm in legal or nm in seen:
+                continue
+            tok = nm.split()[0].lower() if nm.split() else ""
+            hit = nm.lower() in low or (len(tok) >= 5 and len(first_tokens.get(tok, [])) == 1 and tok in low)
+            if hit:
+                seen.add(nm)
+                if warned < _ROSTER_WARN_LIMIT:
+                    lines.append(
+                        f"  ⚠ '{_mask(nm, 60)}' згадана в {src}, але не в ростері; NPC_DB: "
+                        f"{_mask(loc, 60)} / {_mask(scene, 60)}"
+                    )
+                warned += 1
+    if warned > _ROSTER_WARN_LIMIT:
+        lines.append(f"  ... ще {warned - _ROSTER_WARN_LIMIT} попереджень")
+    if warned == 0:
+        lines.append("  (no out-of-roster NPC mentions detected)")
+    return lines
+
+
+def _wrapper_desc(w) -> str:
+    try:
+        return f"{getattr(w, 'model_name', '?')} (thinking={getattr(w, 'thinking_level', None)})"
+    except Exception:
+        return "?"
+
+
+def _trace_finalize(trace, chat_id, global_start, marks: dict) -> None:
+    """Дописує у debug-trace шапку, метрики етапів і total time. Ніколи не кидає виняток.
+    Нові ключі trace (рендерить bot/handlers.py::_send_debug_trace_file):
+      trace["header"]: list[str]; trace[<stage>]["metrics"]: list[str]; trace["narrator_diag"]: list[str]."""
+    if trace is None:
+        return
+    try:
+        import config as _cfg
+        total = time.time() - global_start
+        trace["total_s"] = round(total, 2)
+        ab_on = bool(NARRATOR_AB_ENABLED)
+        cache_on = getattr(_aic, "GEMINI_EXPLICIT_CACHE_ENABLED", getattr(_cfg, "GEMINI_EXPLICIT_CACHE_ENABLED", None))
+        trace["header"] = [
+            f"  BOT_VERSION: {getattr(_cfg, 'BOT_VERSION', '?')}",
+            f"  Censor/Worker: {_wrapper_desc(model_worker)}",
+            f"  GM_Logic:      {_wrapper_desc(model_gm_logic)}",
+            f"  Narrator:      {_wrapper_desc(model_narrator)}"
+            + (f" | A/B alt: {_wrapper_desc(model_narrator_alt)}" if ab_on else ""),
+            f"  Narrator experiment: model={getattr(model_narrator, 'model_name', '?')} "
+            f"thinking_level={getattr(model_narrator, 'thinking_level', '?')} "
+            f"preamble_variant={getattr(model_narrator, 'preamble_variant', '?')}"
+            + (f" | alt: model={getattr(model_narrator_alt, 'model_name', '?')} "
+               f"thinking_level={getattr(model_narrator_alt, 'thinking_level', '?')} "
+               f"preamble_variant={getattr(model_narrator_alt, 'preamble_variant', '?')}" if ab_on else ""),
+            f"  Flags: GEMINI_EXPLICIT_CACHE_ENABLED={cache_on} NARRATOR_AB_ENABLED={ab_on} "
+            f"erotic={chat_id in getattr(_cfg, 'EROTIC_USERS', set())} "
+            f"puppet={chat_id in getattr(_cfg, 'PUPPET_USERS', set())} "
+            f"godmode={chat_id in getattr(_cfg, 'GODMODE_USERS', set())}",
+            f"  Turn total time: {total:.2f}s",
+        ]
+        if not _debug_meta_var.get():
+            for st in ("censor", "worker", "gm_logic", "narrator"):
+                trace[st].setdefault("metrics", ["  (call metrics unavailable: capture API not active)"])
+            return
+
+        def _sl(a_key, b_key):
+            if a_key not in marks:
+                return []
+            return _meta_records(marks[a_key], marks.get(b_key))
+
+        trace["censor"]["metrics"] = _fmt_calls(_sl("c0", "c1"))
+        if "c1" in marks:
+            trace["worker"]["metrics"] = _fmt_calls(_sl("c1", "w1"))
+        if "w1" in marks:
+            trace["gm_logic"]["metrics"] = _fmt_calls(_sl("w1", "g1"))
+        if "g1" in marks:
+            nrecs = _sl("g1", "n1")
+            trace["narrator"]["metrics"] = _fmt_calls(nrecs)
+            trace["narrator_diag"] = _narrator_diag_lines(nrecs, trace.pop("_narr_summary", {}))
+    except Exception as exc:  # trace must never break the turn
+        logger.warning(f"[DEBUG_MODE] trace finalize failed: {type(exc).__name__}: {exc}")
+
+
+def _narrator_diag_lines(records: list, summary: dict) -> list:
+    lines = []
+    for r in records:
+        lines.extend(_fmt_call(r, detail=True))
+    if not records:
+        lines.append("  (no narrator LLM calls captured)")
+    for e in summary.get("errors", []):
+        lines.append(f"  caught error: {_mask(e, 240)}")
+    lines.append(f"  content_blocked={summary.get('content_blocked')}")
+    lines.append(f"  fallback branch shown to player: {summary.get('branch')}")
+    lines.append(f"  Narrator total time: {summary.get('elapsed_s')}s")
+    return lines
+
+
 def _is_debug_active(chat_id: int, profile: dict, debug_users: set) -> bool:
     """Return True if debug mode is active for this user.
 
@@ -447,8 +763,9 @@ async def _run_narrator_chain(model_wrapper, narrator_prompt, model_key, narrato
     """BLOCKING narrator chain: attempt 1 (hedged) -> quality checks -> attempt 2 -> attempt 3 (temp 0.5, 90s).
 
     Returns NarrationResult. If all attempts fail -> used_fallback=True, text=None
-    (the caller builds the deterministic narrative). Exceptions from attempt 2
-    propagate exactly as in the pre-refactor inline code.
+    (the caller builds the deterministic narrative). Exceptions (except CancelledError/
+    BaseException) from attempts 1, 2 and 3 are caught and logged; the chain falls through
+    to the next attempt, so a content-block still reaches the content_blocked fallback.
     """
     t_chain = time.time()
     attempt_ms: list = []
@@ -457,6 +774,9 @@ async def _run_narrator_chain(model_wrapper, narrator_prompt, model_key, narrato
     _cfg_base = model_wrapper.config_with(system_instruction=narrator_static) if narrator_static else None
     _mname = getattr(model_wrapper, "model_name", None) or model_key
 
+    # A/B: два паралельні ланцюги -> префікс моделі в meta_label, щоб розрізнити виклики у trace.
+    _lp = f"{model_key}." if NARRATOR_AB_ENABLED else ""
+
     def _note_block(resp_obj):
         # _narr_diag_var holds a mutable dict set by process_game_turn (gather() children copy
         # the context but share the dict); content_blocked is only used to pick last-resort text.
@@ -464,6 +784,11 @@ async def _run_narrator_chain(model_wrapper, narrator_prompt, model_key, narrato
         if diag is not None and _is_content_block(resp_obj):
             diag["content_blocked"] = True
             logger.info(f"[NARRATOR_FAIL] model={model_key} content-filter block detected")
+
+    def _note_exc(exc, where):
+        # Виняток з ознаками блоку (SAFETY/PROHIBITED/BLOCKLIST/SPII) -> content_blocked;
+        # текст помилки (замаскований) йде в debug-діагностику Narrator.
+        _narr_diag_note_exc(_narr_diag_var.get(), exc, f"{_lp}{where}")
 
     def _res(text, final, fallback=False):
         return NarrationResult(
@@ -478,11 +803,13 @@ async def _run_narrator_chain(model_wrapper, narrator_prompt, model_key, narrato
     _t = time.time()
     try:
         narrator_response = await hedged_generate_content_async(
-            model_wrapper, narrator_prompt, config=_cfg_base, hedge_count=1, max_retries=2
+            model_wrapper, narrator_prompt, config=_cfg_base, hedge_count=1, max_retries=2,
+            **_ml(f"{_lp}narrator.attempt1.hedged", hedged_generate_content_async)
         )
         story = narrator_response.text.strip() if narrator_response and narrator_response.text else ""
         _note_block(narrator_response)
     except Exception as _hedge_exc:
+        _note_exc(_hedge_exc, "attempt1")
         logger.warning(
             f"[NARRATOR_FAIL] model={model_key}({_mname}) Attempt 1 (hedged) raised "
             f"{type(_hedge_exc).__name__}: {str(_hedge_exc)[:120]} — fallthrough до Шар 2 retry"
@@ -523,7 +850,13 @@ async def _run_narrator_chain(model_wrapper, narrator_prompt, model_key, narrato
     # --- Attempt 2: blocking retry ---
     def _sync_gen_narrator_retry():
         _t0 = time.time()
-        resp = model_wrapper.generate_content(narrator_prompt, config=_cfg_base)
+        try:
+            resp = model_wrapper.generate_content(
+                narrator_prompt, config=_cfg_base,
+                **_ml(f"{_lp}narrator.attempt2", model_wrapper.generate_content))
+        except Exception as _a2_exc:
+            _note_exc(_a2_exc, "attempt2")
+            raise
         _elapsed = time.time() - _t0
         try:
             fr = resp.candidates[0].finish_reason if resp and resp.candidates else None
@@ -550,6 +883,13 @@ async def _run_narrator_chain(model_wrapper, narrator_prompt, model_key, narrato
     _t = time.time()
     try:
         retry_resp = await _safe_to_thread(_sync_gen_narrator_retry)
+    except Exception as _a2_outer:  # not BaseException: CancelledError must propagate
+        # _note_exc already ran inside _sync_gen_narrator_retry for generate_content errors.
+        logger.warning(
+            f"[NARRATOR_FAIL] model={model_key}({_mname}) Attempt 2 raised "
+            f"{type(_a2_outer).__name__}: {_mask(_a2_outer, 120)} — proceeding to Attempt 3"
+        )
+        retry_resp = None
     finally:
         attempt_ms.append(int((time.time() - _t) * 1000))
     story = retry_resp.text.strip() if retry_resp and retry_resp.text else ""
@@ -568,9 +908,14 @@ async def _run_narrator_chain(model_wrapper, narrator_prompt, model_key, narrato
         _t0 = time.time()
         try:
             _cfg = model_wrapper.config_with(system_instruction=narrator_static, temperature=0.5)
-            resp = model_wrapper.generate_content(narrator_prompt, config=_cfg)
-        except Exception:
-            resp = model_wrapper.generate_content(narrator_prompt, config=_cfg_base)
+            resp = model_wrapper.generate_content(
+                narrator_prompt, config=_cfg,
+                **_ml(f"{_lp}narrator.attempt3", model_wrapper.generate_content))
+        except Exception as _a3_exc:
+            _note_exc(_a3_exc, "attempt3")
+            resp = model_wrapper.generate_content(
+                narrator_prompt, config=_cfg_base,
+                **_ml(f"{_lp}narrator.attempt3.retry", model_wrapper.generate_content))
         _elapsed = time.time() - _t0
         _text = (resp.text or "") if resp else ""
         _note_block(resp)
@@ -591,6 +936,7 @@ async def _run_narrator_chain(model_wrapper, narrator_prompt, model_key, narrato
         logger.warning(f"[NARRATOR_FAIL] model={model_key} Attempt 3 timed out after 90s — falling through to deterministic fallback")
         third_resp = None
     except Exception as _exc:
+        _note_exc(_exc, "attempt3")
         logger.warning(f"[NARRATOR_FAIL] model={model_key} Attempt 3 exception: {type(_exc).__name__}: {_exc} — falling through")
         third_resp = None
     attempt_ms.append(int((time.time() - _t) * 1000))
@@ -642,6 +988,20 @@ async def commit_narration_to_history(chat_id, user_input, story, mech_updates):
         logger.error(f"[BG] commit_narration_to_history failed: {e}", exc_info=True)
 
 
+def _debug_meta_cleanup(fn):
+    """Decorator: гарантує (try/finally, §5.4) зупинку збору call-meta debug-trace на будь-якому
+    виході з ходу (return / виняток / cancel) — стан не витікає між ходами. functools.wraps
+    зберігає __wrapped__ (inspect.getsource бачить оригінальне тіло)."""
+    @functools.wraps(fn)
+    async def _wrapper(*args, **kwargs):
+        try:
+            return await fn(*args, **kwargs)
+        finally:
+            _meta_stop()
+    return _wrapper
+
+
+@_debug_meta_cleanup
 async def process_game_turn(chat_id, user_input, progress_callback=None, narrator_queue=None):
     """
     Головний ігровий цикл.
@@ -677,7 +1037,10 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             f"(in_set={chat_id in DEBUG_USERS}, profile_flag={bool(profile.get('_debug_mode', False))})"
         )
     _debug_trace: dict | None = None
+    _tmarks: dict = {}  # межі етапів у call-meta (лише debug); див. _trace_finalize
     if _debug_active:
+        _meta_start()  # збір метаданих LLM-викликів лише для debug-гравця; stop — у finally обгортки
+        _tmarks["c0"] = _meta_mark()
         _debug_trace = {
             "chat_id": chat_id,
             "user_input": user_input,
@@ -810,6 +1173,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 logger.warning(f"[CENSOR] failed, fail-open: {_censor_exc}")
                 is_valid, refusal_reason = True, ""
 
+            _tmarks["c1"] = _meta_mark()
             if _debug_trace is not None:
                 _debug_trace["censor"]["parsed"] = {
                     "is_valid": is_valid,
@@ -823,6 +1187,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 if _debug_trace is not None:
                     _debug_trace["narrator"]["final_text"] = "[BLOCKED BY CENSOR — pipeline stopped]"
                     _debug_trace["logs"] = [f"Censor refusal: {refusal_reason}"]
+                    _trace_finalize(_debug_trace, chat_id, global_start, _tmarks)
                     user_sessions.setdefault(chat_id, {})["last_debug_trace"] = _debug_trace
                     logger.info(f"[DEBUG_MODE] Trace saved to session (path=censor) for chat_id={chat_id}")
                 return refusal_reason + "\n\n📊 🛑 Дію заблоковано Цензором.", []
@@ -900,6 +1265,8 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             user_input, profile,
             debug_trace=_debug_trace if _debug_active else None,
         )
+        if _debug_active:
+            _tmarks["c1"] = _meta_mark()
         if _debug_active and _debug_trace is not None:
             _debug_trace["censor"]["parsed"] = {
                 "is_valid": is_valid,
@@ -909,6 +1276,8 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 e.get("thought", "") for e in get_thoughts_log() if e.get("thought")
             ]
         if not is_valid:
+            if _debug_active and _debug_trace is not None:
+                _trace_finalize(_debug_trace, chat_id, global_start, _tmarks)
             return refusal_reason + "\n\n📊 🛑 Дію заблоковано Цензором.", []
 
         if progress_callback:
@@ -1398,6 +1767,13 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         if progress_callback:
             await progress_callback("🌍 Оновлюємо стан світу...")
         t_gm_logic = time.time()
+        if _debug_trace is not None:
+            _tmarks["w1"] = _meta_mark()
+            try:
+                _debug_trace["worker"]["roster"] = _roster_diag_lines(
+                    chat_id, legal_npc_names, {"user_input": user_input})
+            except Exception as _rd_exc:
+                logger.warning(f"[DEBUG_MODE] worker roster diag failed: {type(_rd_exc).__name__}")
 
         _gm_logic_cfg = build_strict_config(model_gm_logic, schema=GM_LOGIC_SCHEMA, system_instruction=gm_logic_static)
 
@@ -1407,7 +1783,9 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 _debug_trace["gm_logic"]["prompt"] = _static_tag(gm_logic_static) + "\n\n" + gm_logic_prompt
 
         def _sync_gen_gm_logic():
-            return model_gm_logic.generate_content(gm_logic_prompt, config=_gm_logic_cfg)
+            return model_gm_logic.generate_content(
+                gm_logic_prompt, config=_gm_logic_cfg,
+                **_ml("gm_logic", model_gm_logic.generate_content))
 
         # GM_Logic call with None-text guard + one retry (the model may return
         # MALFORMED/empty .text=None, which is not an exception — guard against crash).
@@ -1439,6 +1817,14 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             ]
             _debug_trace["gm_logic"]["raw"] = gm_logic_raw
             _debug_trace["gm_logic"]["parsed"] = ai_data
+            _tmarks["g1"] = _meta_mark()
+            try:
+                _dn_raw = ai_data.get("director_notes")
+                _dn_txt = " ".join(str(x) for x in _dn_raw) if isinstance(_dn_raw, (list, tuple)) else str(_dn_raw or "")
+                _debug_trace["gm_logic"]["roster"] = _roster_diag_lines(
+                    chat_id, legal_npc_names, {"director_notes": _dn_txt, "user_input": user_input})
+            except Exception as _rd_exc:
+                logger.warning(f"[DEBUG_MODE] gm roster diag failed: {type(_rd_exc).__name__}")
 
         duration_gm_logic = time.time() - t_gm_logic
         timing_details.append(f"🧠 GM_Logic: {duration_gm_logic:.2f}s")
@@ -1579,7 +1965,9 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 thought_parts = []
                 print("🔵 [STREAM] Narrator streaming started...")
                 try:
-                    for chunk in model_narrator.generate_content_stream(narrator_prompt, config=_narrator_cfg):
+                    for chunk in model_narrator.generate_content_stream(
+                            narrator_prompt, config=_narrator_cfg,
+                            **_ml("narrator.stream.main", model_narrator.generate_content_stream)):
                         try:
                             for part in chunk.candidates[0].content.parts:
                                 if getattr(part, "thought", False):
@@ -1600,14 +1988,16 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                             fr = chunk.candidates[0].finish_reason if chunk.candidates else None
                             if fr and str(fr) not in ("FinishReason.STOP", "STOP", "1", "None"):
                                 print(f"🔵 [STREAM] finish_reason={fr}")
-                                # Fail fast: MALFORMED_RESPONSE/SAFETY/OTHER → no point waiting for more chunks
-                                if "MALFORMED" in str(fr) or "SAFETY" in str(fr) or "OTHER" in str(fr):
+                                # Fail fast: MALFORMED/OTHER/будь-який блок-маркер (SAFETY, PROHIBITED_CONTENT,
+                                # BLOCKLIST, SPII) → no point waiting for more chunks
+                                if _is_abort_finish(fr):
                                     print(f"🔴 [STREAM] aborted early: finish_reason={fr}, chunks={len(chunks)}")
                                     break
                         except Exception:
                             pass
                 except Exception as e:
                     print(f"🔴 [STREAM] Error during streaming: {e}")
+                    _narr_diag_note_exc(_narr_diag, e, "stream.main")
                     return ""  # порожній → retry спрацює
                 record_thought(MODEL_NARRATOR_NAME, "\n".join(thought_parts))
                 print(f"🔵 [STREAM] Done. Total chunks: {len(chunks)}")
@@ -1713,7 +2103,9 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                     thought_parts = []
                     _t0 = time.time()
                     try:
-                        for chunk in model_narrator.generate_content_stream(narrator_prompt, config=_narrator_cfg):
+                        for chunk in model_narrator.generate_content_stream(
+                                narrator_prompt, config=_narrator_cfg,
+                                **_ml("narrator.stream.retry", model_narrator.generate_content_stream)):
                             try:
                                 for part in chunk.candidates[0].content.parts:
                                     if getattr(part, "thought", False):
@@ -1733,14 +2125,15 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                                 fr = chunk.candidates[0].finish_reason if chunk.candidates else None
                                 if fr and str(fr) not in ("FinishReason.STOP", "STOP", "1", "None"):
                                     logger.info(f"[NARRATOR_FAIL] Retry finish_reason={fr}")
-                                    # Fail fast: MALFORMED_RESPONSE/SAFETY/OTHER → no point waiting for more chunks
-                                    if "MALFORMED" in str(fr) or "SAFETY" in str(fr) or "OTHER" in str(fr):
+                                    # Fail fast: MALFORMED/OTHER/будь-який блок-маркер → no point waiting for more chunks
+                                    if _is_abort_finish(fr):
                                         logger.info(f"[NARRATOR_FAIL] Retry aborted early: finish_reason={fr}, chunks={len(chunks)}")
                                         break
                             except Exception:
                                 pass
                     except Exception as e:
                         logger.info(f"[NARRATOR_FAIL] Retry stream error: {e}")
+                        _narr_diag_note_exc(_narr_diag, e, "stream.retry")
                     record_thought(MODEL_NARRATOR_NAME, "\n".join(thought_parts))
                     _elapsed = time.time() - _t0
                     _result = "".join(chunks)
@@ -1766,9 +2159,14 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                         # Fail fast in degraded path: max_retries=2 instead of default 6
                         # (avoid 140s+ user-wait when whole pipeline is degraded).
                         try:
-                            resp = model_narrator.generate_content(narrator_prompt, max_retries=2, config=_narrator_cfg_t05)
-                        except Exception:
-                            resp = model_narrator.generate_content(narrator_prompt, max_retries=2, config=_narrator_cfg)
+                            resp = model_narrator.generate_content(
+                                narrator_prompt, max_retries=2, config=_narrator_cfg_t05,
+                                **_ml("narrator.attempt3.degraded", model_narrator.generate_content))
+                        except Exception as _d_exc:
+                            _narr_diag_note_exc(_narr_diag, _d_exc, "attempt3.degraded")
+                            resp = model_narrator.generate_content(
+                                narrator_prompt, max_retries=2, config=_narrator_cfg,
+                                **_ml("narrator.attempt3.degraded.retry", model_narrator.generate_content))
                         _elapsed = time.time() - _t0
                         _text = (resp.text or "") if resp else ""
                         if _is_content_block(resp):
@@ -1790,6 +2188,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                         logger.warning("[NARRATOR_FAIL] Attempt 3 timed out after 90s — falling through to deterministic fallback")
                         third_resp = None
                     except Exception as _e3:
+                        _narr_diag_note_exc(_narr_diag, _e3, "attempt3.degraded")
                         logger.warning(f"[NARRATOR_FAIL] Attempt 3 exception: {_e3} — falling through to deterministic fallback")
                         third_resp = None
                     third_text = third_resp.text.strip() if third_resp and third_resp.text else ""
@@ -1846,6 +2245,23 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             else:
                 _debug_trace["narrator"]["final_text"] = story
             _debug_trace["logs"] = list(logs)
+            _tmarks["n1"] = _meta_mark()
+            _has_notes = bool(_fallback_story_from_notes(director_notes))
+            if _ab_mode == "pair":
+                _fb_branch = "model_text (A/B pair: обидва варіанти від моделей)"
+            elif not _narrator_failed:
+                _fb_branch = "model_text"
+            elif _narr_diag["content_blocked"]:
+                _fb_branch = "blocked_notes" if _has_notes else "empty (blocked, немає придатних notes)"
+            else:
+                _fb_branch = "notes" if _has_notes else "empty (механічний/загальний текст без notes)"
+            _debug_trace["_narr_summary"] = {
+                "content_blocked": _narr_diag["content_blocked"],
+                "branch": _fb_branch,
+                "elapsed_s": round(duration_narrator, 2),
+                "errors": list(_narr_diag.get("errors", [])),
+            }
+            _trace_finalize(_debug_trace, chat_id, global_start, _tmarks)
             # Store in session for handlers.py pickup
             user_sessions.setdefault(chat_id, {})["last_debug_trace"] = _debug_trace
             logger.info(f"[DEBUG_MODE] Trace saved to session (path=success) for chat_id={chat_id}")
@@ -2108,13 +2524,14 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         try:
             if _debug_active and _debug_trace is not None:
                 _debug_trace["narrator"]["final_text"] = (
-                    f"[ENGINE CRASH — {type(e).__name__}: {str(e)[:200]}]"
+                    f"[ENGINE CRASH — {type(e).__name__}: {_mask(e, 200)}]"
                 )
                 _debug_trace["logs"] = (_debug_trace.get("logs") or []) + [
                     f"EXCEPTION: {type(e).__name__}",
-                    f"MESSAGE: {str(e)[:300]}",
-                    f"TRACEBACK (last 5 lines): {traceback.format_exc()[-500:]}",
+                    f"MESSAGE: {_mask(e, 300)}",
+                    f"TRACEBACK (last 5 lines): {_SECRET_RE.sub('[REDACTED]', traceback.format_exc()[-500:])}",
                 ]
+                _trace_finalize(_debug_trace, chat_id, global_start, _tmarks)
                 user_sessions.setdefault(chat_id, {})["last_debug_trace"] = _debug_trace
                 logger.info(f"[DEBUG_MODE] Trace saved to session (path=crash) for chat_id={chat_id}")
         except Exception:
