@@ -3,6 +3,7 @@ import time
 import json
 import re
 import asyncio
+import contextvars
 import logging
 
 logger = logging.getLogger(__name__)
@@ -201,14 +202,85 @@ def _build_impact_hints(impact_logs: list) -> str:
     return "\n".join(hints)
 
 
+_narr_diag_var: contextvars.ContextVar = contextvars.ContextVar("narr_diag", default=None)
+_FALLBACK_UNAVAILABLE_NOTE = "_Детальний опис сцени тимчасово недоступний._"
+_FALLBACK_BLOCKED_NOTE = "_Цю сцену неможливо описати детально. Спробуйте іншу дію._"
+_BLOCK_FINISH_MARKERS = ("PROHIBITED_CONTENT", "SAFETY", "BLOCKLIST", "SPII")
+_NOTE_PREFIX_RE = re.compile(
+    r"^\s*(?:[-*•–—]+|\d+[.)])?\s*(?:(?:факт|fact|note|нотатка|director|gm)\s*\d*\s*[:\-–—]\s*)?",
+    re.IGNORECASE,
+)
+_NOTE_MECHANICS_RE = re.compile(
+    r"\b(?:DC|XP|HP|d\d+|\d+d\d+)\b|[+\-−]\s?\d+\s*(?:HP|XP|gold|золот)|\d+\s*(?:HP|XP|gold|золот|хп|дк)",
+    re.IGNORECASE,
+)
+
+
+def _is_content_block(obj) -> bool:
+    """True if a Gemini response/chunk was blocked by Google's content filter
+    (finish_reason PROHIBITED_CONTENT/SAFETY/BLOCKLIST/SPII or prompt_feedback.block_reason)."""
+    if obj is None:
+        return False
+    try:
+        fr = obj.candidates[0].finish_reason if obj.candidates else None
+        if fr is not None and any(m in str(fr).upper() for m in _BLOCK_FINISH_MARKERS):
+            return True
+    except Exception:
+        pass
+    try:
+        pf = getattr(obj, "prompt_feedback", None)
+        if pf is not None and getattr(pf, "block_reason", None):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _fallback_story_from_notes(director_notes) -> str:
+    """Склеює director_notes у короткий абзац для last-resort fallback.
+    Прибирає маркери списку, службові префікси, markdown, нотатки з механікою
+    та службові корекції. Повертає "" якщо придатних фактів немає."""
+    if not isinstance(director_notes, (list, tuple)):
+        return ""
+    sentences = []
+    for note in director_notes:
+        if not isinstance(note, str):
+            continue
+        t = _NOTE_PREFIX_RE.sub("", note.strip(), count=1)
+        t = re.sub(r"[*_`#>]+", "", t)
+        t = re.sub(r"\s+", " ", t).strip()
+        low = t.lower()
+        if (len(t) < 8 or low.startswith("корекція") or low == "щось сталося."
+                or _NOTE_MECHANICS_RE.search(t)):
+            continue
+        if t[-1] not in ".!?…":
+            t += "."
+        sentences.append(t[0].upper() + t[1:])
+        if len(sentences) >= 4:
+            break
+    text = " ".join(sentences)
+    if len(text) > 700:
+        text = text[:700].rsplit(" ", 1)[0].rstrip(",;:") + "…"
+    return text
+
+
 def _build_deterministic_narrative(updates: dict, profile: dict,
-                                    old_location: str = "", old_scene: str = "") -> str:
+                                    old_location: str = "", old_scene: str = "",
+                                    director_notes=None, content_blocked: bool = False) -> str:
     """
-    Шар 3 (last-resort): детерміністично будує короткий художній абзац із
-    даних updates та поточного профілю. Викликається лише якщо всі три LLM-спроби
-    Narrator'а провалились. Повертає рядок ≥ 100 символів без слів "помилка"
-    або "Майстер", без префіксу помилки.
+    Шар 3 (last-resort): детерміністично будує fallback-текст. Викликається лише
+    якщо всі LLM-спроби Narrator'а провалились.
+    - content_blocked=True: director_notes НЕ показуємо (описують заблоковану сцену),
+      лише нейтральне повідомлення.
+    - інакше, якщо є придатні director_notes: абзац із фактів + примітка курсивом.
+    - інакше: локація/час/ефекти + примітка курсивом.
     """
+    if content_blocked:
+        return _FALLBACK_BLOCKED_NOTE
+    _notes_text = _fallback_story_from_notes(director_notes)
+    if _notes_text:
+        return f"{_notes_text}\n\n{_FALLBACK_UNAVAILABLE_NOTE}"
+
     parts = []
 
     # Локація (зміна або поточна)
@@ -288,20 +360,9 @@ def _build_deterministic_narrative(updates: dict, profile: dict,
     # Якщо нічого немає — загальна фраза
     if not parts:
         current_loc = new_location or "невідомому місці"
-        parts.append(
-            f"Час спливав непомітно у *{current_loc}*. "
-            f"Вестерос продовжував своє повільне обертання, байдужий до людських справ."
-        )
+        parts.append(f"Час спливав непомітно у *{current_loc}*.")
 
-    narrative = " ".join(parts)
-
-    # Гарантуємо мінімум 100 символів
-    if len(narrative) < 100:
-        narrative += (
-            " Вестерос продовжував своє повільне обертання, байдужий до людських справ."
-        )
-
-    return narrative
+    return " ".join(parts) + f"\n\n{_FALLBACK_UNAVAILABLE_NOTE}"
 
 
 async def summarize_turn(gm_response):
@@ -396,6 +457,14 @@ async def _run_narrator_chain(model_wrapper, narrator_prompt, model_key, narrato
     _cfg_base = model_wrapper.config_with(system_instruction=narrator_static) if narrator_static else None
     _mname = getattr(model_wrapper, "model_name", None) or model_key
 
+    def _note_block(resp_obj):
+        # _narr_diag_var holds a mutable dict set by process_game_turn (gather() children copy
+        # the context but share the dict); content_blocked is only used to pick last-resort text.
+        diag = _narr_diag_var.get()
+        if diag is not None and _is_content_block(resp_obj):
+            diag["content_blocked"] = True
+            logger.info(f"[NARRATOR_FAIL] model={model_key} content-filter block detected")
+
     def _res(text, final, fallback=False):
         return NarrationResult(
             model_key=model_key, text=text,
@@ -412,6 +481,7 @@ async def _run_narrator_chain(model_wrapper, narrator_prompt, model_key, narrato
             model_wrapper, narrator_prompt, config=_cfg_base, hedge_count=1, max_retries=2
         )
         story = narrator_response.text.strip() if narrator_response and narrator_response.text else ""
+        _note_block(narrator_response)
     except Exception as _hedge_exc:
         logger.warning(
             f"[NARRATOR_FAIL] model={model_key}({_mname}) Attempt 1 (hedged) raised "
@@ -468,6 +538,7 @@ async def _run_narrator_chain(model_wrapper, narrator_prompt, model_key, narrato
         except Exception:
             block_reason = None
         _text = (resp.text or "") if resp else ""
+        _note_block(resp)
         logger.info(
             f"[NARRATOR_FAIL] model={model_key} Attempt 2 (blocking) done. elapsed={_elapsed:.2f}s "
             f"finish_reason={fr} block_reason={block_reason} "
@@ -502,6 +573,7 @@ async def _run_narrator_chain(model_wrapper, narrator_prompt, model_key, narrato
             resp = model_wrapper.generate_content(narrator_prompt, config=_cfg_base)
         _elapsed = time.time() - _t0
         _text = (resp.text or "") if resp else ""
+        _note_block(resp)
         logger.info(
             f"[NARRATOR_FAIL] model={model_key} Attempt 3 (blocking low-temp) done. "
             f"elapsed={_elapsed:.2f}s text_len={len(_text)} "
@@ -1494,6 +1566,8 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         _narrator_cfg_t05 = model_narrator.config_with(system_instruction=narrator_static, temperature=0.5)
 
         _narrator_failed = False  # прапор: всі три спроби провалились
+        _narr_diag = {"content_blocked": False}  # блок контент-фільтра Google (лише для вибору last-resort тексту)
+        _narr_diag_var.set(_narr_diag)
         _ab_results = []   # Narrator A/B: results of both chains (blocking mode only)
         _ab_mode = None    # None | "pair" | "single" | "none"
         if narrator_queue is not None:
@@ -1520,6 +1594,8 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                                 chunks.append(text)
                                 _loop.call_soon_threadsafe(narrator_queue.put_nowait, text)
                                 print(f"🔵 [STREAM] Chunk #{len(chunks)}: {len(text)} chars")
+                        if _is_content_block(chunk):
+                            _narr_diag["content_blocked"] = True
                         try:
                             fr = chunk.candidates[0].finish_reason if chunk.candidates else None
                             if fr and str(fr) not in ("FinishReason.STOP", "STOP", "1", "None"):
@@ -1572,7 +1648,8 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                         f"updates_keys={list(mechanical_updates.keys())} — building deterministic narrative."
                     )
                     story = _build_deterministic_narrative(
-                        mechanical_updates, profile, old_location, old_scene
+                        mechanical_updates, profile, old_location, old_scene,
+                        director_notes=director_notes, content_blocked=_narr_diag["content_blocked"],
                     )
                     _narrator_failed = True
                 else:
@@ -1586,7 +1663,8 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                         f"— building deterministic narrative."
                     )
                     story = _build_deterministic_narrative(
-                        mechanical_updates, profile, old_location, old_scene
+                        mechanical_updates, profile, old_location, old_scene,
+                        director_notes=director_notes, content_blocked=_narr_diag["content_blocked"],
                     )
                     _narrator_failed = True
                 else:
@@ -1649,6 +1727,8 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                                     chunks.append(text)
                                     _loop.call_soon_threadsafe(narrator_queue.put_nowait, text)
                             # finish_reason при retry — abort early on MALFORMED_RESPONSE
+                            if _is_content_block(chunk):
+                                _narr_diag["content_blocked"] = True
                             try:
                                 fr = chunk.candidates[0].finish_reason if chunk.candidates else None
                                 if fr and str(fr) not in ("FinishReason.STOP", "STOP", "1", "None"):
@@ -1691,6 +1771,8 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                             resp = model_narrator.generate_content(narrator_prompt, max_retries=2, config=_narrator_cfg)
                         _elapsed = time.time() - _t0
                         _text = (resp.text or "") if resp else ""
+                        if _is_content_block(resp):
+                            _narr_diag["content_blocked"] = True
                         logger.info(
                             f"[NARRATOR_FAIL] Attempt 3 (blocking low-temp) done. "
                             f"elapsed={_elapsed:.2f}s text_len={len(_text)} "
@@ -1725,7 +1807,8 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                             f"— building deterministic narrative."
                         )
                         story = _build_deterministic_narrative(
-                            mechanical_updates, profile, old_location, old_scene
+                            mechanical_updates, profile, old_location, old_scene,
+                            director_notes=director_notes, content_blocked=_narr_diag["content_blocked"],
                         )
                         _narrator_failed = True
                         # WARN #2: last-resort — пушимо детерміністичний текст
