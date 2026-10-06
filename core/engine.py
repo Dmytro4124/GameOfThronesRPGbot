@@ -99,7 +99,7 @@ from database.operations import (
     get_user_data, save_user_data, get_relevant_context,
     get_location_npcs, update_npcs_in_db,
     update_npc_reputation, append_memory_anchor, get_dead_npc_names,
-    refresh_npc_database, move_npcs_with_player,
+    refresh_npc_database, move_npcs_with_player, _norm_npc_name,
 )
 
 user_sessions = {}
@@ -150,19 +150,6 @@ def _sanitize_story(text: str) -> str:
     text = re.sub(r"\bE\s*[:=]\s*\d+", '', text)
     # Технічні терміни годинників/механік
     text = re.sub(r'Scene_Tension', '', text)
-    # A15 FIX: Безіменні "Лорд/Леді [Великий Дім]" → нейтральне звертання
-    # Regex: ловить "Лорд Ланністер" але НЕ чіпає "Лорд Тайвін Ланністер" (є ім'я перед прізвищем)
-    _great_houses_pattern = r'Ланністер|Старк|Таргарієн|Баратеон|Тірелл|Грейджой|Мартелл|Аррен|Таллі|Болтон'
-    text = re.sub(
-        rf'(?<![А-ЯІЇЄҐа-яіїєґ]\s)[Лл]орд(?:е|у|а|ом|ові)?\s+({_great_houses_pattern})\w*',
-        'місцевий лорд',
-        text
-    )
-    text = re.sub(
-        rf'(?<![А-ЯІЇЄҐа-яіїєґ]\s)[Лл]еді\s+({_great_houses_pattern})\w*',
-        'місцева леді',
-        text
-    )
     # Подвійні пробіли та порожні рядки
     text = re.sub(r'  +', ' ', text)
     return text.strip()
@@ -1646,9 +1633,19 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         elif _cm_outcome in ("FAILURE", "CRITICAL FAILURE"):
             _cm_skip_reason = f"outcome {_cm_outcome}"
         _cm_dead = get_dead_npc_names(chat_id)
-        _cm_legal = set(_start_legal_npc_names)
-        _cm_names = [n for n in dict.fromkeys(_cm_req) if n in _cm_legal and n not in _cm_dead]
-        _cm_rejected = [n for n in _cm_req if n not in _cm_names]
+        _cm_dead_norm = {_norm_npc_name(d) for d in _cm_dead}
+        _cm_legal_map: dict = {}
+        for _lg in _start_legal_npc_names:
+            _cm_legal_map.setdefault(_norm_npc_name(_lg), _lg)
+        _cm_names: list = []
+        _cm_rejected: list = []
+        for _req in _cm_req:
+            _k = _norm_npc_name(_req)
+            _canon = _cm_legal_map.get(_k)
+            if _canon is None or _k in _cm_dead_norm:
+                _cm_rejected.append(_req)
+            elif _canon not in _cm_names:
+                _cm_names.append(_canon)
         if _cm_rejected:
             logger.info(f"[COMPANIONS] відкинуто (не в стартовому ростері/мертві): {_cm_rejected}")
         if _cm_names and not _cm_skip_reason:
@@ -1659,9 +1656,10 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
                 moved_companions = []
             if not moved_companions:
                 _cm_skip_reason = "move returned nothing"
-        _cm_skipped = [n for n in _cm_req if n not in moved_companions]
+        _cm_moved_norm = {_norm_npc_name(m) for m in moved_companions}
+        _cm_skipped = [n for n in _cm_req if _norm_npc_name(n) not in _cm_moved_norm]
         _companions_diag_line = (
-            f"  companions_moving: {_cm_req} → moved: {moved_companions}"
+            f"  companions_moving: raw={_cm_req} matched={_cm_names} → moved: {moved_companions}"
             + (f" (skipped: {_cm_skipped}, reason: {_cm_skip_reason or 'not in start roster/dead'})"
                if _cm_skipped else "")
         )

@@ -101,8 +101,13 @@ NARRATOR_SYSTEM_PROMPT = """<system>
 - Перше речення — з дії, звуку чи предмета, а не з опису "тиші", "погляду" чи "атмосфери".
 - Не повторюй формулювання й епітети з <recent_history>.
 - Голоси NPC різні: підбери лексику, довжину фраз і манеру за Personality і Goal; два NPC не говорять однаково.
-  Якщо є пряма репліка (з тире) — лише від NPC з <active_roster> (або, при переході сцени, з <departing_roster>/<arriving_roster>), зміст лише з фактів director_notes. Якщо мовленнєвого факту немає —
-  мінімальна репліка (оклик, вимога, відмова) без нових відомостей, або без репліки.
+- Називай NPC за ім'ям або титулом із <npc_cards>/<active_roster>. Не вживай безособові "місцевий лорд", "місцева леді", "якийсь лорд";
+  якщо ім'я невідоме — посада ("кастелян", "господар замку"), лише якщо вона є у фактах.
+- Діалоги: пряма репліка (з тире) — лише від NPC з <active_roster> (або, при переході сцени, з <departing_roster>/<arriving_roster>).
+  Якщо director_notes кажуть, що NPC сказав, запитав, відмовив, пригрозив, відповів, привітав чи вимагає — передай це прямою реплікою
+  (1-2 речення на NPC, у манері його Personality), а не переказом. Зміст — лише з цих фактів і Memory Anchor: жодних нових обіцянок,
+  відомостей чи секретів ([SECRET/GM ONLY]); результат дії гравця реплікою не вирішуй. Орієнтир: 2-4 репліки на сцену — лише коли в director_notes є мовленнєві факти.
+  Якщо мовленнєвого факту в director_notes немає — NPC без репліки (лише дія, жест, вираз); не вигадуй репліку заради кількості.
 - Не вживай заїжджені звороти: "повітря густішає/стає важким", "тиша повисла/затягується", "напруга гусне/в повітрі",
   "крижаний/холодний погляд" (на кожну сцену — максимум один холодний епітет), "по спині пробіг холодок",
   "серце закалатало", "очі блиснули", "на мить завмер", "відчуваючи вагу", "мов перед бурею", "танець тіней".
@@ -1806,6 +1811,7 @@ Relation_Player та Attitude to Player — системні поля, у npc_up
 
 <json_generation_rules>
 1. director_notes: 3-7 фактичних речень (COMBAT: 4-6 тактичних). БЕЗ літературних прикрас.
+   [NORMAL] Для кожного NPC, який говорить у цьому ході, один із director_notes — мовленнєвий факт: "<Ім'я> відповідає/вимагає/запитує/відмовляє: суть …" (суть, не дослівна репліка).
 2. hp_current у npc_updates:
 {hp_rule}
 3. '' = поле не змінилось; нове значення = реальна зміна.
@@ -1917,7 +1923,8 @@ def build_gm_logic_parts(
       now explicitly documented as lore-text-only field in D&D schema)
     - suggested_actions: COMBAT mode uses ATTACK/DEFEND/FLEE/SPECIAL slots
     """
-    hero_last_name = hero_name.split()[-1] if hero_name else "Герой"
+    _hero_tokens = (hero_name or "").split()
+    hero_first_name = _hero_tokens[0] if _hero_tokens else "Герой"
     travel_note = " (ГРАВЕЦЬ В ДОРОЗІ між локаціями)" if is_traveling else ""
     impact_block = (
         f"<system_impacts>\n{impact_narrative_hints}\nВрахуй ці підказки при формуванні director_notes.\n</system_impacts>"
@@ -1992,8 +1999,8 @@ def build_gm_logic_parts(
     dynamic = f"""{_puppet_prefix}{mode_block}
 
 <player_identity>
-ГЕРОЙ: {hero_name} з дому {hero_house}.
-Правило: NPC звертаються до героя лише як "{hero_last_name}" або "лорд/леді {hero_house}".
+ГЕРОЙ: {hero_name} з дому {hero_house}, особисте ім'я "{hero_first_name}".
+Правило звертання: близькі (родина, друзі, закохані, давні слуги; тепле ставлення або родинний зв'язок прямо вказані) — на ім'я "{hero_first_name}" або ласкаво; сторонні й офіційні — "лорд/леді {hero_house}" або за титулом; голе прізвище — лише ворожий, зверхній чи формальний тон. Не вигадуй спорідненість. НІКОЛИ не називай героя прізвищем іншого дому.
 </player_identity>
 
 <player_state>
@@ -2089,7 +2096,8 @@ def build_narrator_parts(
     If combat_log is None: NORMAL atmospheric style (180-230 words, min 150).
     All other parameters identical to legacy builder.
     """
-    last_name = player_name.split()[-1] if player_name else "Герой"
+    _name_tokens = (player_name or "").split()
+    first_name = _name_tokens[0] if _name_tokens else "Герой"
     notes_text = "\n".join(f"- {note}" for note in director_notes)
     _puppet_block = (
         "\n<CRITICAL_OVERRIDE priority=\"ABSOLUTE\">\n"
@@ -2120,8 +2128,8 @@ def build_narrator_parts(
     parts = [(_puppet_block + _erotic_block + _combat_block).strip("\n")]
     parts.append(f"""
 <player_identity>
-ГЕРОЙ: {player_name} з дому {player_house}.
-NPC звертаються до героя ТІЛЬКИ як "{last_name}" або "лорд/леді {player_house}".
+ГЕРОЙ: {player_name} з дому {player_house}, особисте ім'я "{first_name}".
+Форма звертання залежить від близькості. Близькі (родина, друзі, закохані, давні слуги; тепле ставлення до героя або родинний зв'язок прямо вказаний у картці NPC/director_notes) — на ім'я "{first_name}" або ласкаво (батьки — "сину"/"доню", лише якщо стать героя відома). Сторонні й офіційні — "лорд/леді {player_house}" або за титулом. Голе прізвище — лише ворожий, зверхній чи формальний тон. Не вигадуй спорідненість: родич лише якщо це прямо сказано.
 ЗАБОРОНА: НІКОЛИ не називай героя прізвищем іншого дому.
 </player_identity>""")
     if recent_history_text:
@@ -2197,7 +2205,7 @@ NPC звертаються до героя ТІЛЬКИ як "{last_name}" аб�
 Напиши художній наративний текст за фактами з director_notes. Закінчи відкритим моментом, що штовхує до дії, без прямого питання до героя.""" + (
         "\nЦе COMBAT-раунд: стиль і довжина — за <combat_narrative_style> з правил системи (4-6 коротких речень, за <combat_log>)."
         if combat_log is not None else
-        "\nДовжина: 150-250 слів (орієнтир 180–230, не менше 150), без чисел."
+        "\nДовжина: 150-250 слів (орієнтир 180–230, не менше 150), без чисел. Словесні реакції NPC з director_notes передай прямою мовою."
     ))
     return (NARRATOR_SYSTEM_COMBAT if combat_log is not None else NARRATOR_SYSTEM), "\n".join(p for p in parts if p)
 

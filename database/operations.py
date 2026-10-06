@@ -11,7 +11,11 @@ import gspread
 from google import genai
 
 from database.sheets import db
-from core.world_constants import is_valid_location, is_valid_region, TRAVEL_LOCATION
+import logging
+from core.world_constants import (
+    is_valid_location, is_valid_region, TRAVEL_LOCATION,
+    NPC_LOCATION_BYPASS, get_region_for_location,
+)
 from core.reputation import apply_reputation_step
 from config import (
     TAB_USERS,
@@ -783,45 +787,76 @@ def _norm_npc_name(name) -> str:
 # Тримаємо сильні посилання (інакше Task може бути зібраний GC).
 _pending_move_tasks: dict = {}
 
+_logger = logging.getLogger(__name__)
+PENDING_MOVES_TIMEOUT_SEC = 10
+NPC_MOVE_RETRY_DELAY_SEC = 1.5
+
 
 async def _await_pending_moves(user_id):
     tasks = list(_pending_move_tasks.get(user_id, ()))
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+    if not tasks:
+        return
+    # asyncio.wait НЕ скасовує таски при timeout — фоновий запис продовжується.
+    _done, pending = await asyncio.wait(tasks, timeout=PENDING_MOVES_TIMEOUT_SEC)
+    if pending:
+        _logger.warning(
+            "[NPC MOVE] user %s: фонові записи не завершились за %ss — продовжуємо без очікування.",
+            user_id, PENDING_MOVES_TIMEOUT_SEC,
+        )
 
 
-async def _write_npc_moves_to_sheet(user_id, names: list, location: str, scene: str):
-    """Фоновий запис Location/Scene для переміщених NPC. Не кидає виняток."""
+async def _write_npc_moves_to_sheet(user_id, names: list, location: str, scene: str, prev_tasks=()):
+    """Фоновий запис Location/Scene/Region для переміщених NPC. Не кидає виняток.
+
+    prev_tasks — попередні записи цього користувача: чекаємо їх (усередині таски),
+    щоб порядок запису в Sheets збігався з порядком ходів.
+    """
+    if prev_tasks:
+        await asyncio.gather(*prev_tasks, return_exceptions=True)
+
     tab_name = _npc_tab_name(user_id)
     targets = {_norm_npc_name(n) for n in names}
+    region = get_region_for_location(location)
 
     def _sync_write():
         worksheet = db.get_sheet(tab_name)
         if not worksheet:
-            print(f"[NPC MOVE] Аркуш '{tab_name}' не знайдено.")
+            _logger.warning("[NPC MOVE] Аркуш '%s' не знайдено.", tab_name)
             return 0
         all_values = worksheet.get_all_values()
         if not all_values:
             return 0
         headers = [h.strip().lower() for h in all_values[0]]
         if "name" not in headers or "location" not in headers or "scene" not in headers:
-            print(f"[NPC MOVE] У '{tab_name}' немає колонок Name/Location/Scene.")
+            _logger.warning("[NPC MOVE] У '%s' немає колонок Name/Location/Scene.", tab_name)
             return 0
         name_i, loc_i, scene_i = headers.index("name"), headers.index("location"), headers.index("scene")
+        region_i = headers.index("region") if (region and "region" in headers) else None
         cells = []
         for r, row in enumerate(all_values[1:], start=2):
             if len(row) > name_i and _norm_npc_name(row[name_i]) in targets:
                 cells.append(gspread.Cell(r, loc_i + 1, location))
                 cells.append(gspread.Cell(r, scene_i + 1, scene))
+                if region_i is not None:
+                    cells.append(gspread.Cell(r, region_i + 1, region))
         if cells:
             worksheet.update_cells(cells)
-        return len(cells) // 2
+        return len({c.row for c in cells})
 
-    try:
-        n = await asyncio.to_thread(_sync_write)
-        print(f"[NPC MOVE] user {user_id}: записано {n} NPC у Sheets → {location}/{scene}.", flush=True)
-    except Exception as e:
-        print(f"[NPC MOVE WARNING] user {user_id}: запис у Sheets не вдався: {e}", flush=True)
+    last_exc = None
+    for attempt in (1, 2):
+        try:
+            n = await asyncio.to_thread(_sync_write)
+            _logger.info("[NPC MOVE] user %s: записано %s NPC у Sheets -> %s/%s.", user_id, n, location, scene)
+            return
+        except Exception as e:
+            last_exc = e
+            if attempt == 1:
+                await asyncio.sleep(NPC_MOVE_RETRY_DELAY_SEC)
+    _logger.warning(
+        "[NPC MOVE] user %s: запис у Sheets не вдався після повтору (NPC=%s, location=%s): %s",
+        user_id, list(names), location, last_exc,
+    )
 
 
 async def move_npcs_with_player(chat_id, names: list, location: str, scene: str) -> list:
@@ -838,8 +873,11 @@ async def move_npcs_with_player(chat_id, names: list, location: str, scene: str)
         return []
     location = str(location or "").strip()
     scene = str(scene or "").strip()
+    if location == NPC_LOCATION_BYPASS:
+        _logger.warning("[NPC MOVE] Відхилено службову локацію '%s'.", location)
+        return []
     if not location or location == TRAVEL_LOCATION or not is_valid_location(location):
-        print(f"[NPC MOVE] Пропуск: непридатна локація '{location}'.")
+        _logger.info("[NPC MOVE] Пропуск: непридатна локація '%s'.", location)
         return []
     session = user_sessions.get(chat_id)
     if not session:
@@ -859,11 +897,11 @@ async def move_npcs_with_player(chat_id, names: list, location: str, scene: str)
     for raw in names:
         key = _norm_npc_name(raw)
         if key in dead_norm:
-            print(f"[NPC MOVE] '{raw}' мертвий — пропуск.")
+            _logger.info("[NPC MOVE] '%s' мертвий — пропуск.", raw)
             continue
         canon = index.get(key)
         if not canon:
-            print(f"[NPC MOVE] '{raw}' не в кеші Active NPC — пропуск.")
+            _logger.info("[NPC MOVE] '%s' не в кеші Active NPC — пропуск.", raw)
             continue
         if canon not in moved:
             moved.append(canon)
@@ -885,12 +923,18 @@ async def move_npcs_with_player(chat_id, names: list, location: str, scene: str)
     for nm in moved:
         entry = entries[nm]
         entry["scene"] = scene or "невідомо"
+        new_region = get_region_for_location(location)
+        if new_region:
+            entry["region"] = new_region
         dest.append(entry)
     session["npc_cache"] = npc_cache
 
-    # --- Фоновий запис у Sheets ---
-    task = asyncio.create_task(_write_npc_moves_to_sheet(chat_id, moved, location, scene or "невідомо"))
+    # --- Фоновий запис у Sheets (серіалізований per-user: чекає попередні таски) ---
     bucket = _pending_move_tasks.setdefault(chat_id, set())
+    prev_tasks = tuple(bucket)
+    task = asyncio.create_task(
+        _write_npc_moves_to_sheet(chat_id, moved, location, scene or "невідомо", prev_tasks)
+    )
     bucket.add(task)
 
     def _done(t, _b=bucket, _cid=chat_id):

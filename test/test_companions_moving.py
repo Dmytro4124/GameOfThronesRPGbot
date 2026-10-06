@@ -5,6 +5,7 @@ database.operations.move_npcs_with_player, update_npcs_in_db(locked_names=...).
 Канонічна назва локації в проєкті -- "Вінтерфел" (одна "л"), саме її приймає is_valid_location.
 """
 import asyncio
+import logging
 import re
 import threading
 import time
@@ -400,17 +401,21 @@ def test_background_write_skips_missing_columns(capsys):
     ws.update_cells.assert_not_called()
 
 
-def test_background_write_failure_logs_warning_and_does_not_roll_back_cache(capsys):
+def test_background_write_failure_logs_warning_and_does_not_roll_back_cache(caplog, monkeypatch):
+    monkeypatch.setattr(ops, "NPC_MOVE_RETRY_DELAY_SEC", 0)
     ws = _ws()
     ws.update_cells.side_effect = RuntimeError("sheets down")
-    moved, _ = _move(["Кейтлін Старк"], ws=ws)
+    with caplog.at_level(logging.WARNING, logger=ops._logger.name):
+        moved, _ = _move(["Кейтлін Старк"], ws=ws)
     assert moved == ["Кейтлін Старк"]
-    out = capsys.readouterr().out
-    assert "NPC MOVE WARNING" in out and "sheets down" in out
+    assert "sheets down" in caplog.text and "Кейтлін Старк" in caplog.text and LOC in caplog.text
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
     assert next(n for n in _cache()[LOC] if n["name"] == "Кейтлін Старк")["scene"] == NEW_SCENE
 
 
-def test_background_write_get_sheet_exception_does_not_propagate(capsys):
+def test_background_write_get_sheet_exception_does_not_propagate(caplog, monkeypatch):
+    monkeypatch.setattr(ops, "NPC_MOVE_RETRY_DELAY_SEC", 0)
+
     async def _run():
         with patch.object(ops, "db") as mdb:
             mdb.get_sheet.side_effect = RuntimeError("boom")
@@ -418,8 +423,10 @@ def test_background_write_get_sheet_exception_does_not_propagate(capsys):
             await ops._await_pending_moves(CID)  # не має кидати
             return moved
 
-    assert asyncio.run(_run()) == ["Кейтлін Старк"]
-    assert "NPC MOVE WARNING" in capsys.readouterr().out
+    with caplog.at_level(logging.WARNING, logger=ops._logger.name):
+        assert asyncio.run(_run()) == ["Кейтлін Старк"]
+    assert "boom" in caplog.text
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
 
 
 def test_pending_tasks_are_released_after_completion():
@@ -429,6 +436,159 @@ def test_pending_tasks_are_released_after_completion():
 
 def test_await_pending_moves_noop_without_tasks():
     asyncio.run(ops._await_pending_moves(CID))  # не кидає
+
+
+# ── серіалізація, retry, timeout, region, GLOBAL ──────────────────────────────
+
+def test_sequential_moves_same_npc_last_write_is_second_scene():
+    """Друга таска чекає першу: навіть якщо перший запис повільний, фінал у Sheets = друга сцена."""
+    state = {"scene": OLD_SCENE}
+    order = []
+
+    def _update_cells(cells):
+        vals = {c.col: c.value for c in cells}
+        if vals[2] == NEW_SCENE:
+            time.sleep(0.3)  # перший запис повільний
+        state["scene"] = vals[2]
+        order.append(vals[2])
+
+    ws = _ws()
+    ws.update_cells.side_effect = _update_cells
+    second = "Тронна Зала"
+
+    async def _run():
+        with patch.object(ops, "db") as mdb:
+            mdb.get_sheet.return_value = ws
+            await ops.move_npcs_with_player(CID, ["Кейтлін Старк"], LOC, NEW_SCENE)
+            await asyncio.sleep(0)  # перший запис стартує
+            await ops.move_npcs_with_player(CID, ["Кейтлін Старк"], LOC, second)
+            await ops._await_pending_moves(CID)
+
+    asyncio.run(_run())
+    assert order == [NEW_SCENE, second]
+    assert state["scene"] == second
+
+
+def test_move_does_not_block_on_previous_task():
+    """Хід не блокується: move_npcs_with_player повертається, поки перший запис ще триває."""
+    ws = _ws()
+    ws.update_cells.side_effect = lambda cells: time.sleep(0.3)
+
+    async def _run():
+        with patch.object(ops, "db") as mdb:
+            mdb.get_sheet.return_value = ws
+            await ops.move_npcs_with_player(CID, ["Кейтлін Старк"], LOC, NEW_SCENE)
+            t0 = time.monotonic()
+            await ops.move_npcs_with_player(CID, ["Санса Старк"], LOC, "Кузня")
+            elapsed = time.monotonic() - t0
+            await ops._await_pending_moves(CID)
+            return elapsed
+
+    assert asyncio.run(_run()) < 0.2
+
+
+def test_retry_first_attempt_fails_second_succeeds(caplog, monkeypatch):
+    monkeypatch.setattr(ops, "NPC_MOVE_RETRY_DELAY_SEC", 0)
+    ws = _ws()
+    ws.update_cells.side_effect = [RuntimeError("flaky"), None]
+    with caplog.at_level(logging.WARNING, logger=ops._logger.name):
+        moved, _ = _move(["Кейтлін Старк"], ws=ws)
+    assert moved == ["Кейтлін Старк"]
+    assert ws.update_cells.call_count == 2
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_retry_both_fail_warning_and_cache_kept(caplog, monkeypatch):
+    monkeypatch.setattr(ops, "NPC_MOVE_RETRY_DELAY_SEC", 0)
+    ws = _ws()
+    ws.update_cells.side_effect = RuntimeError("down")
+    with caplog.at_level(logging.WARNING, logger=ops._logger.name):
+        _move(["Кейтлін Старк"], ws=ws)
+    assert ws.update_cells.call_count == 2
+    warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warns) == 1
+    assert next(n for n in _cache()[LOC] if n["name"] == "Кейтлін Старк")["scene"] == NEW_SCENE
+
+
+def test_await_pending_moves_timeout_warns_and_does_not_cancel(caplog, monkeypatch):
+    monkeypatch.setattr(ops, "PENDING_MOVES_TIMEOUT_SEC", 0.05)
+    ws = _ws()
+    ws.update_cells.side_effect = lambda cells: time.sleep(0.4)
+
+    async def _run():
+        with patch.object(ops, "db") as mdb:
+            mdb.get_sheet.return_value = ws
+            await ops.move_npcs_with_player(CID, ["Кейтлін Старк"], LOC, NEW_SCENE)
+            tasks = list(ops._pending_move_tasks[CID])
+            t0 = time.monotonic()
+            await ops._await_pending_moves(CID)
+            waited = time.monotonic() - t0
+            not_done_after_wait = not tasks[0].done()
+            cancelled = tasks[0].cancelled()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            return waited, not_done_after_wait, cancelled, tasks[0]
+
+    with caplog.at_level(logging.WARNING, logger=ops._logger.name):
+        waited, not_done, cancelled, task = asyncio.run(_run())
+    assert waited < 0.3
+    assert not_done and not cancelled
+    assert task.done() and not task.cancelled()
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+def _region_ws(with_region_col):
+    headers = ["Location", "Scene", "Name", "Status"] + (["REGION"] if with_region_col else [])
+    row = [LOC, OLD_SCENE, "Кейтлін Старк", "Active"] + (["Північ"] if with_region_col else [])
+    ws = MagicMock()
+    ws.get_all_values.return_value = [headers, row]
+    return ws
+
+
+def test_region_updated_in_cache_and_sheet_with_region_column():
+    from core.world_constants import get_region_for_location
+    dest = "Королівська Гавань"
+    region = get_region_for_location(dest)
+    assert region and region != "Північ"
+    ws = _region_ws(True)
+    moved, _ = _move(["Кейтлін Старк"], location=dest, scene="Тронна Зала", ws=ws)
+    assert moved == ["Кейтлін Старк"]
+    entry = next(n for n in _cache()[dest] if n["name"] == "Кейтлін Старк")
+    assert entry["region"] == region
+    cells = ws.update_cells.call_args[0][0]
+    got = {(c.row, c.col): c.value for c in cells}
+    assert got == {(2, 1): dest, (2, 2): "Тронна Зала", (2, 5): region}
+
+
+def test_region_cache_updated_but_sheet_has_no_region_column():
+    from core.world_constants import get_region_for_location
+    dest = "Королівська Гавань"
+    ws = _region_ws(False)
+    _move(["Кейтлін Старк"], location=dest, scene="Тронна Зала", ws=ws)
+    entry = next(n for n in _cache()[dest] if n["name"] == "Кейтлін Старк")
+    assert entry["region"] == get_region_for_location(dest)
+    cells = ws.update_cells.call_args[0][0]
+    assert {(c.row, c.col) for c in cells} == {(2, 1), (2, 2)}
+
+
+@pytest.mark.parametrize("loc", ["В дорозі", "Мордор (вигадка)"])
+def test_travel_or_unknown_location_does_not_change_region(loc):
+    ws = _region_ws(True)
+    moved, _ = _move(["Кейтлін Старк"], location=loc, ws=ws)
+    assert moved == []
+    entry = next(n for n in _cache()[LOC] if n["name"] == "Кейтлін Старк")
+    assert entry["region"] == "Північ"
+    ws.update_cells.assert_not_called()
+
+
+def test_global_location_rejected_with_warning(caplog):
+    import copy
+    before = copy.deepcopy(_cache())
+    with caplog.at_level(logging.WARNING, logger=ops._logger.name):
+        moved, ws = _move(["Кейтлін Старк"], location="GLOBAL")
+    assert moved == []
+    assert _cache() == before
+    ws.update_cells.assert_not_called()
+    assert any(r.levelno == logging.WARNING and "GLOBAL" in r.getMessage() for r in caplog.records)
 
 
 # ── refresh_npc_database не дає старим даним Sheets перезаписати переміщення ───

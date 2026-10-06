@@ -251,6 +251,7 @@ Pipeline складається з 4 ролей. Перші три поверт�
 - `save_used` (`"STR"|"DEX"|"CON"|"INT"|"WIS"|"CHA"|"None"`, default `"None"`) — якщо set, engine викликає `saving_throw()` замість skill_check. Див. GATE S у Worker prompt.
 - `save_dc` (integer ∈ LEGAL_DCS, default 5) — DC для save. Engine робить `clamp_dc()`.
 - `rest_type` (`"long"|"short"|"none"`, default `"none"`) — якщо set, engine викликає `long_rest()` / `short_rest()`. Див. GATE R. **REST має пріоритет над SAVE** при одночасному наявності обох.
+- `updates.companions_moving` (масив імен, default `[]`) — NPC, що фізично йдуть з гравцем, коли `scene_impact`/`location_impact` змінює його місце. Лише імена з legal names сцени. Engine застосовує рух ДО перебудови ростеру (`move_npcs_with_player`, operations.py) лише якщо: ім'я є в стартовому ростері ходу, NPC живий, місце гравця змінилось, не COMBAT, не "В дорозі", outcome не FAILURE/CRITICAL FAILURE. Переміщені NPC передаються GM блоком `<moved_with_player>` і як `locked_names` у `update_npcs_in_db` (GM не може змінити їм Location/Scene у тому ж ході).
 - `updates.hp_damage_type` (`"physical"|"fire"|"cold"|"poison"|"acid"`, default `"physical"`) — тип self-damage для heritage resistance. Якщо `"fire"` і профіль fire-resistant (Valyrian `is_fire_resistant`) → engine halve'ить damage (`max(1, dmg//2)`). Див. GATE 6 hp_damage_type блок.
 
 **Worker NORMAL INPUT context** (передається в `<player_state>`):
@@ -263,8 +264,8 @@ Pipeline складається з 4 ролей. Перші три поверт�
 
 **GM_Logic** (`build_gm_logic_prompt`) — обов'язкові ключі:
 - `reasoning`, `npc_reasoning` — внутрішнє міркування
-- `director_notes` — масив 3–7 фактичних речень для Narrator (без літературних прикрас)
-- `companion_npcs` — масив імен NPC, що йдуть з гравцем. **Критично:** це білий список проти телепортацій. Без імені тут NPC фізично не зможе перейти з гравцем.
+- `director_notes` — масив 3–7 фактичних речень для Narrator (без літературних прикрас). NORMAL: для кожного NPC, що говорить у цьому ході, один note — мовленнєвий факт (`"<Ім'я> відповідає/вимагає/запитує: суть …"`, суть, не дослівна репліка); COMBAT — тактичні.
+- `companion_npcs` — масив імен NPC, які САМІ вирішують піти за гравцем (рішення GM) або супроводжують його в подорожі між локаціями. **Критично:** це білий список проти телепортацій для `npc_updates` GM. Рух NPC, ініційований дією гравця ("веду Кейтлін"), обробляє Worker через `updates.companions_moving` — GM отримує таких NPC у блоці `<moved_with_player>` як уже присутніх.
 - `npc_updates` — масив об'єктів NPC. Фіксований склад: `Name`, `Location`, `Scene`, `Memory_Anchor`, `Relation_NPCs`, `Inventory`, `Status` (`Active` | `Dead` | `Fled` | `Unconscious`), `hp_current`, `conditions[]`.
 - `mode_transition` (`null` | `"TO_COMBAT"` | `"TO_NORMAL"`)
 - `suggested_actions` — **рівно 4** об'єкти `{button, intent}`, не більше і не менше.
@@ -272,7 +273,8 @@ Pipeline складається з 4 ролей. Перші три поверт�
 **Narrator** (`build_narrator_prompt(combat_log=...)`) — повертає **чистий художній текст**, без JSON, без маркдауну.
 - Якщо `combat_log` передано → COMBAT style: 4–6 коротких речень з action verbs.
 - Інакше → NORMAL style: 150–250 слів атмосферного тексту (орієнтир 180–230).
-- Кінцівка сцени — відкритий момент, що штовхає до дії, **без прямого питання до героя** (питання допустиме лише як репліка NPC). Репліки — лише NPC з `<active_roster>` і лише з фактів `director_notes`; безіменні групи — тільки фон (звук/гул), без дій і реплік.
+- Кінцівка сцени — відкритий момент, що штовхає до дії, **без прямого питання до героя** (питання допустиме лише як репліка NPC). Репліки — лише NPC з `<active_roster>` / `<departing_roster>` / `<arriving_roster>` і лише з мовленнєвих фактів `director_notes`: такі факти передаються прямою реплікою (1–2 речення на NPC, орієнтир 2–4 на сцену; зміст — з цих фактів і Memory Anchor NPC), без нових відомостей, обіцянок і секретів; немає мовленнєвого факту — NPC без репліки. COMBAT — без реплік, якщо їх немає в логу. Безіменні групи — тільки фон (звук/гул), без дій і реплік. NPC називати за ім'ям/титулом з картки (без безособового «місцевий лорд»).
+- **Звертання до героя** (`<player_identity>` у динаміці Narrator і GM): близькі — на ім'я/ласкаво, сторонні й офіційні — «лорд/леді Дім» або титул, голе прізвище — лише ворожий/зверхній тон; спорідненість не вигадувати; ніколи прізвище чужого дому. `_sanitize_story` (engine.py) звертань «лорд/леді + Дім» не змінює.
 
 **Заморожені поля NPC** (за замовчуванням НЕ включати в `npc_updates`): `Description`, `Character`, `Goal`, `Secrets`. Виняток — епічна незворотна подія (каліцтво, публічно розкрита таємниця). Поле `Attitude to Player` — **read-only**; ніколи не включати в `npc_updates`.
 

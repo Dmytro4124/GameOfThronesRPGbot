@@ -299,7 +299,35 @@ def _trace_roster(r):
 def test_debug_line_for_moved_companions():
     r = _run_turn(_worker_updates(), debug=True)
     lines = _trace_roster(r)
-    assert f"  companions_moving: ['{CAT}'] → moved: ['{CAT}']" in lines
+    assert f"  companions_moving: raw=['{CAT}'] matched=['{CAT}'] → moved: ['{CAT}']" in lines
+
+
+@pytest.mark.parametrize("raw", ["кейтлін старк", "КЕЙТЛІН СТАРК", "  кейтлін старк "])
+def test_case_variant_matched_to_canonical_name(raw):
+    r = _run_turn(_worker_updates(companions_moving=[raw]))
+    r["move"].assert_awaited_once_with(CID, [CAT], LOC, NEW_SCENE)
+
+
+def test_apostrophe_variant_matched_to_canonical_name():
+    arya = "Ар'я Старк"
+    r = _run_turn(_worker_updates(companions_moving=["ар’я старк"]), start_roster=(CAT, arya))
+    r["move"].assert_awaited_once_with(CID, [arya], LOC, NEW_SCENE)
+
+
+def test_case_and_canonical_duplicates_collapse_to_one():
+    r = _run_turn(_worker_updates(companions_moving=["кейтлін старк", CAT]))
+    r["move"].assert_awaited_once_with(CID, [CAT], LOC, NEW_SCENE)
+
+
+def test_name_outside_roster_rejected_even_with_case_variant():
+    r = _run_turn(_worker_updates(companions_moving=["роб старк"]))
+    r["move"].assert_not_awaited()
+
+
+def test_debug_line_shows_raw_and_matched_for_case_variant():
+    r = _run_turn(_worker_updates(companions_moving=["кейтлін старк"]), debug=True)
+    lines = _trace_roster(r)
+    assert f"  companions_moving: raw=['кейтлін старк'] matched=['{CAT}'] → moved: ['{CAT}']" in lines
 
 
 def test_debug_worker_roster_uses_start_roster():
