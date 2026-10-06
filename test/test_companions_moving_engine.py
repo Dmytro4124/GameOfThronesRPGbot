@@ -61,10 +61,14 @@ def _run_turn(worker_updates, *, profile_over=None, in_combat=False, move_result
 
     state = {"moved": False}
     gm_calls = []
+    gln_calls = []
+    narr_calls = []
+    real_narr_prompt = eng._build_narrator_prompt
     real_gm_parts = eng.build_gm_logic_parts
     bg = []
 
-    def _gln(chat_id, loc, scene, current_region=None):
+    def _gln(chat_id, loc, scene, current_region=None, **_kw):
+        gln_calls.append(_kw)
         if scene == OLD_SCENE:
             names = [n for n in start_roster if not (state["moved"] and n == CAT)]
             return ("\n".join(f"> **{n}**" for n in names), names, {n: 0 for n in names})
@@ -79,6 +83,10 @@ def _run_turn(worker_updates, *, profile_over=None, in_combat=False, move_result
     def _gm_spy(*a, **k):
         gm_calls.append(k)
         return real_gm_parts(*a, **k)
+
+    def _narr_spy(*a, **k):
+        narr_calls.append(k)
+        return real_narr_prompt(*a, **k)
 
     update_mock = AsyncMock()
     narr = MagicMock(return_value=MagicMock(text="The hero steps into the lord's chambers. " * 5))
@@ -105,6 +113,7 @@ def _run_turn(worker_updates, *, profile_over=None, in_combat=False, move_result
             st.enter_context(patch("core.engine.move_npcs_with_player", move_mock))
             st.enter_context(patch("core.engine.build_gm_logic_parts", side_effect=_gm_spy))
             st.enter_context(patch("core.engine.update_npcs_in_db", update_mock))
+            st.enter_context(patch("core.engine._build_narrator_prompt", side_effect=_narr_spy))
             st.enter_context(patch("core.engine.commit_narration_to_history", new=AsyncMock()))
             if in_combat:
                 st.enter_context(patch("core.engine._is_in_combat_for_engine", return_value=True))
@@ -124,7 +133,7 @@ def _run_turn(worker_updates, *, profile_over=None, in_combat=False, move_result
         eng.user_sessions.pop(CID, None)
 
     return {"move": move_mock, "gm": gm_calls[-1] if gm_calls else None,
-            "update": update_mock, "session": session}
+            "update": update_mock, "session": session, "gln": gln_calls, "narr": narr_calls}
 
 
 @pytest.fixture(autouse=True)
@@ -369,3 +378,39 @@ def test_debug_line_not_in_roster_reason():
 def test_debug_line_default_when_no_companions():
     r = _run_turn(_worker_updates(companions_moving=[]), debug=True)
     assert "  companions_moving: [] → moved: []" in _trace_roster(r)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Стать і родина героя -> engine
+# ─────────────────────────────────────────────────────────────────────────────
+
+_FAMILY = [{"name": CAT, "relation": "мати"}]
+
+
+def test_engine_passes_hero_family_map_to_every_get_location_npcs_call():
+    r = _run_turn(_worker_updates(), profile_over={"Стать": "жіноча", "Родина": _FAMILY})
+    assert len(r["gln"]) >= 2  # старт ходу + departing + arriving
+    assert all(k.get("hero_family") == {CAT: "мати"} for k in r["gln"])
+
+
+def test_engine_old_profile_hero_family_empty_map():
+    r = _run_turn(_worker_updates())
+    assert all(k.get("hero_family") == {} for k in r["gln"])
+
+
+def test_engine_gm_receives_gender_and_family():
+    r = _run_turn(_worker_updates(), profile_over={"Стать": "ж", "Родина": _FAMILY})
+    assert r["gm"]["hero_gender"] == "жіноча"
+    assert r["gm"]["hero_family"] == _FAMILY
+
+
+def test_engine_gm_old_profile_unknown_gender():
+    r = _run_turn(_worker_updates())
+    assert r["gm"]["hero_gender"] == "" and r["gm"]["hero_family"] == []
+
+
+def test_engine_narrator_receives_gender_and_family():
+    r = _run_turn(_worker_updates(), profile_over={"Стать": "чоловіча", "Родина": _FAMILY})
+    assert r["narr"], "narrator prompt builder was not called"
+    assert r["narr"][-1]["player_gender"] == "чоловіча"
+    assert r["narr"][-1]["player_family"] == _FAMILY

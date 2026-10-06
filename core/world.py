@@ -13,6 +13,15 @@ from core.prompts import (
 )
 from core.world_constants import get_region_for_location, get_locations_for_region, is_valid_location, VALID_LOCATIONS_ORDERED, format_scenes_for_prompt, LOCATION_SCENES, is_valid_scene, get_scenes_for_location
 from database.canon_npc import get_canon_npcs_copy
+from core.hero_identity import normalize_gender, normalize_family, get_gender
+
+
+def _canon_names_for_family() -> list:
+    """Імена канонічних NPC (in-memory, без Sheets) для нормалізації родини героя."""
+    try:
+        return [n.get("Name", "") for n in get_canon_npcs_copy() if n.get("Name")]
+    except Exception:
+        return []
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +240,8 @@ def _build_deterministic_dnd_profile(
         "Вада персонажа": "",
         "Вороги": "",
         "Друзі": "",
+        "Стать": "",
+        "Родина": [],
 
         # Legacy compatibility fields
         "Здоров'я": hp_current,   # mirrors hp_current; §5.2 legacy UI sync
@@ -784,6 +795,8 @@ async def generate_initial_stats(char_name, house_name, house_data, apply_herita
         "Вада персонажа": str(llm_data.get("flaw", "")).strip(),
         "Вороги": "",
         "Друзі": "",
+        "Стать": normalize_gender(llm_data.get("gender")),
+        "Родина": normalize_family(llm_data.get("family"), _canon_names_for_family(), char_name),
 
         # Legacy compatibility fields (engine.py and mechanics.py read these)
         "Здоров'я": hp_current,   # mirrors hp_current; updated by apply_dnd_impacts
@@ -954,11 +967,19 @@ def build_fallback_intro(profile: dict) -> str:
         "Wildling": "вільний з-за Стіни, що не схиляє коліна",
     }.get(cls, "герой Вестеросу")
 
+    _g = get_gender(profile)
+    if _g == "жіноча":
+        _ask = "Що зробите першим, міледі?"
+    elif _g == "чоловіча":
+        _ask = "Що зробите першим, мілорде?"
+    else:
+        _ask = f"Що зробите першим, {name}?"
+
     return (
         f"{name} з дому {house} — {cls_intro}. "
         f"Кров {heritage.lower()} тече у ваших жилах. "
         f"Зараз ви у локації «{location}», і ваша історія тільки починається. "
-        f"Що зробите першим, мілорде?"
+        f"{_ask}"
     )
 
 

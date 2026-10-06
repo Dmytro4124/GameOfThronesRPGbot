@@ -4,6 +4,7 @@ import json
 from typing import Literal
 from core.dnd_core import LEGAL_DCS
 from core.dnd_heritages import get_heritage_traits
+from core.hero_identity import format_family_line
 
 GAME_ERA_CONTEXT = """
 === ХРОНОЛОГІЯ: 298 рік від Завоювання (Кінець Довгого Літа) ===
@@ -505,6 +506,19 @@ INITIAL_STATS_SCHEMA = _s_obj(
         "narrative_intro": _s_str("1-2 paragraphs about the character's origin, Ukrainian."),
         "Ім'я": _s_str(),
         "Дім": _s_str(),
+        "gender": _s_str("Hero's gender: canonical for canon heroes, else from name/context.",
+                         enum=["чоловіча", "жіноча"]),
+        "family": _s_arr(
+            _s_obj(
+                {
+                    "name": _s_str("Relative's full name in Ukrainian (canonical NPC name or invented)."),
+                    "relation": _s_str("Relation from the hero's viewpoint, short: мати, батько, брат, кузен..."),
+                },
+                required=["name", "relation"],
+            ),
+            maxItems=8,
+            description="Hero's relatives (0-8). Canon hero: canonical family as of 298 AC.",
+        ),
         "suggested_class": _s_str(enum=[
             "Knight", "Hedge Knight", "Maester", "Septon", "Sellsword",
             "Spy", "Courtier", "Bastard", "Wildling",
@@ -528,7 +542,7 @@ INITIAL_STATS_SCHEMA = _s_obj(
         "Риси": _s_str("Comma-separated."),
         "Вади": _s_str("Comma-separated."),
     },
-    required=["thought_process", "suggested_class", "suggested_heritage", "ability_scores",
+    required=["thought_process", "gender", "suggested_class", "suggested_heritage", "ability_scores",
               "Поточне місцезнаходження", "Поточна сцена"],
 )
 
@@ -789,6 +803,7 @@ TIME_CONTEXT: {GAME_ERA_CONTEXT}
    - Якщо герой НЕКАНОНІЧНИЙ (вигаданий): Зроби його свідком або дрібним учасником вищезгаданого canon hook.
 4. AGENCY PRESERVATION:
    - НІКОЛИ не пиши дії за гравця.
+   - Якщо в HERO_PROFILE є "Стать" — узгоджуй граматичний рід дієслів/прикметників про героя; якщо є "Родина" — за нагоди (не примусово) згадай родича з неї за іменем. Не вигадуй інших родичів.
    - Зупиняй сцену рівно в той момент, коли виникає напруга і потрібна реакція гравця.
 </system_rules>
 
@@ -1860,6 +1875,40 @@ GM_LOGIC_SYSTEM = _build_gm_logic_system("NORMAL")
 GM_LOGIC_SYSTEM_COMBAT = _build_gm_logic_system("COMBAT")
 
 
+# ── Hero gender / family blocks (dynamic part of <player_identity> only) ──────
+
+def _hero_gender_family_block(gender: str, family, house: str) -> str:
+    """Gender + family lines for <player_identity>. Contains per-player data -> dynamic part only."""
+    g = (gender or "").strip().lower()
+    if g in ("жіноча", "female", "f"):
+        gender_line = (
+            "СТАТЬ ГЕРОЯ: жіноча. Узгоджуй граматичний рід дієслів і прикметників про героя (вона, зробила, змучена); "
+            f"сторонні й офіційні — \"леді {house}\"; батьки й старші близькі — \"доню\"."
+        )
+    elif g in ("чоловіча", "male", "m"):
+        gender_line = (
+            "СТАТЬ ГЕРОЯ: чоловіча. Узгоджуй граматичний рід дієслів і прикметників про героя (він, зробив, змучений); "
+            f"сторонні й офіційні — \"лорд {house}\"; батьки й старші близькі — \"сину\"."
+        )
+    else:
+        gender_line = (
+            "Стать героя невідома: уникай гендерних звертань (сину/доню, лорд/леді) і родових форм про героя — "
+            "звертайся на ім'я або за титулом."
+        )
+    fam = format_family_line(family)
+    if fam:
+        family_line = (
+            f"РОДИНА ГЕРОЯ (вичерпний список): {fam}. Інші NPC — не родичі героя. "
+            "Родичі зі списку — близькі: звертаються до героя на ім'я або ласкаво."
+        )
+    else:
+        family_line = "Родичем NPC вважай, коли це прямо сказано в картці або director_notes."
+    card_line = (
+        "Рядок «Родинний зв'язок з героєм: …» у картці NPC означає, що цей NPC — родич героя."
+    )
+    return f"{gender_line}\n{family_line}\n{card_line}"
+
+
 # ── Updated GM_Logic — mode-aware (Phase 4) ───────────────────────────────────
 
 def build_gm_logic_parts(
@@ -1894,8 +1943,13 @@ def build_gm_logic_parts(
     mode: Literal["NORMAL", "COMBAT"] = "NORMAL",
     npc_hp_snapshot: dict[str, dict] | None = None,
     moved_companions: list[str] | None = None,
+    hero_gender: str = "",
+    hero_family: list | None = None,
 ) -> tuple[str, str]:
     """GM Logic Engine — mode-aware (NORMAL | COMBAT).
+
+    hero_gender: "чоловіча" | "жіноча" | "" ; hero_family: list[{"name","relation"}] | None
+    (input context for <player_identity>, dynamic part only; NOT output keys).
 
     moved_companions: NPC names the system already moved with the player (rendered as
     <moved_with_player> in the dynamic part; input context only, NOT an output key).
@@ -2001,6 +2055,7 @@ def build_gm_logic_parts(
 <player_identity>
 ГЕРОЙ: {hero_name} з дому {hero_house}, особисте ім'я "{hero_first_name}".
 Правило звертання: близькі (родина, друзі, закохані, давні слуги; тепле ставлення або родинний зв'язок прямо вказані) — на ім'я "{hero_first_name}" або ласкаво; сторонні й офіційні — "лорд/леді {hero_house}" або за титулом; голе прізвище — лише ворожий, зверхній чи формальний тон. Не вигадуй спорідненість. НІКОЛИ не називай героя прізвищем іншого дому.
+{_hero_gender_family_block(hero_gender, hero_family, hero_house)}
 </player_identity>
 
 <player_state>
@@ -2089,8 +2144,13 @@ def build_narrator_parts(
     arriving_roster_text: str = "",
     scene_continuity_block: str = "",
     combat_log: list[str] | None = None,
+    player_gender: str = "",
+    player_family: list | None = None,
 ) -> tuple[str, str]:
     """Narrator — Phase 4 variant adds optional combat_log parameter.
+
+    player_gender: "чоловіча" | "жіноча" | "" ; player_family: list[{"name","relation"}] | None
+    (dynamic <player_identity> context only).
 
     If combat_log is provided: switches to punchy 4-6 sentence combat narrative style.
     If combat_log is None: NORMAL atmospheric style (180-230 words, min 150).
@@ -2131,6 +2191,7 @@ def build_narrator_parts(
 ГЕРОЙ: {player_name} з дому {player_house}, особисте ім'я "{first_name}".
 Форма звертання залежить від близькості. Близькі (родина, друзі, закохані, давні слуги; тепле ставлення до героя або родинний зв'язок прямо вказаний у картці NPC/director_notes) — на ім'я "{first_name}" або ласкаво (батьки — "сину"/"доню", лише якщо стать героя відома). Сторонні й офіційні — "лорд/леді {player_house}" або за титулом. Голе прізвище — лише ворожий, зверхній чи формальний тон. Не вигадуй спорідненість: родич лише якщо це прямо сказано.
 ЗАБОРОНА: НІКОЛИ не називай героя прізвищем іншого дому.
+{_hero_gender_family_block(player_gender, player_family, player_house)}
 </player_identity>""")
     if recent_history_text:
         parts.append(f"""
@@ -2277,10 +2338,16 @@ HOUSE: {house_name} (Origin: {origin_region})
    Westerosi (Andal) | Valyrian Descent | First Men (Stark line) | Free Folk | Red Priest | Ironborn
    Вибирай на основі походження та культури персонажа.
 6. BACKGROUND (вільний текст D&D-стилю): Soldier / Spy / Smuggler / Noble / Acolyte / Sailor / Criminal тощо.
+7. GENDER & FAMILY:
+   - "gender": ТІЛЬКИ "чоловіча" або "жіноча". Канонічний герой — його канонічна стать; вигаданий — за іменем і контекстом.
+   - "family": масив {{"name": "<повне ім'я українською>", "relation": "<хто він/вона героєві>"}}. relation — з погляду героя, коротко: мати, батько, брат, сестра, дядько, тітка, кузен, племінник, дружина, чоловік, син, донька...
+   - КАНОНІЧНИЙ герой: канонічна родина станом на 298 р. — батьки, брати/сестри, подружжя, діти — повними канонічними іменами українською, як у грі (напр. "Кейтлін Старк"). Лише живі на 298 р. та ті, кого канон справді називає; нікого не вигадуй.
+   - ВИГАДАНИЙ герой: 0–5 записів. ДОЗВОЛЕНО прив'язати героя до канонічних NPC (напр. "кузен Робба Старка"), але правдоподібно і без суперечностей із каноном: лише дальні/бічні зв'язки — кузени, дядьки/тітки з бічних гілок, племінники. ЗАБОРОНЕНО: вигадувати канонічним NPC нових дітей чи подружжя; робити вигаданого героя рідним братом/сестрою канонічних дітей; суперечити віку/дому. Решта родичів — вигадані (ім'я у стилі дому/регіону {origin_region}).
+   - Не знаєш родини — "family": [] (краще порожньо, ніж галюцинація).
 </system_rules>
 
 <thought_algorithm>
-У "thought_process": 1) Канонічний статус {char_name} у 298р + локація зі списку. 2) Клас і спадщина — чому? 3) Ability scores 8-15, сума ~72. 4) Adversarial: stats надто сильні? локація є в списку? 5) Синтез.
+У "thought_process": 1) Канонічний статус {char_name} у 298р + локація зі списку. 2) Клас і спадщина — чому? 3) Ability scores 8-15, сума ~72. 4) Adversarial: stats надто сильні? локація є в списку? 5) Стать і родина: канонічний чи вигаданий? яка родина станом на 298р.; чи не суперечить канону прив'язка до NPC? 6) Синтез.
 </thought_algorithm>
 
 <output_requirements>
@@ -2301,6 +2368,11 @@ HOUSE: {house_name} (Origin: {origin_region})
     "narrative_intro": "Джорах Мормонт — вигнанець, чия честь розтрощена, але меч не заіржавів...",
     "Ім'я": "Джорах Мормонт",
     "Дім": "Мормонт",
+    "gender": "чоловіча",
+    "family": [
+        {{"name": "Джеоре Мормонт", "relation": "батько"}},
+        {{"name": "Лінесса Хайтауер", "relation": "дружина"}}
+    ],
     "suggested_class": "Knight",
     "suggested_heritage": "Westerosi (Andal)",
     "background": "Soldier",
@@ -2322,6 +2394,8 @@ HOUSE: {house_name} (Origin: {origin_region})
     "narrative_intro": "<1-2 абзаци про походження персонажа, Ukrainian>",
     "Ім'я": "{char_name}",
     "Дім": "{house_name}",
+    "gender": "<чоловіча|жіноча>",
+    "family": [{{"name": "<повне ім'я>", "relation": "<мати|батько|брат|сестра|кузен|...>"}}],
     "suggested_class": "<Knight|Hedge Knight|Maester|Septon|Sellsword|Spy|Courtier|Bastard|Wildling>",
     "suggested_heritage": "<Westerosi (Andal)|Valyrian Descent|First Men (Stark line)|Free Folk|Red Priest|Ironborn>",
     "background": "<free-form background string>",

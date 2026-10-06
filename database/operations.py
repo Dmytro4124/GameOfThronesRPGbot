@@ -966,14 +966,37 @@ def evict_npc_from_cache(user_id, matched_name: str):
         npc_cache[loc] = [n for n in npc_cache[loc] if n.get("name") != matched_name]
 
 
-def get_location_npcs(user_id, current_location, current_scene, current_region=None):
+def _render_card(npc_data: dict, family_norm: dict) -> str:
+    """Картка NPC для ростера. Якщо NPC — родич героя, після 1-го рядка вставляє рядок
+    зв'язку. Повертає НОВИЙ рядок; спільний кеш (npc_data["card"]) не мутується."""
+    card = npc_data["card"]
+    if not family_norm:
+        return card
+    relation = family_norm.get(_norm_npc_name(npc_data.get("name", "")))
+    if not relation:
+        return card
+    relation = " ".join(str(relation).split())  # старі профілі можуть містити \n/зайві пробіли
+    line = f"- **Родинний зв'язок з героєм:** {relation} героя\n"
+    first, sep, rest = card.partition("\n")
+    return first + sep + line + rest if sep else first + "\n" + line
+
+
+def get_location_npcs(user_id, current_location, current_scene, current_region=None,
+                      hero_family: dict | None = None):
     """Синхронна функція. Повертає опис NPC, список легальних імен та dict репутації.
     Читає з user_sessions[user_id]["npc_cache"].
     Якщо session немає або кеш порожній — повертає ("", [], {}).
     Підтримує 3-рівневу фільтрацію: Регіон → Локація → Сцена.
     Якщо current_location == TRAVEL_LOCATION — показує регіональних мандрівників.
+    hero_family: {ім'я: relation} (relation з погляду героя). Лише на рендері додає рядок
+    "Родинний зв'язок з героєм" у картки родичів; кеш не змінюється. None = без змін.
     """
     from core.engine import user_sessions
+
+    family_norm = {}
+    if isinstance(hero_family, dict):
+        family_norm = {_norm_npc_name(k): str(v).strip() for k, v in hero_family.items()
+                       if str(k).strip() and str(v).strip()}
 
     session = user_sessions.get(user_id)
     if session is None:
@@ -1004,7 +1027,7 @@ def get_location_npcs(user_id, current_location, current_scene, current_region=N
                     npc_region = npc_data.get("region", "").strip()
                     npc_scene = str(npc_data.get("scene", "")).strip().lower()
                     if npc_region == current_region and npc_scene in ("global", "", "невідомо"):
-                        found_npcs.append(npc_data["card"])
+                        found_npcs.append(_render_card(npc_data, family_norm))
                         legal_names.append(npc_data["name"])
                         reputation_context[npc_data["name"]] = npc_data.get("reputation_score", 0)
         else:
@@ -1021,14 +1044,14 @@ def get_location_npcs(user_id, current_location, current_scene, current_region=N
                         # Загальна сцена: показуємо NPC без прив'язки АБО з такою ж сценою
                         show = (npc_scene == target_scene or npc_scene in _GENERIC_SCENES)
                     if show:
-                        found_npcs.append(npc_data["card"])
+                        found_npcs.append(_render_card(npc_data, family_norm))
                         legal_names.append(npc_data["name"])
                         reputation_context[npc_data["name"]] = npc_data.get("reputation_score", 0)
 
     # Завжди додаємо абсолютно глобальних NPC
     if "GLOBAL" in npc_cache:
         for npc_data in npc_cache["GLOBAL"]:
-            found_npcs.append(npc_data["card"])
+            found_npcs.append(_render_card(npc_data, family_norm))
             legal_names.append(npc_data["name"])
             reputation_context[npc_data["name"]] = npc_data.get("reputation_score", 0)
 
@@ -1362,6 +1385,96 @@ async def update_npcs_in_db(user_id, updates, legal_names_list_deprecated=None,
             await append_memory_anchor(user_id, npc_name, event_text, game_day=0, rep_change=0)
     except Exception as e:
         print(f"❌ [UPDATE ERROR] {e}")
+
+
+FAMILY_SEED_CLOSE_SCORE = 20      # "Тепле ставлення"
+FAMILY_SEED_DISTANT_SCORE = 10    # "Обережно відкритий"
+_FAMILY_DISTANT_MARKERS = (
+    "двоюрід", "троюрід", "дядьк", "тітк", "племін", "кузен", "кузин", "дід", "дєд", "баб",
+    "онук", "зведен", "назван", "швагер", "шурин", "зять", "невіст", "свекр", "тесть", "тещ",
+    "вихован", "опікун", "кревн", "далек",
+)
+_NEUTRAL_RELATION_TEXTS = {"", "-", "neutral", "нейтральний", "нейтральна", "нейтральне"}  # порівняння через casefold()
+
+
+def _family_seed_score(relation: str) -> int:
+    """Близькі (батьки/брати/сестри/подружжя/діти) -> 20; дальні/невідомі -> 10."""
+    rel = str(relation or "").strip().casefold()
+    if any(m in rel for m in _FAMILY_DISTANT_MARKERS):
+        return FAMILY_SEED_DISTANT_SCORE
+    return FAMILY_SEED_CLOSE_SCORE if rel else FAMILY_SEED_DISTANT_SCORE
+
+
+async def seed_family_reputation(user_id, family: list) -> list:
+    """Тепла стартова репутація родичів героя в аркуші NPC_<user_id> (per-user, спільні дані не чіпає).
+    family: list[{"name","relation"}]. Зіставлення — через _norm_npc_name (точний збіг).
+    Змінює лише Active-рядки з Reputation_Score==0 І нейтральним/порожнім Relation_Player
+    (не перезаписує дефолти канону та зміни гравця). Батч-запис (один batch_update).
+    Повертає список імен (як у аркуші), яким виставлено ставлення. Не кидає виняток."""
+    try:
+        wanted = {}
+        for m in (family or []):
+            if isinstance(m, dict) and str(m.get("name", "")).strip() and str(m.get("relation", "")).strip():
+                wanted.setdefault(_norm_npc_name(m["name"]), str(m["relation"]).strip())
+        if not wanted:
+            return []
+
+        tab_name = _npc_tab_name(user_id)
+
+        def _sync_seed():
+            worksheet = db.get_sheet(tab_name)
+            if not worksheet:
+                _logger.warning("[FAMILY REP] user %s: аркуш %s не знайдено", user_id, tab_name)
+                return []
+            all_values = worksheet.get_all_values()
+            if not all_values:
+                _logger.warning("[FAMILY REP] user %s: аркуш %s порожній", user_id, tab_name)
+                return []
+            headers = [h.strip().lower() for h in all_values[0]]
+            if "name" not in headers or "reputation_score" not in headers:
+                _logger.warning("[FAMILY REP] user %s: у %s немає колонок Name/Reputation_Score", user_id, tab_name)
+                return []
+            name_i = headers.index("name")
+            rep_i = headers.index("reputation_score")
+            rel_i = headers.index("relation_player") if "relation_player" in headers else None
+            status_i = headers.index("status") if "status" in headers else None
+
+            def _cell(row, idx):
+                return str(row[idx]).strip() if idx is not None and len(row) > idx else ""
+
+            from database.canon_npc import _score_to_relation_text
+            from gspread.utils import rowcol_to_a1
+            batch, seeded, done = [], [], set()
+            for r, row in enumerate(all_values[1:], start=2):
+                key = _norm_npc_name(_cell(row, name_i))
+                if key not in wanted or key in done:
+                    continue
+                if status_i is not None and _cell(row, status_i).lower() not in ("", "active"):
+                    continue
+                try:
+                    cur = int(_cell(row, rep_i) or 0)
+                except (ValueError, TypeError):
+                    continue
+                if cur != 0 or _cell(row, rel_i).casefold() not in _NEUTRAL_RELATION_TEXTS:
+                    continue
+                score = _family_seed_score(wanted[key])
+                batch.append({"range": rowcol_to_a1(r, rep_i + 1), "values": [[score]]})
+                if rel_i is not None:
+                    batch.append({"range": rowcol_to_a1(r, rel_i + 1),
+                                  "values": [[_score_to_relation_text(score)]]})
+                seeded.append(_cell(row, name_i))
+                done.add(key)
+            if batch:
+                worksheet.batch_update(batch)
+            return seeded
+
+        seeded = await asyncio.to_thread(_sync_seed)
+        if seeded:
+            await refresh_npc_database(user_id)
+        return seeded
+    except Exception as e:
+        _logger.warning("[FAMILY REP] user %s: не вдалося виставити стартову репутацію: %s", user_id, e)
+        return []
 
 
 async def update_npc_reputation(user_id, npc_name, delta):

@@ -215,7 +215,7 @@ def test_cache_miss_llm_success_fills_cache():
         # set_cached_intro повинна викликатись з narrative_text (+ action_prompt)
         set_cached_mock.assert_called_once()
         call_args = set_cached_mock.call_args
-        saved_text = call_args.args[3] if len(call_args.args) >= 4 else call_args.kwargs.get("intro_text", "")
+        saved_text = call_args.args[2] if len(call_args.args) >= 3 else call_args.kwargs.get("intro_text", "")
         assert _INTRO_DATA_SUCCESS["narrative_text"] in saved_text, (
             f"Кешований текст повинен містити narrative_text. Збережено: {repr(saved_text)}"
         )

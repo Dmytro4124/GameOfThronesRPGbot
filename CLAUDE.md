@@ -184,7 +184,9 @@ TelegramGameOfThronesBot/
 │   ├── dnd_combat_engine.py # COMBAT round execution (spotlight pattern)
 │   ├── dnd_migration.py     # backup + LLM-regen NPC + wipe utilities
 │   ├── narrator_ab.py       # Narrator A/B: сліпий вибір Gemma vs Flash-Lite, pending-стан + JSONL лог
-│   └── reputation.py        # apply_reputation_step: asymmetric magnitude-gated reputation math (mechanics-dev domain)
+│   ├── reputation.py        # apply_reputation_step: asymmetric magnitude-gated reputation math (mechanics-dev domain)
+│   ├── hero_identity.py     # стать/родина героя: normalize_gender/normalize_family (fuzzy з word-guard), get_gender/get_family, family_relation_map, format_family_line, drop_spouses (чистий stdlib)
+│   └── intro_cache.py       # кеш вступу per-user: ключ user_id + sha1-відбиток персонажа (ім'я, клас, heritage, регіон, стать, родина); 1 запис на гравця
 ├── database/
 │   ├── canon_npc.py         # ~100 канонічних NPC (хардкод)
 │   ├── operations.py        # gspread + RAG
@@ -274,7 +276,8 @@ Pipeline складається з 4 ролей. Перші три поверт�
 - Якщо `combat_log` передано → COMBAT style: 4–6 коротких речень з action verbs.
 - Інакше → NORMAL style: 150–250 слів атмосферного тексту (орієнтир 180–230).
 - Кінцівка сцени — відкритий момент, що штовхає до дії, **без прямого питання до героя** (питання допустиме лише як репліка NPC). Репліки — лише NPC з `<active_roster>` / `<departing_roster>` / `<arriving_roster>` і лише з мовленнєвих фактів `director_notes`: такі факти передаються прямою реплікою (1–2 речення на NPC, орієнтир 2–4 на сцену; зміст — з цих фактів і Memory Anchor NPC), без нових відомостей, обіцянок і секретів; немає мовленнєвого факту — NPC без репліки. COMBAT — без реплік, якщо їх немає в логу. Безіменні групи — тільки фон (звук/гул), без дій і реплік. NPC називати за ім'ям/титулом з картки (без безособового «місцевий лорд»).
-- **Звертання до героя** (`<player_identity>` у динаміці Narrator і GM): близькі — на ім'я/ласкаво, сторонні й офіційні — «лорд/леді Дім» або титул, голе прізвище — лише ворожий/зверхній тон; спорідненість не вигадувати; ніколи прізвище чужого дому. `_sanitize_story` (engine.py) звертань «лорд/леді + Дім» не змінює.
+- **Звертання до героя** (`<player_identity>` у динаміці Narrator і GM): близькі — на ім'я/ласкаво, сторонні й офіційні — «лорд/леді Дім» або титул, голе прізвище — лише ворожий/зверхній тон; спорідненість не вигадувати; ніколи прізвище чужого дому. `_sanitize_story` (engine.py) звертань «лорд/леді + Дім» не змінює. `<player_identity>` також містить стать героя (`СТАТЬ ГЕРОЯ`; невідома → без гендерних звертань і родових форм) і `РОДИНА ГЕРОЯ (вичерпний список)` — передаються kwargs `player_gender`/`player_family` (Narrator) і `hero_gender`/`hero_family` (GM).
+- **Профіль героя:** `profile["Стать"]` (`""` | `"чоловіча"` | `"жіноча"`), `profile["Родина"]` (`list[{name, relation}]`, ≤8, relation з погляду героя: `"мати"` = NPC — мати героя). Читати лише через `core/hero_identity.py` (старі профілі без ключів → `""`/`[]`). У Worker `player_state` не входять. `get_location_npcs(..., hero_family=family_relation_map(profile))` додає в картку родича рядок `- **Родинний зв'язок з героєм:** …` лише на рендері (кеш карток не мутується). `seed_family_reputation` (operations.py) при створенні світу (`initial_world_setup`, після `background_canon_generation`) дає родичам стартову репутацію: близькі 20, дальні 10 — лише Active NPC зі score 0 і нейтральною міткою. Кнопка «Змінити стать» у превʼю (`gender_toggle`) прибирає з родини подружжя (`drop_spouses`).
 
 **Заморожені поля NPC** (за замовчуванням НЕ включати в `npc_updates`): `Description`, `Character`, `Goal`, `Secrets`. Виняток — епічна незворотна подія (каліцтво, публічно розкрита таємниця). Поле `Attitude to Player` — **read-only**; ніколи не включати в `npc_updates`.
 
@@ -292,7 +295,7 @@ Pipeline складається з 4 ролей. Перші три поверт�
 
 **Допоміжні JSON-промпти** (поза основним ходом):
 - Training intent (`build_training_request_prompt`): `is_training`, `is_possible`, `skill`, `method`, `reason_if_failed`
-- Initial stats (`build_initial_stats_prompt`): D&D 5e character creation — `suggested_class`, `suggested_heritage`, `ability_scores` (6 полів), `hp_max`, `thought_process` (внутрішнє CoT, не ключ pipeline)
+- Initial stats (`build_initial_stats_prompt`): D&D 5e character creation — `suggested_class`, `suggested_heritage`, `ability_scores` (6 полів), `hp_max`, `thought_process` (внутрішнє CoT, не ключ pipeline), `gender` (`"чоловіча"`|`"жіноча"`, enum, required), `family` (`[{name, relation}]`, ≤8; канонічний герой — канонічна родина 298 р.; вигаданий — дозволені лише правдоподібні бічні зв'язки з канонічними NPC). Споживач `generate_initial_stats` → `profile["Стать"]`/`profile["Родина"]` через `normalize_gender`/`normalize_family`
 - Game intro (`build_game_intro_prompt`): `narrative_text`, `action_prompt`, `suggested_actions`
 - NPC populate (`build_populate_npcs_prompt`): масив NPC з повним D&D statblock
 - NPC combat action (`build_npc_combat_action_prompt`): batched 1–2 NPC; returns `{"actions": [{npc_name, action, target, weapon, reason}]}`

@@ -54,12 +54,16 @@ def get_main_menu() -> ReplyKeyboardMarkup:
     return get_dynamic_menu()
 
 
-def build_ability_preview_keyboard() -> InlineKeyboardMarkup:
-    """Two buttons: 'Прийняти' and 'Перерозподілити' for the auto-roll preview step."""
+def build_ability_preview_keyboard(show_gender_toggle: bool = False) -> InlineKeyboardMarkup:
+    """'Прийняти' + 'Перерозподілити' (+ рядок 'Змінити стать' якщо show_gender_toggle)."""
     builder = InlineKeyboardBuilder()
     builder.button(text="Прийняти", callback_data="ability_accept")
     builder.button(text="Перерозподілити", callback_data="ability_redistribute")
-    builder.adjust(2)
+    if show_gender_toggle:
+        builder.button(text="Змінити стать", callback_data="gender_toggle")
+        builder.adjust(2, 1)
+    else:
+        builder.adjust(2)
     return builder.as_markup()
 
 

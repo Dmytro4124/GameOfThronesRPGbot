@@ -15,7 +15,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.menus import get_dynamic_menu, get_main_menu, build_ability_preview_keyboard, build_point_buy_keyboard, build_asi_picker_keyboard
-from bot.utils import send_safe_message, send_game_response
+from bot.utils import send_safe_message, send_game_response, _sanitize_markdown
 from database.operations import (
     get_unique_regions, get_houses_by_region, get_house_stats_data,
     get_user_data, save_user_data, delete_user_data,
@@ -293,7 +293,7 @@ async def start_game_with_character(bot: Bot, chat_id: int, char_name: str):
         chat_id,
         preview_text,
         parse_mode='Markdown',
-        reply_markup=build_ability_preview_keyboard(),
+        reply_markup=build_ability_preview_keyboard(show_gender_toggle=True),
     )
 
 
@@ -331,8 +331,15 @@ def _build_ability_preview_text(profile: dict) -> str:
         "CHA": "Харизма",
     }
 
+    from core.hero_identity import get_gender, get_family, format_family_line
     lines = [
         f"⚔️ *{char_name}* — {char_class}",
+        f"🚻 *Стать:* {_sanitize_markdown(get_gender(profile) or 'не визначено')}",
+    ]
+    family_line = _sanitize_markdown(format_family_line(get_family(profile)))
+    if family_line:
+        lines.append(f"👪 *Родина:* {family_line}")
+    lines += [
         "",
         "📊 *Авто-розкид характеристик:*",
     ]
@@ -379,14 +386,19 @@ async def _finalise_character_and_start(bot: Bot, chat_id: int, full_profile: di
 
     start_loc = full_profile.get("Поточне місцезнаходження", "Вестерос")
     hero_name = full_profile.get("Ім'я", char_name)
-    profile_region = full_profile.get("Регіон", "")
-    profile_class = full_profile.get("class", "")
-    profile_heritage = full_profile.get("heritage", "")
+    from core.hero_identity import get_family
 
     # Background world setup (canon NPC + contextual NPC)
     async def initial_world_setup(loc, p_name):
         try:
             await background_canon_generation(user_id, excluded_name=p_name)
+            _family = get_family(full_profile)
+            if _family:
+                try:
+                    from database.operations import seed_family_reputation
+                    await seed_family_reputation(user_id, _family)
+                except Exception as e_fam:
+                    logger.error(f"[FAMILY REP SEED] {type(e_fam).__name__}: {e_fam}")
             await populate_contextual_npcs(user_id, loc, "Start of the game. Normal daily routine.", excluded_name=p_name)
             # refresh усередині world.py міг впасти (429/квота) -> кеш {}; один retry
             if not user_sessions.get(user_id, {}).get("npc_cache"):
@@ -411,7 +423,7 @@ async def _finalise_character_and_start(bot: Bot, chat_id: int, full_profile: di
     await bot.send_message(chat_id, stats_msg, parse_mode='Markdown')
 
     # Intro: cache hit → instant; cache miss → fallback + background LLM
-    cached_intro_text = get_cached_intro(profile_class, profile_heritage, profile_region)
+    cached_intro_text = get_cached_intro(user_id, full_profile)
 
     if cached_intro_text:
         await send_safe_message(bot, chat_id, cached_intro_text, reply_markup=get_main_menu(), parse_mode=None)
@@ -452,7 +464,7 @@ async def _finalise_character_and_start(bot: Bot, chat_id: int, full_profile: di
                     display_text += f"\n\n_{action_prompt}_"
 
                 if display_text:
-                    await set_cached_intro(profile_class, profile_heritage, profile_region, display_text)
+                    await set_cached_intro(user_id, full_profile, display_text)
                     markup = get_dynamic_menu(button_texts) if button_texts else get_main_menu()
                     try:
                         await placeholder_msg.delete()
@@ -781,11 +793,54 @@ async def callback_pb_cancel(call: CallbackQuery):
         await call.message.edit_text(
             preview_text,
             parse_mode='Markdown',
-            reply_markup=build_ability_preview_keyboard(),
+            reply_markup=build_ability_preview_keyboard(show_gender_toggle=True),
         )
         await call.answer()
     except Exception as e:
         logger.error(f"[PB CANCEL] {type(e).__name__}: {e}")
+        await call.answer()
+
+
+@router.callback_query(F.data == "gender_toggle")
+async def callback_gender_toggle(call: CallbackQuery):
+    """Циклічно міняє стать героя у превʼю: "" -> чоловіча -> жіноча -> чоловіча.
+    Синхронно в temp_profile і auto_roll_profile (Cancel point-buy не губить вибір)."""
+    from core.hero_identity import GENDER_MALE, GENDER_FEMALE, get_gender, get_family, drop_spouses
+
+    chat_id = call.message.chat.id
+    session = user_sessions.get(chat_id, {})
+
+    if session.get('state') != "WAITING_ABILITY_PREVIEW":
+        await call.answer()
+        return
+
+    try:
+        profile = session.get('temp_profile')
+        if not profile:
+            await call.answer()
+            return
+
+        new_gender = GENDER_FEMALE if get_gender(profile) == GENDER_MALE else GENDER_MALE
+        profile["Стать"] = new_gender
+        # Зміна статі -> подружжя більше не валідне; решта родини лишається
+        new_family = drop_spouses(get_family(profile))
+        profile["Родина"] = new_family
+        auto_roll = session.get('auto_roll_profile')
+        if isinstance(auto_roll, dict):
+            auto_roll["Стать"] = new_gender
+            auto_roll["Родина"] = list(new_family)
+
+        try:
+            await call.message.edit_text(
+                _build_ability_preview_text(profile),
+                parse_mode='Markdown',
+                reply_markup=build_ability_preview_keyboard(show_gender_toggle=True),
+            )
+        except Exception as e_edit:
+            logger.warning(f"[GENDER TOGGLE] edit failed: {type(e_edit).__name__}: {e_edit}")
+        await call.answer(f"Стать: {new_gender}")
+    except Exception as e:
+        logger.error(f"[GENDER TOGGLE] {type(e).__name__}: {e}")
         await call.answer()
 
 
@@ -1173,6 +1228,13 @@ def _build_dnd_profile_text(profile: dict, chat_id: int) -> str:
     lines.append("")
     lines.append(f"🛡 *Клас:* {char_class} (L{level})")
     lines.append(f"🩸 *Походження:* {heritage}")
+    from core.hero_identity import get_gender, get_family, format_family_line
+    _gender = get_gender(profile)
+    if _gender:
+        lines.append(f"🚻 *Стать:* {_sanitize_markdown(_gender)}")
+    _family_line = _sanitize_markdown(format_family_line(get_family(profile)))
+    if _family_line:
+        lines.append(f"👪 *Родина:* {_family_line}")
     lines.append(f"⚡ *XP:* {xp} / {next_xp_str}")
     lines.append("")
     lines.append(f"❤️ *HP:* {hp_current}/{hp_max}  |  🛡 *AC:* {ac}")

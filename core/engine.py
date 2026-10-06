@@ -41,6 +41,7 @@ from core.prompts import (
     build_narrator_parts, build_gm_logic_parts, build_history_summary_prompt,
     GM_LOGIC_SCHEMA,
 )
+from core.hero_identity import get_gender, get_family, family_relation_map
 from core.world_constants import (
     VALID_LOCATIONS_ORDERED, VALID_REGIONS_ORDERED, TRAVEL_LOCATION,
     get_region_for_location, get_locations_for_region, LOCATION_DESCRIPTIONS,
@@ -442,7 +443,8 @@ def _build_narrator_prompt(user_input, director_notes, npc_context_text,
                            erotic_mode=False, active_roster=None, dead_npcs=None,
                            departing_roster_text="", arriving_roster_text="",
                            scene_continuity_block: str = "",
-                           combat_log=None):
+                           combat_log=None,
+                           player_gender: str = "", player_family=None):
     """Returns (static, dynamic): static -> system_instruction (cached), dynamic -> contents."""
     return build_narrator_parts(
         user_input=user_input,
@@ -462,6 +464,8 @@ def _build_narrator_prompt(user_input, director_notes, npc_context_text,
         arriving_roster_text=arriving_roster_text,
         scene_continuity_block=scene_continuity_block,
         combat_log=combat_log,
+        player_gender=player_gender,
+        player_family=player_family,
     )
 
 
@@ -1133,7 +1137,8 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
     # === ОНОВЛЕНО: 3-рівнева фільтрація NPC (Регіон → Локація → Сцена) ===
     context_knowledge = await get_relevant_context(user_input, curr_loc)
     npc_context_text, legal_npc_names, npc_reputation_context = get_location_npcs(
-        chat_id, curr_loc, curr_scene, current_region=curr_region
+        chat_id, curr_loc, curr_scene, current_region=curr_region,
+        hero_family=family_relation_map(profile),
     )
 
     # Ростер НА ПОЧАТКУ ходу — саме його бачив Worker (валідація companions_moving + debug diag)
@@ -1672,7 +1677,8 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
     if moved_companions:
         # Компаньйони вже виїхали з кешу старої сцени → departing-ростер без них
         departing_npc_context, departing_npc_names, _ = get_location_npcs(
-            chat_id, curr_loc, curr_scene, current_region=curr_region
+            chat_id, curr_loc, curr_scene, current_region=curr_region,
+            hero_family=family_relation_map(profile),
         )
     arriving_npc_context = ""
     arriving_npc_names = []
@@ -1684,7 +1690,8 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         curr_scene  = _post_scene
         curr_region = _post_region
         npc_context_text, legal_npc_names, npc_reputation_context = get_location_npcs(
-            chat_id, curr_loc, curr_scene, current_region=curr_region
+            chat_id, curr_loc, curr_scene, current_region=curr_region,
+            hero_family=family_relation_map(profile),
         )
         # "Ростер прибуття" = NPC нової локації/сцени
         arriving_npc_context = npc_context_text
@@ -1802,6 +1809,8 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
     gm_logic_static, gm_logic_prompt = build_gm_logic_parts(
         hero_name=profile.get("Ім'я", "Невідомий"),
         hero_house=profile.get("Дім", "Невідомий"),
+        hero_gender=get_gender(profile),
+        hero_family=get_family(profile),
         profile_json=profile_json,
         context_knowledge=context_knowledge,
         event_injection=event_injection,
@@ -2001,6 +2010,8 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             npc_context_text=npc_context_text,
             player_name=profile.get("Ім'я", "Невідомий"),
             player_house=profile.get("Дім", "Невідомий"),
+            player_gender=get_gender(profile),
+            player_family=get_family(profile),
             current_scene=curr_scene,
             current_location=curr_loc,
             impact_narrative_hints=impact_narrative_hints,
