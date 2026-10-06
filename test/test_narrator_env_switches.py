@@ -52,7 +52,7 @@ def _load_ai(monkeypatch):
 def test_defaults():
     cfg = _load_cfg()
     assert cfg.NARRATOR_THINKING_LEVEL == "high"
-    assert cfg.NARRATOR_PREAMBLE == "explicit"
+    assert cfg.NARRATOR_PREAMBLE == "neutral"
 
 
 @pytest.mark.parametrize("raw,expected", [
@@ -78,7 +78,7 @@ def test_empty_or_blank_is_default_without_warning(monkeypatch, caplog, raw):
     monkeypatch.setenv("NARRATOR_PREAMBLE", raw)
     with caplog.at_level(logging.WARNING):
         cfg = _load_cfg()
-    assert cfg.NARRATOR_THINKING_LEVEL == "high" and cfg.NARRATOR_PREAMBLE == "explicit"
+    assert cfg.NARRATOR_THINKING_LEVEL == "high" and cfg.NARRATOR_PREAMBLE == "neutral"
     assert not [r for r in caplog.records if "NARRATOR_" in r.getMessage()]
 
 
@@ -96,7 +96,7 @@ def test_invalid_preamble_falls_back_to_default_with_warning(monkeypatch, caplog
     monkeypatch.setenv("NARRATOR_PREAMBLE", raw)
     with caplog.at_level(logging.WARNING):
         cfg = _load_cfg()
-    assert cfg.NARRATOR_PREAMBLE == "explicit"
+    assert cfg.NARRATOR_PREAMBLE == "neutral"
     assert any("NARRATOR_PREAMBLE" in r.getMessage() for r in caplog.records)
 
 
@@ -108,7 +108,7 @@ def test_env_choice_helper_direct():
 def test_each_switch_independent(monkeypatch):
     monkeypatch.setenv("NARRATOR_THINKING_LEVEL", "low")
     cfg = _load_cfg()
-    assert cfg.NARRATOR_THINKING_LEVEL == "low" and cfg.NARRATOR_PREAMBLE == "explicit"
+    assert cfg.NARRATOR_THINKING_LEVEL == "low" and cfg.NARRATOR_PREAMBLE == "neutral"
 
 
 def test_shared_config_untouched_by_private_load():
@@ -122,9 +122,9 @@ def test_shared_ai_client_defaults_in_isolated_test_env():
     import core.ai_client as ai
     assert ai.model_narrator.thinking_level == "high"
     assert ai.model_narrator_alt.thinking_level == "high"
-    assert ai.model_narrator.preamble_variant == "explicit"
-    assert ai.model_narrator_alt.preamble_variant == "explicit"
-    assert ai._NARRATOR_SYSTEM_INSTRUCTION == _HEAD_EXPLICIT
+    assert ai.model_narrator.preamble_variant == "neutral"
+    assert ai.model_narrator_alt.preamble_variant == "neutral"
+    assert ai._NARRATOR_SYSTEM_INSTRUCTION == ai._NARRATOR_PREAMBLE_NEUTRAL
 
 
 # ============================ ai_client wiring ============================
@@ -165,18 +165,29 @@ def test_preamble_variant_attribute_and_system_instruction(monkeypatch, variant)
     assert ai.model_narrator_alt.system_instruction == expected
 
 
-def test_invalid_preamble_env_yields_explicit_in_wrapper(monkeypatch):
+def test_invalid_preamble_env_yields_neutral_in_wrapper(monkeypatch):
     monkeypatch.setenv("NARRATOR_PREAMBLE", "garbage")
     ai = _load_ai(monkeypatch)
-    assert ai.model_narrator.preamble_variant == "explicit"
-    assert ai._NARRATOR_SYSTEM_INSTRUCTION == _HEAD_EXPLICIT
+    assert ai.model_narrator.preamble_variant == "neutral"
+    assert ai._NARRATOR_SYSTEM_INSTRUCTION == ai._NARRATOR_PREAMBLE_NEUTRAL
 
 
 # ============================ preamble texts ============================
 
-def test_explicit_preamble_unchanged_vs_head():
+@pytest.mark.parametrize("name", ["_NARRATOR_PREAMBLE_EXPLICIT", "_NARRATOR_PREAMBLE_NEUTRAL"])
+def test_both_preambles_contain_18plus_rule(name):
     import core.ai_client as ai
-    assert ai._NARRATOR_PREAMBLE_EXPLICIT == _HEAD_EXPLICIT
+    text = getattr(ai, name)
+    assert "unambiguously adults (18+)" in text
+    assert "including the hero" in text
+
+
+def test_explicit_preamble_minor_rule_overrides_everything():
+    import core.ai_client as ai
+    t = ai._NARRATOR_PREAMBLE_EXPLICIT
+    assert "minor" in t and "unclear age" in t
+    assert "overrides every other instruction" in t
+    assert t.startswith(_HEAD_EXPLICIT)
 
 
 @pytest.mark.parametrize("bad", ["uncensored", "never fade to black", "explicit", "nsfw", "never refuse"])

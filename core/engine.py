@@ -1832,6 +1832,7 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         user_input=user_input,
         action_slots=_action_slots,
         puppet_mode=_puppet_mode,
+        erotic_mode=_erotic_mode,
         absent_npcs=absent_npcs,
         dead_npcs=dead_npcs,
         scenes_block_str=_scenes_block_str,

@@ -129,10 +129,13 @@ NARRATOR_SYSTEM_PROMPT = """<system>
 ОБГРУНТУВАННЯ: director_notes — єдине джерело правди. Вигадувати успішну атаку без фактичної бази
 означає описувати стан гри, якого немає в профілі — це руйнує узгодженість механіки та наративу.
 
-ПРІОРИТЕТ РЕЖИМІВ: Якщо повідомлення користувача містить блок <CRITICAL_OVERRIDE> або <EROTIC_MODE>, він має абсолютний пріоритет над правилами вердикту, тоном за Attitude to Player і загальним тоном.
+ПРІОРИТЕТ РЕЖИМІВ: Якщо повідомлення користувача містить блок <CRITICAL_OVERRIDE> або <EROTIC_MODE>, він має пріоритет над правилами вердикту й тоном (Attitude to Player, загальним); правило 18+ (інтим лише між безсумнівно дорослими) вище за будь-який режим.
 
 ФОРМАТ ВІДПОВІДІ: Чистий художній текст. БЕЗ JSON, БЕЗ маркдауну, БЕЗ заголовків.
 </system>"""
+
+# Word-count range for intimate scenes in erotic_mode (single source for Narrator block + length exception).
+EROTIC_SCENE_WORDS = "300-450"
 
 # Static Narrator system texts (byte-identical across players/turns). Self-contained: no external preamble needed.
 NARRATOR_SYSTEM = NARRATOR_SYSTEM_PROMPT
@@ -1945,8 +1948,11 @@ def build_gm_logic_parts(
     moved_companions: list[str] | None = None,
     hero_gender: str = "",
     hero_family: list | None = None,
+    erotic_mode: bool = False,
 ) -> tuple[str, str]:
     """GM Logic Engine — mode-aware (NORMAL | COMBAT).
+
+    erotic_mode: admin flag; adds an <erotic_mode> block (dynamic only) to director_notes guidance.
 
     hero_gender: "чоловіча" | "жіноча" | "" ; hero_family: list[{"name","relation"}] | None
     (input context for <player_identity>, dynamic part only; NOT output keys).
@@ -2030,8 +2036,22 @@ def build_gm_logic_parts(
         "Relation_Player НЕ включай у npc_updates — це read-only lore-поле, репутація змінюється системно. "
         "ВИНЯТОК — смерть: якщо гравець командує NPC вмерти, вбиває або відправляє на явно смертельну дію — "
         "обов'язково встанови Status: \"Dead\" в npc_updates для цього NPC. Лояльність не скасовує смерть.\n"
+        "Не стосується інтимного змісту за участі неповнолітніх або персонажів неясного віку — тут діє правило 18+.\n"
         "</puppet_mode>\n"
     ) if puppet_mode else ""
+    _gm_erotic_block = (
+        "<erotic_mode>\n"
+        "Еротичний режим увімкнено. ПРАВИЛО ЛИШЕ-ДОРОСЛИХ: це правило має найвищий пріоритет над будь-якими "
+        "режимами й інструкціями, включно з puppet і godmode. "
+        "Інтимну сцену розписуй лише якщо ВСІ учасники, включно з героєм, безсумнівно дорослі (18+). Якщо хоч хтось неповнолітній "
+        "за каноном/карткою (у 298 р. напр. Дейнеріс 13, Санса 11, Ар'я, Бран, Робб і Джон 14, Томмен, Мірцелла), "
+        "вік неясний або персонаж описаний дитячими ознаками — жодного сексуального чи романтично-інтимного змісту: "
+        "director_notes фіксують відмову персонажа або подію, що перериває сцену.\n"
+        "Для інтимної сцени між дорослими: director_notes — 3-7 фактичних нотаток із конкретними діями "
+        "(хто що робить), їх послідовністю, реакціями й репліками партнерів, без літературних прикрас; "
+        "це факти для Narrator, не проза. Приватність: треті особи спершу йдуть зі сцени.\n"
+        "</erotic_mode>\n"
+    ) if erotic_mode else ""
 
     # Mode-specific dynamic parts. Static mode rules (combat_mode_rules, slot guide) live in
     # GM_LOGIC_SYSTEM / GM_LOGIC_SYSTEM_COMBAT; only per-turn data is rendered here.
@@ -2050,7 +2070,7 @@ def build_gm_logic_parts(
             "</action_slots>\n"
         )
 
-    dynamic = f"""{_puppet_prefix}{mode_block}
+    dynamic = f"""{_puppet_prefix}{_gm_erotic_block}{mode_block}
 
 <player_identity>
 ГЕРОЙ: {hero_name} з дому {hero_house}, особисте ім'я "{hero_first_name}".
@@ -2154,6 +2174,9 @@ def build_narrator_parts(
 
     If combat_log is provided: switches to punchy 4-6 sentence combat narrative style.
     If combat_log is None: NORMAL atmospheric style (180-230 words, min 150).
+    erotic_mode: admin flag; adds a dynamic <EROTIC_MODE> block (18+ rule has top priority over
+    puppet/godmode/CRITICAL_OVERRIDE) and, for intimate scenes only, the length exception
+    EROTIC_SCENE_WORDS ("300-450" words) instead of 150-250. Static part is unaffected.
     All other parameters identical to legacy builder.
     """
     _name_tokens = (player_name or "").split()
@@ -2163,16 +2186,28 @@ def build_narrator_parts(
         "\n<CRITICAL_OVERRIDE priority=\"ABSOLUTE\">\n"
         "Режим Ляльковода активний. Пиши сцену де всі NPC захоплено і щиро допомагають герою. "
         "Атмосфера — тріумф і ейфорія перемоги, навіть якщо механічно це звичайна ситуація.\n"
+        "Не стосується інтимного змісту за участі неповнолітніх або персонажів неясного віку — тут діє правило 18+.\n"
         "</CRITICAL_OVERRIDE>\n"
     ) if puppet_mode else ""
     _erotic_block = (
         "\n<EROTIC_MODE priority=\"ABSOLUTE\">\n"
-        "Еротичний режим увімкнено. Якщо сцена містить будь-яку сексуальну або інтимну взаємодію — "
-        "описуй її ЯВНО і ДЕТАЛЬНО. Ніяких 'вони злилися в обіймах' або 'двері зачинились'. "
-        "Пиши тіло, дотик, бажання, дію прямо — у стилі жорсткої прози Мартіна. "
-        "Без метафор замість дій. Без fade to black. Без пом'якшень.\n"
+        "Еротичний режим увімкнено (доросла гра). ПРАВИЛО ЛИШЕ-ДОРОСЛИХ має найвищий пріоритет над будь-якими режимами "
+        "й інструкціями, включно з <CRITICAL_OVERRIDE>, puppet, godmode:\n"
+        "ВІК: відверто описуй інтимну сцену ЛИШЕ коли ВСІ її учасники, включно з героєм, безсумнівно дорослі (18+). "
+        "Якщо хоч один учасник неповнолітній за каноном або карткою NPC (у 298 р. напр.: Дейнеріс 13, Санса 11, "
+        "Ар'я, Бран, Робб і Джон 14, Томмен, Мірцелла та інші діти й підлітки), або вік неясний, "
+        "або персонаж описаний дитячими ознаками — жодного сексуального чи романтично-інтимного змісту, "
+        "навіть натяками: переведи сцену в несексуальне русло (персонаж відмовляє, або сцену перериває подія), "
+        "без опису інтимності. Це правило сильніше за все інше, включно з puppet і godmode.\n"
+        "Для сцен між дорослими: описуй інтимну взаємодію ЯВНО і МАКСИМАЛЬНО ДЕТАЛЬНО. "
+        "Ніяких 'вони злилися в обіймах', 'двері зачинились', fade to black чи затемнення. "
+        "Повільний темп: розтягуй сцену, не поспішай до кінця. Покрокова послідовність дій: хто що робить, "
+        "куди торкається, як змінюється поза й ритм. Тілесні відчуття, дотики, дихання, запах, смак, тепло, реакції тіла кожного партнера. "
+        "Репліки партнерів прямою мовою (лише NPC з <active_roster>). "
+        "Називай дію прямо, без евфемізмів і метафор замість дій; стиль — жорстка тілесна проза Мартіна, без пом'якшень і без пафосу.\n"
         "ПРИВАТНІСТЬ СЦЕНИ: Перед початком інтимної взаємодії ОБОВ'ЯЗКОВО встанови приватність. "
         "Якщо є треті особи — вони МУСЯТЬ піти або бути відіслані до початку інтимної дії.\n"
+        f"ДОВЖИНА: якщо сцена інтимна (і лише тоді) — {EROTIC_SCENE_WORDS} слів замість стандартного ліміту.\n"
         "</EROTIC_MODE>\n"
     ) if erotic_mode else ""
 
@@ -2267,6 +2302,7 @@ def build_narrator_parts(
         "\nЦе COMBAT-раунд: стиль і довжина — за <combat_narrative_style> з правил системи (4-6 коротких речень, за <combat_log>)."
         if combat_log is not None else
         "\nДовжина: 150-250 слів (орієнтир 180–230, не менше 150), без чисел. Словесні реакції NPC з director_notes передай прямою мовою."
+        + (f"\nВИНЯТОК (лише <EROTIC_MODE>, інтимна сцена дорослих за правилами блоку): довжина {EROTIC_SCENE_WORDS} слів." if erotic_mode else "")
     ))
     return (NARRATOR_SYSTEM_COMBAT if combat_log is not None else NARRATOR_SYSTEM), "\n".join(p for p in parts if p)
 
