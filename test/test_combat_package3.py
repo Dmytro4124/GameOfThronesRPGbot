@@ -59,7 +59,6 @@ if "config" not in sys.modules:
     _fake_config.TAB_KNOWLEDGE = "KnowledgeBase"
     _fake_config.GEMINI_API_KEY = "stub-key-for-tests"
     _fake_config.PUPPET_USERS = set()
-    _fake_config.EROTIC_USERS = set()
     sys.modules["config"] = _fake_config
 
 if "google.genai" not in sys.modules:

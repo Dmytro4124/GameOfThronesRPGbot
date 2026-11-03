@@ -203,7 +203,7 @@ if __name__ == "__main__":
 
 ### Конфігурація
 - `config.py` — звичайний модуль, читає `os.getenv()` через `python-dotenv` (`load_dotenv()`). **Без pydantic-settings.** Пара констант (`MODEL_*_NAME`, `MODEL_*_TEMP`, назви табів `TAB_*`) хардкодом у файлі.
-- Runtime-toggles тримаються в `set` об'єктах у `config.py`: `GODMODE_USERS`, `PUPPET_USERS`, `EROTIC_USERS` — модифікуються чит-командами безпосередньо.
+- Runtime-toggles тримаються в `set` об'єктах у `config.py`: `GODMODE_USERS`, `PUPPET_USERS` — модифікуються чит-командами безпосередньо.
 - `ADMIN_TELEGRAM_IDS = [494157543]` — захардкоджено в коді.
 
 ### Middleware/фільтри/декоратори
@@ -221,7 +221,7 @@ if __name__ == "__main__":
 4. Censor (`validate_action`) + механіка (`resolve_action_mechanics` — кубики 2d50, DC, виявлення training).
 5. `apply_system_impacts` (час, енергія, золото, скіли).
 6. **GM_Logic виклик** → JSON `{director_notes, npc_updates, suggested_actions, companion_npcs}`.
-7. **Narrator виклик** (з опційним streaming через `asyncio.Queue` для прогресивного оновлення Telegram-повідомлення; вимикається в еротичному режимі).
+7. **Narrator виклик** (з опційним streaming через `asyncio.Queue` для прогресивного оновлення Telegram-повідомлення).
 8. Background save: профіль, NPC-зміни, репутація, memory anchor, sliding-window сумаризація історії (стиснення коли > 20 ходів).
 
 ---
@@ -279,7 +279,7 @@ if __name__ == "__main__":
 
 ### Адмінські cheat-команди (`core/cheats.py`, доступні лише `ADMIN_TELEGRAM_IDS`)
 
-`/heal`, `/sethp`, `/setenergy`, `/setgold`, `/settitle`, `/sethouse`, `/additem`, `/delitem`, `/clearinv`, `/addskill`, `/setskill`, `/tp`, `/addtime`, `/tpnpc`, `/setrep`, `/killnpc`, `/delnpc`, `/cleanscene`, `/godmode` (auto-крит у кубиках), `/debug`, `/puppet` (всі NPC лояльні), `/erotic` (NSFW режим — вимикає safety_settings + streaming), `/thoughts` (показує `_thoughts_log` від include_thoughts).
+`/heal`, `/sethp`, `/setenergy`, `/setgold`, `/settitle`, `/sethouse`, `/additem`, `/delitem`, `/clearinv`, `/addskill`, `/setskill`, `/tp`, `/addtime`, `/tpnpc`, `/setrep`, `/killnpc`, `/delnpc`, `/cleanscene`, `/godmode` (auto-крит у кубиках), `/debug`, `/puppet` (всі NPC лояльні), `/thoughts` (показує `_thoughts_log` від include_thoughts).
 
 ---
 

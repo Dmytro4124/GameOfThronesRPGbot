@@ -447,14 +447,14 @@ class RPGTesterAdapter:
     async def process_cheat(self, cmd_str: str) -> str:
         """Виконує чіт-команду напряму, без Telegram-контексту. Повертає текст відповіді."""
         from core.cheats import (
-            cmd_killnpc, cmd_godmode, cmd_puppet, cmd_erotic,
+            cmd_killnpc, cmd_godmode, cmd_puppet,
             cmd_heal, cmd_sethp, cmd_setenergy, cmd_setgold,
             cmd_addskill, cmd_setskill, cmd_tp, cmd_setrep, cmd_tpnpc,
             cmd_delnpc, cmd_cleanscene, cmd_addtime,
         )
         _dispatch = {
             "/killnpc": cmd_killnpc, "/delnpc": cmd_delnpc,
-            "/godmode": cmd_godmode, "/puppet": cmd_puppet, "/erotic": cmd_erotic,
+            "/godmode": cmd_godmode, "/puppet": cmd_puppet,
             "/heal": cmd_heal, "/sethp": cmd_sethp,
             "/setenergy": cmd_setenergy, "/setgold": cmd_setgold,
             "/addskill": cmd_addskill, "/setskill": cmd_setskill,

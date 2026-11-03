@@ -11,7 +11,7 @@ from database.canon_npc import _score_to_relation_text
 from core.mechanics import safe_int
 from core.inventory import parse_inventory, add_item, remove_item, _parse_one, format_inventory
 from core.world_constants import is_valid_location, get_region_for_location
-from config import GODMODE_USERS, PUPPET_USERS, EROTIC_USERS, ADMIN_TELEGRAM_IDS
+from config import GODMODE_USERS, PUPPET_USERS, ADMIN_TELEGRAM_IDS
 
 # ─── Module-level debug state (parallel to GODMODE_USERS / PUPPET_USERS) ───
 DEBUG_USERS: set = set()
@@ -662,7 +662,6 @@ async def cmd_debug(message, bot, chat_id, args):
         await message.answer("❌ Профіль не знайдено"); return
     godmode_flag = "ON" if chat_id in GODMODE_USERS else "OFF"
     puppet_flag = "ON" if chat_id in PUPPET_USERS else "OFF"
-    erotic_flag = "ON" if chat_id in EROTIC_USERS else "OFF"
     name_key = "Ім'я"
     hp_key = "Здоров'я"
     p_name = profile.get(name_key, '?')
@@ -687,7 +686,7 @@ async def cmd_debug(message, bot, chat_id, args):
         f"Регіон: {p_region}\n"
         f"Час: {p_time}\n"
         f"Інвентар: {p_inv}\n"
-        f"Godmode: {godmode_flag} | Puppet: {puppet_flag} | Erotic: {erotic_flag}"
+        f"Godmode: {godmode_flag} | Puppet: {puppet_flag}"
     )
     await message.answer(text)
 
@@ -762,15 +761,6 @@ async def cmd_debugmode(message, bot, chat_id, args):
         )
 
 
-async def cmd_erotic(message, bot, chat_id, args):
-    if chat_id in EROTIC_USERS:
-        EROTIC_USERS.discard(chat_id)
-        await message.answer("🔴 Еротичний режим ВИМКНЕНО")
-    else:
-        EROTIC_USERS.add(chat_id)
-        await message.answer("🔞 Еротичний режим УВІМКНЕНО — явні описи інтимних сцен")
-
-
 # ─────────────────────────── Диспетчер ───────────────────────────
 
 async def handle_cheat_command(message, bot):
@@ -803,7 +793,6 @@ async def handle_cheat_command(message, bot):
         "/debug": cmd_debug,
         "/debugmode": cmd_debugmode,
         "/puppet": cmd_puppet,
-        "/erotic": cmd_erotic,
         "/thoughts": cmd_thoughts,
     }
     handler = dispatch.get(cmd)

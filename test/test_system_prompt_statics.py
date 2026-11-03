@@ -121,7 +121,7 @@ def test_gm_combat_snapshot_stays_out_of_static():
 
 def test_narrator_static_identical_across_players_normal():
     s1, _ = _narrator(_PLAYERS[0])
-    s2, _ = _narrator(_PLAYERS[1], puppet_mode=True, erotic_mode=True, dead_npcs=["Нед Старк"])
+    s2, _ = _narrator(_PLAYERS[1], puppet_mode=True, dead_npcs=["Нед Старк"])
     assert s1 == s2 == SYSTEM_PROMPTS["narrator"] == P.NARRATOR_SYSTEM
 
 

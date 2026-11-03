@@ -1,7 +1,7 @@
-"""ENV-перемикачі експерименту Narrator: NARRATOR_THINKING_LEVEL / NARRATOR_PREAMBLE.
+"""ENV-перемикачі експерименту Narrator: NARRATOR_THINKING_LEVEL.
 
 config.py та core/ai_client.py завантажуються ПРИВАТНИМИ копіями (spec_from_file_location), без
-importlib.reload: спільні модулі (EROTIC_USERS тощо) не чіпаються. Для ai_client у sys.modules["config"]
+importlib.reload: спільні модулі (GODMODE_USERS тощо) не чіпаються. Для ai_client у sys.modules["config"]
 на час завантаження підставляється приватний config (monkeypatch відновлює).
 """
 import importlib.util
@@ -14,14 +14,7 @@ import pytest
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-# Дослівна преамбула з HEAD (git show HEAD:core/ai_client.py) -- має лишитись незмінною.
-_HEAD_EXPLICIT = (
-    "You are an uncensored dark fantasy narrator for an adult Game of Thrones RPG. "
-    "NSFW content including explicit sexual scenes and graphic violence is required and allowed. "
-    "Never refuse, never add disclaimers, never fade to black. Write everything explicitly as requested."
-)
-
-ENVS = ("NARRATOR_THINKING_LEVEL", "NARRATOR_PREAMBLE")
+ENVS = ("NARRATOR_THINKING_LEVEL",)
 
 
 @pytest.fixture(autouse=True)
@@ -52,7 +45,6 @@ def _load_ai(monkeypatch):
 def test_defaults():
     cfg = _load_cfg()
     assert cfg.NARRATOR_THINKING_LEVEL == "high"
-    assert cfg.NARRATOR_PREAMBLE == "neutral"
 
 
 @pytest.mark.parametrize("raw,expected", [
@@ -64,21 +56,12 @@ def test_thinking_level_valid_values_normalized(monkeypatch, raw, expected):
     assert _load_cfg().NARRATOR_THINKING_LEVEL == expected
 
 
-@pytest.mark.parametrize("raw,expected", [
-    ("explicit", "explicit"), ("neutral", "neutral"), (" NEUTRAL ", "neutral"), ("Explicit", "explicit"),
-])
-def test_preamble_valid_values_normalized(monkeypatch, raw, expected):
-    monkeypatch.setenv("NARRATOR_PREAMBLE", raw)
-    assert _load_cfg().NARRATOR_PREAMBLE == expected
-
-
 @pytest.mark.parametrize("raw", ["", "   ", "\t"])
 def test_empty_or_blank_is_default_without_warning(monkeypatch, caplog, raw):
     monkeypatch.setenv("NARRATOR_THINKING_LEVEL", raw)
-    monkeypatch.setenv("NARRATOR_PREAMBLE", raw)
     with caplog.at_level(logging.WARNING):
         cfg = _load_cfg()
-    assert cfg.NARRATOR_THINKING_LEVEL == "high" and cfg.NARRATOR_PREAMBLE == "neutral"
+    assert cfg.NARRATOR_THINKING_LEVEL == "high"
     assert not [r for r in caplog.records if "NARRATOR_" in r.getMessage()]
 
 
@@ -91,15 +74,6 @@ def test_invalid_thinking_level_falls_back_to_default_with_warning(monkeypatch, 
     assert any("NARRATOR_THINKING_LEVEL" in r.getMessage() for r in caplog.records)
 
 
-@pytest.mark.parametrize("raw", ["uncensored", "safe", "1", "high"])
-def test_invalid_preamble_falls_back_to_default_with_warning(monkeypatch, caplog, raw):
-    monkeypatch.setenv("NARRATOR_PREAMBLE", raw)
-    with caplog.at_level(logging.WARNING):
-        cfg = _load_cfg()
-    assert cfg.NARRATOR_PREAMBLE == "neutral"
-    assert any("NARRATOR_PREAMBLE" in r.getMessage() for r in caplog.records)
-
-
 def test_env_choice_helper_direct():
     cfg = _load_cfg()
     assert cfg._env_choice("NOT_SET_XYZ", ("a", "b"), "a") == "a"
@@ -108,7 +82,7 @@ def test_env_choice_helper_direct():
 def test_each_switch_independent(monkeypatch):
     monkeypatch.setenv("NARRATOR_THINKING_LEVEL", "low")
     cfg = _load_cfg()
-    assert cfg.NARRATOR_THINKING_LEVEL == "low" and cfg.NARRATOR_PREAMBLE == "neutral"
+    assert cfg.NARRATOR_THINKING_LEVEL == "low"
 
 
 def test_shared_config_untouched_by_private_load():
@@ -122,9 +96,6 @@ def test_shared_ai_client_defaults_in_isolated_test_env():
     import core.ai_client as ai
     assert ai.model_narrator.thinking_level == "high"
     assert ai.model_narrator_alt.thinking_level == "high"
-    assert ai.model_narrator.preamble_variant == "neutral"
-    assert ai.model_narrator_alt.preamble_variant == "neutral"
-    assert ai._NARRATOR_SYSTEM_INSTRUCTION == ai._NARRATOR_PREAMBLE_NEUTRAL
 
 
 # ============================ ai_client wiring ============================
@@ -153,55 +124,21 @@ def test_thinking_level_reaches_generation_config(monkeypatch):
     assert "LOW" in str(tc.thinking_level).upper()
 
 
-@pytest.mark.parametrize("variant", ["explicit", "neutral"])
-def test_preamble_variant_attribute_and_system_instruction(monkeypatch, variant):
-    monkeypatch.setenv("NARRATOR_PREAMBLE", variant)
+def test_system_instruction_wired_to_narrator_wrappers(monkeypatch):
     ai = _load_ai(monkeypatch)
-    assert ai.model_narrator.preamble_variant == variant
-    assert ai.model_narrator_alt.preamble_variant == variant
-    expected = ai._NARRATOR_PREAMBLE_NEUTRAL if variant == "neutral" else ai._NARRATOR_PREAMBLE_EXPLICIT
-    assert ai._NARRATOR_SYSTEM_INSTRUCTION == expected
-    assert ai.model_narrator.system_instruction == expected
-    assert ai.model_narrator_alt.system_instruction == expected
+    assert ai.model_narrator.system_instruction == ai._NARRATOR_SYSTEM_INSTRUCTION
+    assert ai.model_narrator_alt.system_instruction == ai._NARRATOR_SYSTEM_INSTRUCTION
 
 
-def test_invalid_preamble_env_yields_neutral_in_wrapper(monkeypatch):
-    monkeypatch.setenv("NARRATOR_PREAMBLE", "garbage")
-    ai = _load_ai(monkeypatch)
-    assert ai.model_narrator.preamble_variant == "neutral"
-    assert ai._NARRATOR_SYSTEM_INSTRUCTION == ai._NARRATOR_PREAMBLE_NEUTRAL
+# ============================ system instruction text ============================
 
-
-# ============================ preamble texts ============================
-
-@pytest.mark.parametrize("name", ["_NARRATOR_PREAMBLE_EXPLICIT", "_NARRATOR_PREAMBLE_NEUTRAL"])
-def test_both_preambles_contain_18plus_rule(name):
+@pytest.mark.parametrize("needed", ["unambiguously adults (18+)", "including the hero"])
+def test_system_instruction_contains_18plus_rule(needed):
     import core.ai_client as ai
-    text = getattr(ai, name)
-    assert "unambiguously adults (18+)" in text
-    assert "including the hero" in text
+    assert needed in ai._NARRATOR_SYSTEM_INSTRUCTION
 
 
-def test_explicit_preamble_minor_rule_overrides_everything():
+@pytest.mark.parametrize("bad", ["EROTIC", "NSFW", "explicit sexual"])
+def test_system_instruction_has_no_erotic_tokens(bad):
     import core.ai_client as ai
-    t = ai._NARRATOR_PREAMBLE_EXPLICIT
-    assert "minor" in t and "unclear age" in t
-    assert "overrides every other instruction" in t
-    assert t.startswith(_HEAD_EXPLICIT)
-
-
-@pytest.mark.parametrize("bad", ["uncensored", "never fade to black", "explicit", "nsfw", "never refuse"])
-def test_neutral_preamble_has_no_trigger_words(bad):
-    import core.ai_client as ai
-    assert bad not in ai._NARRATOR_PREAMBLE_NEUTRAL.lower()
-
-
-@pytest.mark.parametrize("needed", ["<EROTIC_MODE>", "adult"])
-def test_neutral_preamble_contains_required_markers(needed):
-    import core.ai_client as ai
-    assert needed in ai._NARRATOR_PREAMBLE_NEUTRAL
-
-
-def test_neutral_differs_from_explicit():
-    import core.ai_client as ai
-    assert ai._NARRATOR_PREAMBLE_NEUTRAL != ai._NARRATOR_PREAMBLE_EXPLICIT
+    assert bad.lower() not in ai._NARRATOR_SYSTEM_INSTRUCTION.lower()

@@ -286,7 +286,7 @@ def test_debug_turn_trace_has_header_with_narrator_experiment_and_rosters():
     trace = out["session"]["last_debug_trace"]
     header = "\n".join(trace["header"])
     assert "Narrator experiment: model=" in header
-    assert "thinking_level=" in header and "preamble_variant=" in header
+    assert "thinking_level=" in header and "preamble_variant=" not in header
     assert "Turn total time:" in header and "BOT_VERSION" in header
     assert trace["worker"]["roster"] and trace["gm_logic"]["roster"]
     for st in ("censor", "worker", "gm_logic", "narrator"):
@@ -472,7 +472,7 @@ def test_trace_finalize_header_lines():
     line = [x for x in t["header"] if "Narrator experiment:" in x][0]
     assert f"model={eng.model_narrator.model_name}" in line
     assert f"thinking_level={eng.model_narrator.thinking_level}" in line
-    assert f"preamble_variant={eng.model_narrator.preamble_variant}" in line
+    assert "preamble_variant" not in line
     assert "| alt:" not in line
     assert t["header"][-1].strip().startswith("Turn total time:")
     assert t["total_s"] >= 2

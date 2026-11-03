@@ -31,7 +31,7 @@ def test_static_is_pure_text_contract(name, s):
 @pytest.mark.parametrize("name,s", STATICS, ids=["normal", "combat"])
 def test_static_priority_and_scene_tokens(name, s):
     assert "ПРІОРИТЕТ РЕЖИМІВ" in s
-    assert "<CRITICAL_OVERRIDE>" in s and "<EROTIC_MODE>" in s
+    assert "<CRITICAL_OVERRIDE>" in s and "EROTIC" not in s
     assert "NEW_SCENE" in s and "CONTINUING" in s
     assert "ЗАКРИТИЙ РОСТЕР" in s
 
@@ -86,7 +86,7 @@ def test_static_has_no_player_data_incl_example(pl, combat):
 
 
 def test_static_identical_across_players():
-    assert _parts(_PL[0])[0] == _parts(_PL[1], puppet_mode=True, erotic_mode=True)[0] == P.NARRATOR_SYSTEM
+    assert _parts(_PL[0])[0] == _parts(_PL[1], puppet_mode=True)[0] == P.NARRATOR_SYSTEM
     assert _parts(_PL[0], combat_log=["a"])[0] == _parts(_PL[1], combat_log=["b"])[0] == P.NARRATOR_SYSTEM_COMBAT
 
 
@@ -120,10 +120,10 @@ def test_dynamic_final_line_combat():
 
 
 def test_dynamic_modes_blocks():
-    _, d = _parts(_PL[0], puppet_mode=True, erotic_mode=True)
-    assert "<CRITICAL_OVERRIDE" in d and "<EROTIC_MODE" in d
+    _, d = _parts(_PL[0], puppet_mode=True)
+    assert "<CRITICAL_OVERRIDE" in d
     _, d2 = _parts(_PL[0])
-    assert "<CRITICAL_OVERRIDE" not in d2 and "<EROTIC_MODE" not in d2
+    assert "<CRITICAL_OVERRIDE" not in d2
 
 
 def test_scene_continuity_passthrough():

@@ -32,7 +32,7 @@ from core.narrator_ab import (
     get_pending, pop_pending, is_expired, resolve_pick, finalize_record,
     append_log, append_note,
 )
-from config import ADMIN_TELEGRAM_IDS, EROTIC_USERS, BOT_VERSION, MODEL_MAIN_NAME, NARRATOR_AB_LOG_PATH
+from config import ADMIN_TELEGRAM_IDS, BOT_VERSION, MODEL_MAIN_NAME, NARRATOR_AB_LOG_PATH
 from bot.help_text import HELP_TEXT, ADMIN_HELP_TEXT
 
 
@@ -1949,7 +1949,6 @@ async def handle_general_messages(message: Message, bot: Bot):
 
             # Streaming тимчасово ВИМКНЕНО глобально через нестабільність gemma-4-31b-it
             # (часті MALFORMED_RESPONSE, 500 INTERNAL посеред stream-ів).
-            # Раніше: USE_STREAMING = chat_id not in EROTIC_USERS
             USE_STREAMING = False
             narrator_queue = asyncio.Queue() if USE_STREAMING else None
 

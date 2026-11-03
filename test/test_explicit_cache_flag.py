@@ -228,7 +228,7 @@ def test_narrator_static_has_mode_priority(combat):
     static, dyn = P.build_narrator_parts(**a)
     assert "ПРІОРИТЕТ РЕЖИМІВ" in static
     line = [l for l in static.splitlines() if "ПРІОРИТЕТ РЕЖИМІВ" in l][0]
-    assert "CRITICAL_OVERRIDE" in line and "EROTIC_MODE" in line
+    assert "CRITICAL_OVERRIDE" in line and "EROTIC" not in line
     assert "ПРІОРИТЕТ РЕЖИМІВ" not in dyn
 
 

@@ -39,7 +39,7 @@ if GUARD_ACTIVE:
         tempfile.mkdtemp(prefix="got_tests_"), "narrator_ab.jsonl")
     for _k in ("MODEL_MAIN_NAME", "MODEL_WORKER_NAME", "MODEL_GM_LOGIC_NAME",
                "MODEL_NARRATOR_NAME", "MODEL_NARRATOR_ALT_NAME", "WEBHOOK_URL",
-               "NARRATOR_THINKING_LEVEL", "NARRATOR_PREAMBLE"):
+               "NARRATOR_THINKING_LEVEL"):
         os.environ.pop(_k, None)
 
     import gspread

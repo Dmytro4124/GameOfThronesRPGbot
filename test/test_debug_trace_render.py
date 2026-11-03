@@ -94,7 +94,7 @@ def _base_trace(chat_id=111):
 def _full_trace():
     t = _base_trace()
     t["header"] = ["  BOT_VERSION: 9.9.9",
-                   "  Narrator experiment: model=m thinking_level=high preamble_variant=explicit",
+                   "  Narrator experiment: model=m thinking_level=high",
                    "  Turn total time: 12.34s"]
     t["total_s"] = 12.34
     t["censor"]["metrics"] = ["  CENSOR_METRIC_ROW"]

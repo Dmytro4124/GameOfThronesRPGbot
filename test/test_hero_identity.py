@@ -165,7 +165,7 @@ def test_translit_variants_same_person(a, b):
 
 def test_fold_translit():
     assert _fold_translit("ар'я") == "аря"
-    assert _fold_translit("кейтлін") == "кейтлин"
+    assert _fold_translit("кейтлін") == "кеитлин"
     assert _fold_translit("ьїй") == "ии"
 
 

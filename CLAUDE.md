@@ -153,7 +153,7 @@ Plan mode завершується тим, що план показано кор
 ```
 TelegramGameOfThronesBot/
 ├── main.py                  # точка входу: webhook або polling
-├── config.py                # ENV, моделі, режими (godmode/puppet/erotic)
+├── config.py                # ENV, моделі, режими (godmode/puppet)
 ├── scripts/
 │   ├── dnd_migrate.py       # CLI tool для Phase 9 migration (НЕ runtime)
 │   ├── ab_report.py         # звіт по Narrator A/B лог-файлу (НЕ runtime)
@@ -274,8 +274,8 @@ Pipeline складається з 4 ролей. Перші три поверт�
 
 **Narrator** (`build_narrator_prompt(combat_log=...)`) — повертає **чистий художній текст**, без JSON, без маркдауну.
 - Якщо `combat_log` передано → COMBAT style: 4–6 коротких речень з action verbs.
-- Інакше → NORMAL style: 150–250 слів атмосферного тексту (орієнтир 180–230). Виняток: `<EROTIC_MODE>` + інтимна сцена дорослих → 300–450 слів (`EROTIC_SCENE_WORDS`).
-- **Правило 18+** (Narrator: `<EROTIC_MODE>`, статика «ПРІОРИТЕТ РЕЖИМІВ», обидві преамбули; GM: `<erotic_mode>`; застереження в puppet-блоках: Narrator `<CRITICAL_OVERRIDE>`, GM `<puppet_mode>`; godmode — лише прапор кубиків у `dnd_engine.py`, промпт-блоку не має): інтимний зміст лише між безсумнівно дорослими учасниками, включно з героєм; неповнолітні за каноном/карткою або неясний вік → без інтимного змісту. Найвищий пріоритет над будь-яким режимом. Тримається лише на промптах (кодового guard немає).
+- Інакше → NORMAL style: 150–250 слів атмосферного тексту (орієнтир 180–230).
+- **Правило 18+** (преамбула Narrator, статика «ПРІОРИТЕТ РЕЖИМІВ»; застереження в puppet-блоках: Narrator `<CRITICAL_OVERRIDE>`, GM `<puppet_mode>`): інтимний зміст — без відвертих описів і лише між безсумнівно дорослими учасниками, включно з героєм; неповнолітні за каноном/карткою або неясний вік → без інтимного змісту. Найвищий пріоритет над будь-яким режимом. Тримається лише на промптах (кодового guard немає).
 - Кінцівка сцени — відкритий момент, що штовхає до дії, **без прямого питання до героя** (питання допустиме лише як репліка NPC). Репліки — лише NPC з `<active_roster>` / `<departing_roster>` / `<arriving_roster>` і лише з мовленнєвих фактів `director_notes`: такі факти передаються прямою реплікою (1–2 речення на NPC, орієнтир 2–4 на сцену; зміст — з цих фактів і Memory Anchor NPC), без нових відомостей, обіцянок і секретів; немає мовленнєвого факту — NPC без репліки. COMBAT — без реплік, якщо їх немає в логу. Безіменні групи — тільки фон (звук/гул), без дій і реплік. NPC називати за ім'ям/титулом з картки (без безособового «місцевий лорд»).
 - **Звертання до героя** (`<player_identity>` у динаміці Narrator і GM): близькі — на ім'я/ласкаво, сторонні й офіційні — «лорд/леді Дім» або титул, голе прізвище — лише ворожий/зверхній тон; спорідненість не вигадувати; ніколи прізвище чужого дому. `_sanitize_story` (engine.py) звертань «лорд/леді + Дім» не змінює. `<player_identity>` також містить стать героя (`СТАТЬ ГЕРОЯ`; невідома → без гендерних звертань і родових форм) і `РОДИНА ГЕРОЯ (вичерпний список)` — передаються kwargs `player_gender`/`player_family` (Narrator) і `hero_gender`/`hero_family` (GM).
 - **Профіль героя:** `profile["Стать"]` (`""` | `"чоловіча"` | `"жіноча"`), `profile["Родина"]` (`list[{name, relation}]`, ≤8, relation з погляду героя: `"мати"` = NPC — мати героя). Читати лише через `core/hero_identity.py` (старі профілі без ключів → `""`/`[]`). У Worker `player_state` не входять. `get_location_npcs(..., hero_family=family_relation_map(profile))` додає в картку родича рядок `- **Родинний зв'язок з героєм:** …` лише на рендері (кеш карток не мутується). `seed_family_reputation` (operations.py) при створенні світу (`initial_world_setup`, після `background_canon_generation`) дає родичам стартову репутацію: близькі 20, дальні 10 — лише Active NPC зі score 0 і нейтральною міткою. Кнопка «Змінити стать» у превʼю (`gender_toggle`) прибирає з родини подружжя (`drop_spouses`).
@@ -292,7 +292,7 @@ Pipeline складається з 4 ролей. Перші три поверт�
 
 **Нативні схеми:** JSON-ролі викликаються через `build_strict_config(wrapper, schema=...)` → `response_schema` (OpenAPI-subset dict; integer enum не використовуються — DC/XP захищають `clamp_dc`/`_clamp_*`). Якщо API відхиляє схему (400), `AIWrapper.generate_content` один раз повторює запит без схеми; після успішного повтору схема запам'ятовується в `_REJECTED_SCHEMAS` до рестарту (лог `response_schema rejected`). `clean_and_parse_json` лишається другою лінією захисту.
 
-**Статика / динаміка промптів:** прод-шлях — `build_*_parts(...) -> (static, dynamic)` (Worker NORMAL, GM_Logic, Censor, Narrator); статика (`SYSTEM_PROMPTS`) передається як `system_instruction`, динаміка — як contents. `build_*_prompt` лишились обгортками `static + "\n\n" + dynamic`. Статика мусить бути байт-у-байт однаковою для всіх гравців і ходів (жодних даних профілю/режиму) — інакше ламається кешування. Адмін-блоки (puppet/erotic/godmode) — у динаміці; статики містять правило їхнього пріоритету.
+**Статика / динаміка промптів:** прод-шлях — `build_*_parts(...) -> (static, dynamic)` (Worker NORMAL, GM_Logic, Censor, Narrator); статика (`SYSTEM_PROMPTS`) передається як `system_instruction`, динаміка — як contents. `build_*_prompt` лишились обгортками `static + "\n\n" + dynamic`. Статика мусить бути байт-у-байт однаковою для всіх гравців і ходів (жодних даних профілю/режиму) — інакше ламається кешування. Адмін-блоки (puppet) — у динаміці (godmode — лише прапор кубиків у `dnd_engine.py`); статики містять правило їхнього пріоритету.
 
 **Допоміжні JSON-промпти** (поза основним ходом):
 - Training intent (`build_training_request_prompt`): `is_training`, `is_possible`, `skill`, `method`, `reason_if_failed`
@@ -359,7 +359,7 @@ python qa_auto_test.py
 
 Адмін-ID для cheat-команд хардкоднуто у `config.py:ADMIN_TELEGRAM_IDS`.
 
-ENV-змінні: `TELEGRAM_TOKEN`, `GEMINI_API_KEY` (+ `GEMINI_API_KEY_TEST_*` для ротації квот), `SPREADSHEET_ID`, `GOOGLE_CREDENTIALS_JSON`, `WEBHOOK_URL`, `PORT`. Опційні: `MODEL_*_NAME` (rollback моделей), `GEMINI_EXPLICIT_CACHE` (default 0), `NARRATOR_AB_ENABLED`, `NARRATOR_AB_SINK`, `NARRATOR_THINKING_LEVEL` (high|medium|low|minimal, default high), `NARRATOR_PREAMBLE` (explicit|neutral, default neutral — explicit вимагає відвертості в кожному виклику і провокує `PROHIBITED_CONTENT`; обидві преамбули містять правило 18+; читаються при старті процесу, на Render достатньо рестарту).
+ENV-змінні: `TELEGRAM_TOKEN`, `GEMINI_API_KEY` (+ `GEMINI_API_KEY_TEST_*` для ротації квот), `SPREADSHEET_ID`, `GOOGLE_CREDENTIALS_JSON`, `WEBHOOK_URL`, `PORT`. Опційні: `MODEL_*_NAME` (rollback моделей), `GEMINI_EXPLICIT_CACHE` (default 0), `NARRATOR_AB_ENABLED`, `NARRATOR_AB_SINK`, `NARRATOR_THINKING_LEVEL` (high|medium|low|minimal, default high) (читається при старті процесу, на Render достатньо рестарту).
 
 ---
 

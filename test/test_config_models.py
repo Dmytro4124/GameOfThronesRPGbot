@@ -1,7 +1,7 @@
 """Stage A: model-name defaults and ENV override in config.py.
 
 config.py is loaded as a PRIVATE COPY (importlib.util.spec_from_file_location) instead of
-importlib.reload(config): reload would replace the shared EROTIC_USERS / GODMODE_USERS /
+importlib.reload(config): reload would replace the shared GODMODE_USERS /
 PUPPET_USERS / ADMIN set objects that other modules hold via `from config import ...`.
 `dotenv.load_dotenv` is patched to a no-op so a local .env cannot influence the defaults.
 The file is located relative to this test file, so a fake `config` placed in sys.modules by
@@ -36,15 +36,13 @@ def load_config():
 def test_load_does_not_touch_shared_config(load_config):
     import sys
     shared = sys.modules.get("config")
-    before = {n: id(getattr(shared, n)) for n in ("EROTIC_USERS", "GODMODE_USERS", "PUPPET_USERS")
+    before = {n: id(getattr(shared, n)) for n in ("GODMODE_USERS", "PUPPET_USERS")
               if shared is not None and hasattr(shared, n)}
     cfg = load_config()
     assert sys.modules.get("config") is shared
     assert _PRIVATE_NAME not in sys.modules
     for n, i in before.items():
         assert id(getattr(shared, n)) == i
-    if before:
-        assert cfg.EROTIC_USERS is not getattr(shared, "EROTIC_USERS")
 
 
 def test_flash_lite_id_value(load_config):

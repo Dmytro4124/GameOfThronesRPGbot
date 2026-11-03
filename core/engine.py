@@ -440,7 +440,7 @@ def _build_narrator_prompt(user_input, director_notes, npc_context_text,
                            player_name, player_house, current_scene,
                            current_location, impact_narrative_hints,
                            puppet_mode=False, recent_history_text=None,
-                           erotic_mode=False, active_roster=None, dead_npcs=None,
+                           active_roster=None, dead_npcs=None,
                            departing_roster_text="", arriving_roster_text="",
                            scene_continuity_block: str = "",
                            combat_log=None,
@@ -457,7 +457,6 @@ def _build_narrator_prompt(user_input, director_notes, npc_context_text,
         impact_narrative_hints=impact_narrative_hints,
         puppet_mode=puppet_mode,
         recent_history_text=recent_history_text,
-        erotic_mode=erotic_mode,
         active_roster=active_roster,
         dead_npcs=dead_npcs,
         departing_roster_text=departing_roster_text,
@@ -695,13 +694,10 @@ def _trace_finalize(trace, chat_id, global_start, marks: dict) -> None:
             f"  Narrator:      {_wrapper_desc(model_narrator)}"
             + (f" | A/B alt: {_wrapper_desc(model_narrator_alt)}" if ab_on else ""),
             f"  Narrator experiment: model={getattr(model_narrator, 'model_name', '?')} "
-            f"thinking_level={getattr(model_narrator, 'thinking_level', '?')} "
-            f"preamble_variant={getattr(model_narrator, 'preamble_variant', '?')}"
+            f"thinking_level={getattr(model_narrator, 'thinking_level', '?')}"
             + (f" | alt: model={getattr(model_narrator_alt, 'model_name', '?')} "
-               f"thinking_level={getattr(model_narrator_alt, 'thinking_level', '?')} "
-               f"preamble_variant={getattr(model_narrator_alt, 'preamble_variant', '?')}" if ab_on else ""),
+               f"thinking_level={getattr(model_narrator_alt, 'thinking_level', '?')}" if ab_on else ""),
             f"  Flags: GEMINI_EXPLICIT_CACHE_ENABLED={cache_on} NARRATOR_AB_ENABLED={ab_on} "
-            f"erotic={chat_id in getattr(_cfg, 'EROTIC_USERS', set())} "
             f"puppet={chat_id in getattr(_cfg, 'PUPPET_USERS', set())} "
             f"godmode={chat_id in getattr(_cfg, 'GODMODE_USERS', set())}",
             f"  Turn total time: {total:.2f}s",
@@ -1777,9 +1773,8 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
     _loc_hint = f"\n    ОПИС ПОТОЧНОЇ ЛОКАЦІЇ: {_curr_loc_desc}" if _curr_loc_desc else ""
 
     # ============ GM_LOGIC PROMPT (JSON стану світу, без story) ============
-    from config import PUPPET_USERS, EROTIC_USERS
+    from config import PUPPET_USERS
     _puppet_mode = chat_id in PUPPET_USERS
-    _erotic_mode = chat_id in EROTIC_USERS
     _scenes_block_str = format_scenes_for_prompt(curr_loc)
     _gm_mode = "COMBAT" if profile.get("mode") == "COMBAT" else "NORMAL"
     # For COMBAT mode, override action slots with combat buttons
@@ -1832,7 +1827,6 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
         user_input=user_input,
         action_slots=_action_slots,
         puppet_mode=_puppet_mode,
-        erotic_mode=_erotic_mode,
         absent_npcs=absent_npcs,
         dead_npcs=dead_npcs,
         scenes_block_str=_scenes_block_str,
@@ -2018,7 +2012,6 @@ async def process_game_turn(chat_id, user_input, progress_callback=None, narrato
             impact_narrative_hints=impact_narrative_hints,
             puppet_mode=_puppet_mode,
             recent_history_text=_recent_hist_text,
-            erotic_mode=_erotic_mode,
             active_roster=legal_npc_names,
             dead_npcs=dead_npcs,
             departing_roster_text=departing_npc_context if location_or_scene_changed else "",
