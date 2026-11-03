@@ -22,3 +22,6 @@ qa_logs/
 intro_cache.json
 intro_cache.tmp
 logs/
+
+# Довідкові PDF (правила D&D) — не трекаються
+*.pdf
